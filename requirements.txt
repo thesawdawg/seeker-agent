@@ -1,7 +1,5 @@
-# Core LLM
-anthropic>=0.40.0
-
-# HTTP & APIs
+# HTTP & APIs — the LLM router reaches every provider over plain HTTP,
+# so the pipeline needs no vendor SDK.
 requests>=2.31.0
 
 # Academic source handlers
@@ -9,6 +7,10 @@ arxiv>=2.1.0
 
 # Consensus MCP (optional — for OAuth MCP integration)
 mcp>=1.20.0
+
+# Optional: only tools/eval_claims.py and tools/eval_references.py use the
+# Anthropic SDK directly, and both degrade gracefully without it.
+# anthropic>=0.40.0
 
 # ConceptNet import tool
 # (no extra deps — uses stdlib sqlite3)

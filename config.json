@@ -71,7 +71,7 @@
     },
     {
       "theme_id": "philosophy_general",
-      "label": "Philosophy \u2014 General and Metaphysics",
+      "label": "Philosophy — General and Metaphysics",
       "keywords": [
         {
           "seed": "metaphysics",
@@ -472,7 +472,7 @@
           "seed": "periodization"
         },
         {
-          "seed": "longue dur\u00e9e"
+          "seed": "longue durée"
         },
         {
           "seed": "global history"
@@ -1130,7 +1130,7 @@
     "philpapers": {
       "api_url": "https://philpapers.org/api",
       "enabled": true,
-      "_note": "Optional \u2014 requires free registration at philpapers.org"
+      "_note": "Optional — requires free registration at philpapers.org"
     },
     "jstor": {
       "api_url": "https://api.jstor.org",
@@ -1163,17 +1163,17 @@
     "consensus": {
       "api_url": "https://api.consensus.app/v1/quick_search",
       "enabled": true,
-      "_note": "Disabled by default \u2014 high token cost across all themes. Enable per-agent in agent_sources. Or test standalone: python3 core/consensus_mcp.py \"query\""
+      "_note": "Disabled by default — high token cost across all themes. Enable per-agent in agent_sources. Or test standalone: python3 core/consensus_mcp.py \"query\""
     },
     "philarchive": {
       "api_url": "https://philarchive.org/oai.pl",
       "enabled": true,
-      "_note": "No credentials needed \u2014 open access OAI-PMH"
+      "_note": "No credentials needed — open access OAI-PMH"
     },
     "philsci": {
       "api_url": "https://philsci-archive.pitt.edu/cgi/oai2",
       "enabled": true,
-      "_note": "No credentials needed \u2014 philosophy of science preprints"
+      "_note": "No credentials needed — philosophy of science preprints"
     },
     "scopus": {
       "api_url": "https://api.elsevier.com/content/search/scopus",
@@ -1203,15 +1203,156 @@
       "consensus"
     ],
     "historian": [
-    "openalex",
-    "semantic_scholar",
-    "consensus"
+      "openalex",
+      "semantic_scholar",
+      "consensus"
     ],
-    
     "_notes": {
-      "social": "Primary discovery layer. consensus removed \u2014 high token cost per search across all themes.",
-      "grounder": "Seminal work search. consensus removed by default \u2014 add back if you want semantic search on sub-questions.",
+      "social": "Primary discovery layer. consensus removed — high token cost per search across all themes.",
+      "grounder": "Seminal work search. consensus removed by default — add back if you want semantic search on sub-questions.",
       "consensus_standalone": "Consensus is still available via: python3 core/consensus_mcp.py \"query\""
     }
+  },
+  "llm": {
+    "_description": "LLM routing. Any OpenAI-compatible endpoint works: set base_url and an api_key_env. 'kind' selects the wire format, not the vendor.",
+    "default_provider": "open-webui",
+    "providers": {
+      "open-webui": {
+        "kind": "openai",
+        "base_url": "http://localhost:3000/api",
+        "base_url_env": "OPENWEBUI_BASE_URL",
+        "api_key_env": "OPENWEBUI_API_KEY",
+        "models": {
+          "primary": "",
+          "light": ""
+        },
+        "_note": "Default. Key from Settings > Account. Chat at {base_url}/chat/completions, models at {base_url}/models."
+      },
+      "openai": {
+        "kind": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "base_url_env": "OPENAI_BASE_URL",
+        "api_key_env": "OPENAI_API_KEY",
+        "models": {
+          "primary": "gpt-4o",
+          "light": "gpt-4o-mini"
+        }
+      },
+      "ollama": {
+        "kind": "openai",
+        "base_url": "http://localhost:11434/v1",
+        "base_url_env": "OLLAMA_BASE_URL",
+        "api_key_env": "OLLAMA_API_KEY",
+        "api_key": "ollama",
+        "models": {
+          "primary": "deepseek-r1:8b",
+          "light": "llama3.2:3b"
+        },
+        "_note": "Ollama's OpenAI-compatible route. Ignores the api key, but one must be sent."
+      },
+      "lm-studio": {
+        "kind": "openai",
+        "base_url": "http://localhost:1234/v1",
+        "base_url_env": "LMSTUDIO_BASE_URL",
+        "api_key_env": "LMSTUDIO_API_KEY",
+        "api_key": "lm-studio",
+        "models": {
+          "primary": "",
+          "light": ""
+        }
+      },
+      "vllm": {
+        "kind": "openai",
+        "base_url": "http://localhost:8000/v1",
+        "base_url_env": "VLLM_BASE_URL",
+        "api_key_env": "VLLM_API_KEY",
+        "api_key": "vllm",
+        "models": {
+          "primary": "",
+          "light": ""
+        }
+      },
+      "openrouter": {
+        "kind": "openai",
+        "base_url": "https://openrouter.ai/api/v1",
+        "base_url_env": "OPENROUTER_BASE_URL",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "models": {
+          "primary": "",
+          "light": ""
+        }
+      },
+      "anthropic": {
+        "kind": "anthropic",
+        "base_url": "https://api.anthropic.com",
+        "base_url_env": "ANTHROPIC_BASE_URL",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "models": {
+          "primary": "claude-sonnet-4-5",
+          "light": "claude-haiku-4-5-20251001"
+        },
+        "_note": "One provider among many. Requires the 'anthropic' package."
+      }
+    },
+    "fallback_chain": [
+      {
+        "provider": "open-webui"
+      },
+      {
+        "provider": "ollama"
+      }
+    ],
+    "_fallback_chain_note": "Tried in order until one returns. Each entry may pin 'model' or 'model_role'; otherwise the agent's model_role is used.",
+    "defaults": {
+      "model_role": "primary",
+      "max_tokens": 8192,
+      "temperature": 0.7,
+      "timeout_seconds": 300,
+      "max_retries": 3,
+      "retry_delay_seconds": 5
+    },
+    "agents": {
+      "grounder": {
+        "model_role": "primary",
+        "max_tokens": 16000
+      },
+      "historian": {
+        "model_role": "primary",
+        "max_tokens": 10000
+      },
+      "gaper": {
+        "model_role": "primary",
+        "max_tokens": 12000
+      },
+      "vision": {
+        "model_role": "primary",
+        "max_tokens": 16000
+      },
+      "theorist": {
+        "model_role": "primary",
+        "max_tokens": 16000
+      },
+      "rude": {
+        "model_role": "primary",
+        "max_tokens": 10000
+      },
+      "synthesizer": {
+        "model_role": "primary",
+        "max_tokens": 10000
+      },
+      "thinker": {
+        "model_role": "primary",
+        "max_tokens": 12000
+      },
+      "social": {
+        "model_role": "light",
+        "max_tokens": 10000
+      },
+      "scribe": {
+        "model_role": "light",
+        "max_tokens": 12000
+      }
+    },
+    "_agents_note": "model_role picks 'primary' or 'light' from the active provider's models. Set an explicit 'model' or 'provider' on an agent to pin it."
   }
 }

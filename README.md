@@ -64,19 +64,36 @@ cd ..
 
 This produces `db/conceptnet.db` (~184 MB). If you skip this step, the concept mapper will use a simpler keyword-only mode.
 
-### 3. Configure API keys
+### 3. Configure a model provider
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` and add your Anthropic API key:
+SEEKER talks to **any OpenAI-compatible endpoint**. The default is
+[Open-WebUI](https://docs.openwebui.com/), using your personal API key from
+**Settings → Account**:
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...
+OPENWEBUI_BASE_URL=http://localhost:3000/api
+OPENWEBUI_API_KEY=sk-...
 ```
 
-**That's the only required key.** All academic sources (OpenAlex, Semantic Scholar, arXiv, CORE) are free and keyless.
+Then set which models to use in `config.json` under
+`llm.providers.open-webui.models`:
+
+```json
+"models": { "primary": "qwen3:32b", "light": "llama3.2:3b" }
+```
+
+**One working provider is all you need.** All academic sources (OpenAlex,
+Semantic Scholar, arXiv, CORE) are free and keyless.
+
+Check what is reachable and how each agent will route:
+
+```bash
+python3 main.py keys
+```
 
 ### 4. Run your first pipeline
 
@@ -103,35 +120,53 @@ python3 main.py run --problem "your problem" --run-id RUN-20260407-022355-242D -
 
 The pipeline detects which agents already completed (by checking the database) and skips them.
 
-## Using Ollama (Free, Local, No API Key)
+## Model Providers
 
-SEEKER works with local models via [Ollama](https://ollama.com/) as a fallback. No cloud API needed.
+Providers are declared in `config.json` under `llm.providers`. Each one is just
+a `base_url`, an API key, and the models it serves — so any OpenAI-compatible
+endpoint works without code changes.
 
-### Setup
+| Provider | `base_url` | Notes |
+|---|---|---|
+| `open-webui` | `http://localhost:3000/api` | **Default.** Key from Settings → Account |
+| `ollama` | `http://localhost:11434/v1` | Ollama's OpenAI-compatible route |
+| `lm-studio` | `http://localhost:1234/v1` | |
+| `vllm` | `http://localhost:8000/v1` | |
+| `openai` | `https://api.openai.com/v1` | |
+| `openrouter` | `https://openrouter.ai/api/v1` | |
+| `anthropic` | `https://api.anthropic.com` | One provider among many |
+
+Every `base_url` and key can be overridden by environment variable
+(`OPENWEBUI_BASE_URL`, `OLLAMA_BASE_URL`, …), so deployments never edit
+`config.json`.
+
+### Routing
+
+`llm.fallback_chain` is tried in order until a provider answers:
+
+```json
+"fallback_chain": [ { "provider": "open-webui" }, { "provider": "ollama" } ]
+```
+
+Each agent picks a **model role** rather than a model name, so routing survives
+a provider swap. Heavy reasoning agents use `primary`; Social and Scribe use
+`light`. Override per agent in `llm.agents` with an explicit `model`,
+`provider`, `max_tokens`, or `temperature`.
+
+### Using Ollama directly
 
 ```bash
-# Install Ollama
 curl -fsSL https://ollama.com/install.sh | sh
-
-# Pull a model (14B+ recommended for research quality)
 ollama pull qwen2.5:14b
-
-# Or a smaller model for testing
-ollama pull qwen2.5:7b
 ```
 
-### Configuration
+Set `OLLAMA_BASE_URL=http://localhost:11434/v1` in `.env` and put `ollama`
+first in `fallback_chain`. No API key is needed.
 
-Leave `ANTHROPIC_API_KEY` empty in your `.env` file. The pipeline auto-detects Ollama on `localhost:11434` and uses it for all agents.
+### What to expect from local models
 
-```
-# .env — leave blank for Ollama-only mode
-ANTHROPIC_API_KEY=
-```
-
-### What to expect
-
-Local models (7B–14B) produce usable results but with lower quality than Claude:
+Local models (7B–14B) produce usable results but with lower quality than large
+frontier models:
 - Sub-question decomposition may be shallower
 - JSON parsing failures are more frequent (the pipeline has fallback parsers)
 - Synthesis quality depends heavily on model size
@@ -212,7 +247,7 @@ basis_research_agents/
 │
 ├── core/                # Infrastructure
 │   ├── argument_tree.py # Persistent argument tree (TreeBuilder class)
-│   ├── llm.py           # LLM router (Claude primary, Ollama fallback)
+│   ├── llm.py           # LLM router (any OpenAI-compatible provider + fallback chain)
 │   ├── database.py      # SQLite schema (12 tables)
 │   ├── context.py       # Context assembly with tree injection
 │   ├── concept_mapper.py# Problem → theme activation (130 disciplines)
