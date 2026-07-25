@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SEEKER</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔎</text></svg>">
+</head>
+<body>
+
+<header class="topbar" id="topbar" hidden>
+  <div class="brand" role="button" tabindex="0" data-nav="runs">
+    <span class="logo">◎</span> SEEKER
+  </div>
+  <div class="topbar-right">
+    <span class="storage-badge" id="storage-badge"></span>
+    <span class="user-chip" id="user-chip"></span>
+    <button class="btn btn-ghost" id="btn-logout" type="button">Sign out</button>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ── Sign in ─────────────────────────────────────────────────────── -->
+  <section class="view view-centered" id="view-login">
+    <form class="card card-narrow" id="form-login">
+      <h1 class="card-title"><span class="logo">◎</span> SEEKER</h1>
+      <p class="muted">
+        Sign in with the API key for your own model provider. There is no
+        separate password — your provider key identifies you.
+      </p>
+
+      <label class="field">
+        <span class="field-label">Provider</span>
+        <select id="login-provider">
+          <option value="open-webui" selected>Open-WebUI</option>
+          <option value="openai">OpenAI</option>
+          <option value="ollama">Ollama</option>
+          <option value="lm-studio">LM Studio</option>
+          <option value="vllm">vLLM</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="anthropic">Anthropic</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="field-label">Base URL</span>
+        <input id="login-base-url" type="url" required
+               value="http://localhost:3000/api"
+               placeholder="http://localhost:3000/api">
+        <span class="field-hint" id="login-base-hint">
+          Open-WebUI: include the <code>/api</code> prefix.
+        </span>
+      </label>
+
+      <label class="field">
+        <span class="field-label">API key</span>
+        <input id="login-api-key" type="password" required
+               placeholder="sk-…" autocomplete="off">
+        <span class="field-hint">
+          Open-WebUI → Settings → Account → API keys.
+          Stored encrypted; never shown again.
+        </span>
+      </label>
+
+      <label class="field">
+        <span class="field-label">Display name <span class="muted">(optional)</span></span>
+        <input id="login-name" type="text" placeholder="How should we address you?">
+      </label>
+
+      <button class="btn btn-primary btn-block" type="submit" id="btn-login">
+        Sign in
+      </button>
+      <p class="error" id="login-error" hidden></p>
+    </form>
+  </section>
+
+  <!-- ── Run list ────────────────────────────────────────────────────── -->
+  <section class="view" id="view-runs" hidden>
+    <div class="view-head">
+      <h1>Your research runs</h1>
+      <button class="btn btn-primary" id="btn-new-run" type="button">New run</button>
+    </div>
+    <div id="runs-list" class="run-list"></div>
+    <p class="empty" id="runs-empty" hidden>
+      No runs yet. Start one to map the territory around a research problem.
+    </p>
+  </section>
+
+  <!-- ── New run ─────────────────────────────────────────────────────── -->
+  <section class="view" id="view-new" hidden>
+    <div class="view-head">
+      <h1>New run</h1>
+      <button class="btn btn-ghost" data-nav="runs" type="button">Cancel</button>
+    </div>
+
+    <form class="card" id="form-new-run">
+      <label class="field">
+        <span class="field-label">Research problem</span>
+        <textarea id="new-problem" rows="4" required minlength="8"
+          placeholder="How does identity influence intelligence through the lens of identity theory?"></textarea>
+        <span class="field-hint">
+          State a problem, not a keyword. The pipeline maps the territory —
+          it does not write your paper.
+        </span>
+      </label>
+
+      <label class="field">
+        <span class="field-label">Provider</span>
+        <select id="new-provider"></select>
+      </label>
+
+      <details class="disclosure">
+        <summary>Model routing <span class="muted">(optional)</span></summary>
+        <p class="muted small">
+          Leave blank to use the defaults from <code>config.json</code>.
+          You can change these later at any break.
+        </p>
+        <div id="new-model-grid" class="model-grid"></div>
+      </details>
+
+      <button class="btn btn-primary" type="submit" id="btn-start-run">
+        Start run
+      </button>
+      <p class="error" id="new-error" hidden></p>
+    </form>
+  </section>
+
+  <!-- ── Run detail ──────────────────────────────────────────────────── -->
+  <section class="view" id="view-run" hidden>
+    <div class="view-head">
+      <div>
+        <button class="btn btn-ghost btn-small" data-nav="runs" type="button">← All runs</button>
+        <h1 id="run-problem">…</h1>
+        <p class="muted small" id="run-meta"></p>
+      </div>
+      <div class="run-actions">
+        <span class="live-dot" id="live-dot" title="Live updates"></span>
+      </div>
+    </div>
+
+    <div class="run-layout">
+      <aside class="rail-panel">
+        <div class="rail-head">
+          <h2>Progress</h2>
+          <span class="progress-count" id="progress-count"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+        <ol class="rail" id="step-rail"></ol>
+      </aside>
+
+      <div class="run-main">
+        <nav class="tabs" id="run-tabs">
+          <button class="tab is-active" data-tab="overview" type="button">Overview</button>
+          <button class="tab" data-tab="break" type="button" id="tab-break" hidden>Break</button>
+          <button class="tab" data-tab="artifacts" type="button">Artifacts</button>
+        </nav>
+
+        <div class="tab-panel" id="panel-overview"></div>
+        <div class="tab-panel" id="panel-break" hidden></div>
+        <div class="tab-panel" id="panel-artifacts" hidden></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div class="modal-backdrop" id="modal" hidden>
+  <div class="modal card" role="dialog" aria-modal="true">
+    <h2 id="modal-title">Confirm</h2>
+    <div id="modal-body"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="modal-cancel" type="button">Cancel</button>
+      <button class="btn btn-danger" id="modal-confirm" type="button">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-stack" id="toasts"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
