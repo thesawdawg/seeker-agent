@@ -249,7 +249,21 @@ CREATE TABLE IF NOT EXISTS seminal_bank (
     status          TEXT DEFAULT 'pending_review' -- pending_review / approved / rejected
 );
 
+-- Human-in-the-loop break instructions, persisted verbatim.
+-- Without this, resuming a run loses the researcher's steering input.
+CREATE TABLE IF NOT EXISTS break_instructions (
+    instruction_id  TEXT PRIMARY KEY,
+    run_id          TEXT NOT NULL,
+    break_num       INTEGER NOT NULL,
+    instructions    TEXT NOT NULL,       -- raw text, exactly as the human wrote it
+    contradictions  TEXT DEFAULT '[]',   -- JSON array of contradiction notices
+    source          TEXT DEFAULT 'cli',  -- cli / web
+    created_at      TEXT NOT NULL,
+    UNIQUE (run_id, break_num)
+);
+
 -- Indexes for common queries
+CREATE INDEX IF NOT EXISTS idx_break_instr_run  ON break_instructions(run_id);
 CREATE INDEX IF NOT EXISTS idx_sources_type     ON sources(type);
 CREATE INDEX IF NOT EXISTS idx_sources_run      ON sources(run_id);
 CREATE INDEX IF NOT EXISTS idx_gaps_run         ON gaps(run_id);
@@ -389,6 +403,40 @@ def update_run_status(run_id: str, status: str) -> bool:
 def mark_break_done(run_id: str, break_num: int) -> bool:
     col = f"break{break_num}_done"
     return update("runs", {col: 1}, {"run_id": run_id})
+
+
+# ---------------------------------------------------------------------------
+# Break instructions — the human's steering input, persisted across resumes
+# ---------------------------------------------------------------------------
+
+def save_break_instructions(
+    run_id: str,
+    break_num: int,
+    instructions: str,
+    contradictions: list = None,
+    source: str = "cli",
+) -> bool:
+    """Persist a break's instructions verbatim. Replaces any prior submission."""
+    from core.utils import generate_id
+    return insert("break_instructions", {
+        "instruction_id": generate_id("BRK"),
+        "run_id":         run_id,
+        "break_num":      break_num,
+        "instructions":   instructions,
+        "contradictions": _json(contradictions or []),
+        "source":         source,
+        "created_at":     _now(),
+    })
+
+
+def get_break_instructions(run_id: str, break_num: int) -> Optional[dict]:
+    """Retrieve stored instructions for a break, or None if never submitted."""
+    rows = fetch("break_instructions", {"run_id": run_id, "break_num": break_num})
+    if not rows:
+        return None
+    row = rows[0]
+    row["contradictions"] = _from_json(row.get("contradictions"))
+    return row
 
 
 # ---------------------------------------------------------------------------

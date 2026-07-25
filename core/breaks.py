@@ -154,6 +154,13 @@ def _produce_break2_doc(run_id: str, problem: str) -> Path:
     ]
 
     if synthesis:
+        narrative    = (synthesis.get("full_narrative", "") or "")
+        trajectory   = (synthesis.get("trajectory_statement", "") or "")
+        tensions_raw = synthesis.get("key_tensions", "")
+        # Cap at readable lengths — full content always in database
+        narrative_display  = narrative[:1500]  + ("...[truncated — full text in DB]" if len(narrative)  > 1500  else "")
+        trajectory_display = trajectory[:800]  + ("...[truncated — full text in DB]" if len(trajectory) > 800   else "")
+        tensions_display   = str(tensions_raw)[:600] + ("..." if len(str(tensions_raw)) > 600 else "")
         lines += [
             "## Sharpened Problem Statement",
             synthesis.get("sharpened_problem", ""),
@@ -161,17 +168,17 @@ def _produce_break2_doc(run_id: str, problem: str) -> Path:
             "---",
             "",
             "## Research Narrative",
-            synthesis.get("full_narrative", ""),
+            narrative_display,
             "",
             "---",
             "",
             "## Trajectory Statement",
-            synthesis.get("trajectory_statement", ""),
+            trajectory_display,
             "",
             "---",
             "",
             "## Key Tensions",
-            str(synthesis.get("key_tensions", "")),
+            tensions_display,
             "",
             "---",
             "",
@@ -180,11 +187,14 @@ def _produce_break2_doc(run_id: str, problem: str) -> Path:
     lines += ["## Feasibility Verdicts (Rude)", ""]
     for e in evaluations:
         p = next((p for p in proposals if p["proposal_id"] == e["proposal_id"]), {})
+        proposal_text   = (p.get("proposal", "") or "")[:300]
+        verdict_reason  = (e.get("verdict_reason", "") or "")[:400]
+        weakest_link    = (e.get("weakest_empirical_link", "") or "")[:200]
         lines.append(
             f"- **[{e.get('proposal_id')}]** [{e.get('verdict')}]"
-            f"\n  Proposal: {p.get('proposal','')[:200]}..."
-            f"\n  Reason: {e.get('verdict_reason','')}"
-            f"\n  Weakest link: {e.get('weakest_empirical_link','')}"
+            f"\n  Proposal: {proposal_text}{'...' if len(p.get('proposal','') or '')>300 else ''}"
+            f"\n  Reason: {verdict_reason}{'...' if len(e.get('verdict_reason','') or '')>400 else ''}"
+            f"\n  Weakest link: {weakest_link}{'...' if len(e.get('weakest_empirical_link','') or '')>200 else ''}"
         )
 
     lines += [
@@ -328,6 +338,7 @@ def break0(run_id: str, problem: str, selected_themes: list, excluded_themes: li
     doc_path = _produce_break0_doc(run_id, problem, selected_themes, excluded_themes)
     instructions = _wait_for_instruction_file(doc_path, "BREAK 0")
     contradictions = _check_contradictions(instructions, run_id, 0)
+    db.save_break_instructions(run_id, 0, instructions, contradictions)
     db.mark_break_done(run_id, 0)
     if contradictions:
         logger.info(f"Break 0: {len(contradictions)} contradiction(s) noted")
@@ -342,6 +353,7 @@ def break1(run_id: str, problem: str) -> str:
     doc_path = _produce_break1_doc(run_id, problem)
     instructions = _wait_for_instruction_file(doc_path, "BREAK 1")
     contradictions = _check_contradictions(instructions, run_id, 1)
+    db.save_break_instructions(run_id, 1, instructions, contradictions)
     db.mark_break_done(run_id, 1)
     if contradictions:
         contradiction_log = "\n".join(contradictions)
@@ -358,12 +370,45 @@ def break2(run_id: str, problem: str) -> str:
     doc_path = _produce_break2_doc(run_id, problem)
     instructions = _wait_for_instruction_file(doc_path, "BREAK 2")
     contradictions = _check_contradictions(instructions, run_id, 2)
+    db.save_break_instructions(run_id, 2, instructions, contradictions)
     db.mark_break_done(run_id, 2)
     if contradictions:
         contradiction_log = "\n".join(contradictions)
         logger.info(f"Break 2: {len(contradictions)} contradiction(s) logged")
         instructions = instructions + f"\n\n--- CONTRADICTION LOG ---\n{contradiction_log}"
     return instructions
+
+
+def resume_instructions(run_id: str, break_num: int) -> str:
+    """
+    Recover a completed break's instructions when resuming a run.
+
+    Order of preference:
+      1. The database (authoritative — stored verbatim at submission time)
+      2. The review document on disk (runs that predate persistence)
+      3. "CONFIRMED" (nothing recoverable)
+    """
+    stored = db.get_break_instructions(run_id, break_num)
+    if stored and stored.get("instructions"):
+        instructions = stored["instructions"]
+        contradictions = stored.get("contradictions") or []
+        if contradictions:
+            instructions += "\n\n--- CONTRADICTION LOG ---\n" + "\n".join(contradictions)
+        logger.info(f"Break {break_num}: instructions recovered from database")
+        return instructions
+
+    doc_path = ARTIFACTS_DIR / f"{run_id}_break{break_num}_review.md"
+    if doc_path.exists():
+        instructions = _extract_instructions(doc_path.read_text())
+        if instructions:
+            logger.info(f"Break {break_num}: instructions recovered from {doc_path}")
+            return instructions
+
+    logger.warning(
+        f"Break {break_num}: no stored instructions for {run_id} — "
+        f"resuming with CONFIRMED. Human steering for this break is lost."
+    )
+    return "CONFIRMED"
 
 
 def parse_scribe_requests(instructions: str) -> list[dict]:

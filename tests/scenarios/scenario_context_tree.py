@@ -11,7 +11,7 @@ TEST_DB = Path("/tmp/test_context_tree.db")
 if TEST_DB.exists():
     TEST_DB.unlink()
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Patch DB paths before importing
 import core.argument_tree as at

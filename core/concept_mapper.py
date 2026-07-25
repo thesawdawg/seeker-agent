@@ -28,7 +28,7 @@ from core.utils import generate_id
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).parent / "db" / "pipeline.db"
+DB_PATH = Path(__file__).parent.parent / "db" / "pipeline.db"
 CONCEPT_MAP_PATH = Path(__file__).parent.parent / "concept_map.json"
 
 CONCEPTNET_DB_PATH = Path(__file__).parent.parent / "db" / "conceptnet.db"

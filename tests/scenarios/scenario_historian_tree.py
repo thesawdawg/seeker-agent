@@ -10,7 +10,7 @@ TEST_DB = Path("/tmp/test_historian_tree.db")
 if TEST_DB.exists():
     TEST_DB.unlink()
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import core.argument_tree as at
 at.DB_PATH = TEST_DB
 
