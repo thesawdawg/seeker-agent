@@ -266,6 +266,34 @@ def test_audit_note_reads_fields_by_name(mysql_db):
         tree.close()
 
 
+def test_pipeline_state_machine_on_mysql(mysql_db, monkeypatch):
+    """run_steps carries a UNIQUE (run_id, step_name) — it must hold on MySQL."""
+    from core import pipeline
+
+    monkeypatch.setattr(pipeline, "_run_agent_step", lambda *a: None)
+    monkeypatch.setattr(pipeline, "_run_concept_mapper", lambda *a: None)
+
+    run_id = pipeline.create_run("Does the state machine work on MySQL?")
+    assert len(pipeline.get_steps(run_id)) == len(pipeline.STEP_DEFS)
+
+    # ensure_steps must not duplicate rows under ON DUPLICATE KEY UPDATE
+    pipeline.ensure_steps(run_id)
+    assert mysql_db.count("run_steps", {"run_id": run_id}) == len(pipeline.STEP_DEFS)
+
+    state = pipeline.advance(run_id, config={"themes": []})
+    assert state["awaiting_break"] == 0
+
+    pipeline.submit_break(run_id, 0, "CONFIRMED")
+    state = pipeline.advance(run_id, config={"themes": []})
+    assert state["awaiting_break"] == 1
+
+    # Cascade reset must clear downstream rows on MySQL too
+    reset = pipeline.reset_step(run_id, "grounder")
+    assert "scribe" in reset
+    assert pipeline.get_step(run_id, "grounder")["status"] == "pending"
+    assert pipeline.get_step(run_id, "break0")["status"] == "done"
+
+
 def test_concept_cache_on_mysql(mysql_db):
     """concept_mapper used to write to its own phantom database."""
     from core import concept_mapper

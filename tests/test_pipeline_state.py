@@ -1,0 +1,452 @@
+"""
+Pipeline state machine.
+
+Covers the inversion that makes the pipeline drivable over HTTP: steps as
+persisted records, parking at breaks without blocking, resuming, re-running a
+completed step, and cascade invalidation of downstream work.
+
+Agents are stubbed — this is about control flow, not agent behaviour.
+"""
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+@pytest.fixture()
+def env(tmp_path, monkeypatch):
+    """Isolated SQLite database plus a minimal config."""
+    import core.database as db
+    from core import db_backend, pipeline
+
+    monkeypatch.setenv("SEEKER_DB_BACKEND", "sqlite")
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "pipeline.db")
+    db_backend.reset_backend()
+    pipeline._schema_ready = False
+    db.init_db()
+    pipeline.init_steps_table()
+
+    config = {"themes": [
+        {"theme_id": "philosophy_of_mind", "label": "Philosophy of Mind",
+         "keywords": [{"seed": "consciousness"}]},
+        {"theme_id": "social_identity", "label": "Social Identity",
+         "keywords": [{"seed": "identity"}]},
+    ]}
+    yield db, pipeline, config
+    db_backend.reset_backend()
+    pipeline._schema_ready = False
+
+
+@pytest.fixture()
+def stub_agents(monkeypatch):
+    """Replace agent execution with a recorder."""
+    from core import pipeline
+    calls = []
+
+    def fake_agent(step_name, run_id, problem, config):
+        calls.append(step_name)
+
+    def fake_mapper(run_id, problem, config):
+        calls.append("concept_mapper")
+
+    monkeypatch.setattr(pipeline, "_run_agent_step", fake_agent)
+    monkeypatch.setattr(pipeline, "_run_concept_mapper", fake_mapper)
+    return calls
+
+
+# ---------------------------------------------------------------------------
+# Step records
+# ---------------------------------------------------------------------------
+
+def test_create_run_registers_all_steps(env):
+    db, pipeline, _ = env
+    run_id = pipeline.create_run("A problem")
+
+    steps = pipeline.get_steps(run_id)
+    assert [s["step_name"] for s in steps] == [s.name for s in pipeline.STEP_DEFS]
+    assert all(s["status"] == "pending" for s in steps)
+    assert [s["ordinal"] for s in steps] == sorted(s["ordinal"] for s in steps)
+
+
+def test_ensure_steps_is_idempotent(env):
+    db, pipeline, _ = env
+    run_id = pipeline.create_run("A problem")
+    pipeline.ensure_steps(run_id)
+    pipeline.ensure_steps(run_id)
+    assert len(pipeline.get_steps(run_id)) == len(pipeline.STEP_DEFS)
+
+
+# ---------------------------------------------------------------------------
+# Parking at breaks
+# ---------------------------------------------------------------------------
+
+def test_advance_parks_at_break0_without_blocking(env, stub_agents):
+    """The whole point: reaching a break returns instead of waiting on stdin."""
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+
+    state = pipeline.advance(run_id, config=config)
+
+    assert state["awaiting_break"] == 0
+    assert state["current_step"] == "break0"
+    assert not state["complete"]
+    assert stub_agents == ["concept_mapper"], "should stop before Grounder"
+    assert db.get_run(run_id)["status"] == "awaiting_break0"
+
+
+def test_advance_is_idempotent_while_parked(env, stub_agents):
+    """Polling a parked run must not re-run work or move it forward."""
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+
+    pipeline.advance(run_id, config=config)
+    stub_agents.clear()
+    state = pipeline.advance(run_id, config=config)
+
+    assert state["awaiting_break"] == 0
+    assert stub_agents == []
+
+
+def test_full_run_stops_at_each_break_in_order(env, stub_agents):
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+
+    seen = []
+    for _ in range(10):
+        state = pipeline.advance(run_id, config=config)
+        if state["complete"]:
+            break
+        assert state["awaiting_break"] is not None
+        seen.append(state["awaiting_break"])
+        pipeline.submit_break(run_id, state["awaiting_break"], "CONFIRMED")
+
+    assert seen == [0, 1, 2]
+    assert pipeline.get_state(run_id)["complete"]
+    assert db.get_run(run_id)["status"] == "completed"
+    assert stub_agents == [
+        "concept_mapper", "grounder", "social", "historian", "gaper",
+        "vision", "theorist", "rude", "synthesizer", "thinker", "scribe",
+    ]
+
+
+def test_submit_break_persists_and_releases(env, stub_agents):
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+
+    pipeline.submit_break(run_id, 0, "ADD THEME: social_identity", source="web")
+
+    stored = db.get_break_instructions(run_id, 0)
+    assert stored["instructions"] == "ADD THEME: social_identity"
+    assert stored["source"] == "web"
+    assert db.get_run(run_id)["break0_done"] == 1
+    assert pipeline.get_step(run_id, "break0")["status"] == "done"
+
+    state = pipeline.advance(run_id, config=config)
+    assert state["awaiting_break"] == 1, "should proceed to the next break"
+
+
+def test_empty_break_answer_defaults_to_confirmed(env, stub_agents):
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+
+    pipeline.submit_break(run_id, 0, "   ")
+    assert db.get_break_instructions(run_id, 0)["instructions"] == "CONFIRMED"
+
+
+# ---------------------------------------------------------------------------
+# Failure handling
+# ---------------------------------------------------------------------------
+
+def test_failed_step_halts_and_records_error(env, monkeypatch):
+    db, pipeline, config = env
+
+    def boom(step_name, run_id, problem, config):
+        if step_name == "grounder":
+            raise RuntimeError("search backend exploded")
+
+    monkeypatch.setattr(pipeline, "_run_agent_step", boom)
+    monkeypatch.setattr(pipeline, "_run_concept_mapper", lambda *a: None)
+
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+    pipeline.submit_break(run_id, 0, "CONFIRMED")
+    state = pipeline.advance(run_id, config=config)
+
+    assert state["failed_steps"] == ["grounder"]
+    step = pipeline.get_step(run_id, "grounder")
+    assert step["status"] == "failed"
+    assert "search backend exploded" in step["error"]
+    assert db.get_run(run_id)["status"] == "failed:grounder"
+
+
+def test_non_fatal_step_is_skipped_not_fatal(env, monkeypatch):
+    """Social is a discovery layer — an outage must not sink the run."""
+    db, pipeline, config = env
+    reached = []
+
+    def selective(step_name, run_id, problem, config):
+        reached.append(step_name)
+        if step_name == "social":
+            raise RuntimeError("source API down")
+
+    monkeypatch.setattr(pipeline, "_run_agent_step", selective)
+    monkeypatch.setattr(pipeline, "_run_concept_mapper", lambda *a: None)
+
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+    pipeline.submit_break(run_id, 0, "CONFIRMED")
+    state = pipeline.advance(run_id, config=config)
+
+    assert pipeline.get_step(run_id, "social")["status"] == "skipped"
+    assert state["failed_steps"] == []
+    assert "historian" in reached, "should carry on past Social"
+    assert state["awaiting_break"] == 1
+
+
+def test_resume_after_failure_retries_only_that_step(env, monkeypatch):
+    db, pipeline, config = env
+    attempts = {"n": 0}
+
+    def flaky(step_name, run_id, problem, config):
+        if step_name == "grounder":
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RuntimeError("transient")
+
+    monkeypatch.setattr(pipeline, "_run_agent_step", flaky)
+    monkeypatch.setattr(pipeline, "_run_concept_mapper", lambda *a: None)
+
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+    pipeline.submit_break(run_id, 0, "CONFIRMED")
+    pipeline.advance(run_id, config=config)
+    assert pipeline.get_step(run_id, "grounder")["status"] == "failed"
+
+    # A failed step is retried on the next advance, and the run moves on
+    state = pipeline.advance(run_id, config=config)
+    assert pipeline.get_step(run_id, "grounder")["status"] == "done"
+    assert state["awaiting_break"] == 1
+    assert pipeline.get_step(run_id, "break0")["status"] == "done", "break not re-asked"
+
+
+def test_resume_never_steps_over_a_failed_step(env, monkeypatch):
+    """
+    A failed step must stay the next step. Treating it as finished would run
+    the rest of the pipeline on missing data — silent, and hard to notice.
+    """
+    db, pipeline, config = env
+
+    def always_fails(step_name, run_id, problem, config):
+        if step_name == "grounder":
+            raise RuntimeError("permanent")
+
+    monkeypatch.setattr(pipeline, "_run_agent_step", always_fails)
+    monkeypatch.setattr(pipeline, "_run_concept_mapper", lambda *a: None)
+
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+    pipeline.submit_break(run_id, 0, "CONFIRMED")
+
+    for _ in range(3):
+        state = pipeline.advance(run_id, config=config)
+        assert state["current_step"] == "grounder"
+        assert not state["complete"]
+
+    assert pipeline.get_step(run_id, "social")["status"] == "pending"
+    assert pipeline.get_step(run_id, "grounder")["attempt"] >= 3
+
+
+# ---------------------------------------------------------------------------
+# Re-running steps
+# ---------------------------------------------------------------------------
+
+def test_downstream_steps_ordering(env):
+    _, pipeline, _ = env
+    downstream = pipeline.downstream_steps("gaper")
+    assert downstream[0] == "break1"
+    assert downstream[-1] == "scribe"
+    assert "grounder" not in downstream
+
+
+def test_rerun_cascades_and_purges_outputs(env, stub_agents):
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+
+    for _ in range(4):
+        state = pipeline.advance(run_id, config=config)
+        if state["complete"]:
+            break
+        pipeline.submit_break(run_id, state["awaiting_break"], "CONFIRMED")
+
+    # Outputs that a re-run must discard
+    db.insert_gap({"gap_id": "GAP-1", "run_id": run_id,
+                   "description": "a gap", "significance": "High"})
+    db.insert_implication({"implication_id": "IMP-1", "run_id": run_id,
+                           "implication": "an implication"})
+    assert db.count("gaps", {"run_id": run_id}) == 1
+
+    reset = pipeline.reset_step(run_id, "gaper")
+
+    assert "gaper" in reset and "vision" in reset and "scribe" in reset
+    assert "grounder" not in reset, "upstream work must survive"
+    assert db.count("gaps", {"run_id": run_id}) == 0
+    assert db.count("implications", {"run_id": run_id}) == 0
+    assert pipeline.get_step(run_id, "gaper")["status"] == "pending"
+    assert pipeline.get_step(run_id, "grounder")["status"] == "done"
+
+
+def test_rerun_a_break_reopens_it(env, stub_agents):
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+    pipeline.submit_break(run_id, 0, "ADD THEME: social_identity")
+    pipeline.advance(run_id, config=config)
+
+    pipeline.reset_step(run_id, "break0")
+
+    assert db.get_break_instructions(run_id, 0) is None
+    assert db.get_run(run_id)["break0_done"] == 0
+    state = pipeline.advance(run_id, config=config)
+    assert state["awaiting_break"] == 0, "the break should be asked again"
+
+
+def test_rerun_only_leaves_downstream_alone(env, stub_agents):
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+    for _ in range(4):
+        state = pipeline.advance(run_id, config=config)
+        if state["complete"]:
+            break
+        pipeline.submit_break(run_id, state["awaiting_break"], "CONFIRMED")
+
+    pipeline.reset_step(run_id, "vision", cascade=False)
+
+    assert pipeline.get_step(run_id, "vision")["status"] == "pending"
+    assert pipeline.get_step(run_id, "theorist")["status"] == "done"
+
+
+def test_rerun_unknown_step_raises(env):
+    _, pipeline, _ = env
+    run_id = pipeline.create_run("A problem")
+    with pytest.raises(ValueError):
+        pipeline.reset_step(run_id, "not_a_step")
+
+
+# ---------------------------------------------------------------------------
+# Break payloads — what the web UI renders
+# ---------------------------------------------------------------------------
+
+def test_break0_payload_lists_themes_with_selection(env, stub_agents):
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+
+    payload = pipeline.break_payload(run_id, 0, config)
+
+    assert payload["break_num"] == 0
+    assert payload["answered"] is False
+    ids = {t["theme_id"] for t in payload["fields"]["themes"]}
+    assert ids == {"philosophy_of_mind", "social_identity"}
+    assert any(d["command"].startswith("ADD THEME") for d in payload["directives"])
+    assert Path(payload["document"]).exists()
+
+
+def test_break1_payload_carries_gaps_and_sources(env, stub_agents):
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+    pipeline.submit_break(run_id, 0, "CONFIRMED")
+    pipeline.advance(run_id, config=config)
+
+    db.insert_gap({"gap_id": "GAP-7", "run_id": run_id,
+                   "description": "No longitudinal data", "significance": "High"})
+    db.upsert_source({"source_id": "SRC-1", "title": "Mind, Self and Society",
+                      "type": "seminal", "run_id": run_id, "year": 1934})
+
+    payload = pipeline.break_payload(run_id, 1, config)
+    assert [g["gap_id"] for g in payload["fields"]["gaps"]] == ["GAP-7"]
+    assert [s["title"] for s in payload["fields"]["seminal"]] == ["Mind, Self and Society"]
+
+
+def test_payload_reports_a_previously_answered_break(env, stub_agents):
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+    pipeline.submit_break(run_id, 0, "REMOVE THEME: social_identity")
+
+    payload = pipeline.break_payload(run_id, 0, config)
+    assert payload["answered"] is True
+    assert payload["instructions"] == "REMOVE THEME: social_identity"
+
+
+# ---------------------------------------------------------------------------
+# Theme directives — the shared language between CLI and web
+# ---------------------------------------------------------------------------
+
+def test_apply_theme_directives(env):
+    from core import breaks
+    _, _, config = env
+    all_themes = config["themes"]
+    selected = [all_themes[0]]
+
+    added = breaks.apply_theme_directives("ADD THEME: social_identity",
+                                          selected, all_themes)
+    assert {t["theme_id"] for t in added} == {"philosophy_of_mind", "social_identity"}
+
+    removed = breaks.apply_theme_directives("REMOVE THEME: philosophy_of_mind",
+                                           selected, all_themes)
+    assert removed == []
+
+    unknown = breaks.apply_theme_directives("ADD THEME: does_not_exist",
+                                            selected, all_themes)
+    assert {t["theme_id"] for t in unknown} == {"philosophy_of_mind"}
+
+
+def test_break0_directives_reach_the_social_step(env, monkeypatch):
+    """A Break 0 theme change must actually alter what Social searches."""
+    from core import pipeline as pl
+    db, pipeline, config = env
+    captured = {}
+
+    def capture(step_name, run_id, problem, config_):
+        if step_name == "social":
+            captured["themes"] = [
+                t["theme_id"] for t in pl._selected_themes(run_id, config_)
+            ]
+
+    monkeypatch.setattr(pipeline, "_run_agent_step", capture)
+    monkeypatch.setattr(pipeline, "_run_concept_mapper", lambda *a: None)
+
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+    pipeline.submit_break(run_id, 0, "REMOVE THEME: social_identity")
+    pipeline.advance(run_id, config=config)
+
+    assert captured["themes"] == ["philosophy_of_mind"]
+
+
+# ---------------------------------------------------------------------------
+# State shape consumed by the CLI and (next) the HTTP API
+# ---------------------------------------------------------------------------
+
+def test_get_state_shape(env, stub_agents):
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A research problem")
+    pipeline.advance(run_id, config=config)
+
+    state = pipeline.get_state(run_id)
+    for key in ("run_id", "exists", "problem", "status", "steps", "current_step",
+                "running", "awaiting_break", "progress", "failed_steps", "complete"):
+        assert key in state, f"missing {key}"
+    assert state["progress"]["total"] == len(pipeline.STEP_DEFS)
+    assert state["progress"]["done"] >= 1
+    assert all("label" in s for s in state["steps"])
+
+
+def test_get_state_for_unknown_run(env):
+    _, pipeline, _ = env
+    assert pipeline.get_state("RUN-NOPE")["exists"] is False
