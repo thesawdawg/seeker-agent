@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS run_steps (
     started_at    {TEXT},
     finished_at   {TEXT},
     error         {LONGTEXT},
+    activity      {TEXT},              -- what the step is doing right now
+    activity_at   {TEXT},
     UNIQUE (run_id, step_name)
 );
 
@@ -77,6 +79,13 @@ def init_steps_table():
         return
     from core import db_backend
     db_backend.get_backend().init_schema(STEPS_SCHEMA)
+    # Columns added after run_steps first shipped. CREATE TABLE IF NOT EXISTS
+    # does nothing to an existing table, so they must be reconciled explicitly
+    # or every write to them fails silently.
+    db_backend.ensure_columns("run_steps", {
+        "activity":    "{TEXT}",
+        "activity_at": "{TEXT}",
+    })
     _schema_ready = True
 
 
@@ -523,11 +532,14 @@ def _advance_loop(run_id: str, problem: str, config: dict,
         db.update_run_status(run_id, "active")
         logger.info(f"[{run_id}] ▶ {step_def.label}")
 
+        from core import progress
+        progress_token = progress.bind(run_id, name)
         try:
             if name == "concept_mapper":
                 _run_concept_mapper(run_id, problem, config)
             else:
                 _run_agent_step(name, run_id, problem, config)
+            progress.clear()
             set_step_status(run_id, name, "done")
             logger.info(f"[{run_id}] ✓ {step_def.label}")
         except Exception as e:
@@ -539,6 +551,8 @@ def _advance_loop(run_id: str, problem: str, config: dict,
                 set_step_status(run_id, name, "failed", error=str(e))
                 db.update_run_status(run_id, f"failed:{name}")
                 break
+        finally:
+            progress.release(progress_token)
 
         executed += 1
 

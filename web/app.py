@@ -323,7 +323,9 @@ def run_status(run_id: str, user: dict = Depends(auth.resolve_user)):
         "steps": [
             {"name": s["step_name"], "label": s["label"], "status": s["status"],
              "error": s.get("error"), "started_at": s.get("started_at"),
-             "finished_at": s.get("finished_at")}
+             "finished_at": s.get("finished_at"),
+             # What this step is talking to right now, e.g. "Consensus — searching"
+             "activity": s.get("activity"), "activity_at": s.get("activity_at")}
             for s in state["steps"]
         ],
     }
@@ -396,12 +398,30 @@ def submit_break(run_id: str, break_num: int, body: BreakSubmission,
 
 @app.get("/api/steps")
 def list_steps():
-    """The pipeline's shape — for rendering the progress rail."""
-    return {"steps": [
-        {"name": s.name, "kind": s.kind, "label": s.label,
-         "break_num": s.break_num}
-        for s in pipeline.STEP_DEFS
-    ]}
+    """
+    The pipeline's shape, and which external services each step uses.
+
+    Lets the UI say what a step will talk to before it runs, and show live
+    activity against that list while it does.
+    """
+    from core import progress
+    config = load_config()
+    agent_sources = config.get("agent_sources", {})
+
+    out = []
+    for step in pipeline.STEP_DEFS:
+        services = [s for s in agent_sources.get(step.name, [])
+                    if isinstance(s, str) and not s.startswith("_")]
+        if step.kind == "agent" and not services:
+            services = ["llm"]          # reasoning-only agents still call a model
+        elif step.name == "concept_mapper":
+            services = ["conceptnet", "llm"]
+        out.append({
+            "name": step.name, "kind": step.kind, "label": step.label,
+            "break_num": step.break_num,
+            "services": [{"id": s, "label": progress.label_for(s)} for s in services],
+        })
+    return {"steps": out}
 
 
 @app.get("/api/runs/{run_id}/steps/{step_name}/impact")

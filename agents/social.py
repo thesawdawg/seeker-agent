@@ -25,6 +25,7 @@ from pathlib import Path
 from core import database as db
 from core.utils import generate_id, match_themes_to_problem, load_config
 from core import llm
+from core import progress
 from core.rate_limiter import get_limiter
 
 logger = logging.getLogger(__name__)
@@ -825,6 +826,7 @@ def _collect_for_theme(
             continue
 
         limiter.print_source_start(source_id, theme_id, query)
+        progress.note(source_id, f"searching ({theme_id})", query)
 
         try:
             results = handler.search(

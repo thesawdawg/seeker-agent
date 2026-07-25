@@ -26,6 +26,7 @@ from typing import Optional
 
 from core import database as db
 from core import llm
+from core import progress
 from core.utils import generate_id, load_config
 
 logger = logging.getLogger(__name__)
@@ -570,33 +571,39 @@ def run(context: str, run_id: str, **kwargs):
 
         # Academic papers — OpenAlex
         if paper_query and _src_on("openalex"):
+            progress.note("openalex", "searching", paper_query)
             results = _search_openalex(paper_query, limit=4)
             time.sleep(0.2)
             _process_results(results, "OpenAlex", "paper")
 
         # Academic papers — Semantic Scholar
         if paper_query and _src_on("semantic_scholar"):
+            progress.note("semantic_scholar", "searching", paper_query)
             results = _search_semantic_scholar(paper_query, limit=3)
             _process_results(results, "S2", "paper")
 
         # Academic papers — Consensus
         if paper_query and _src_on("consensus"):
+            progress.note("consensus", "searching", paper_query)
             results = _search_consensus(paper_query)
             _process_results(results, "Consensus", "paper")
 
         # Books — Google Books
         if book_query and _src_on("google_books"):
+            progress.note("google_books", "searching", book_query)
             results = _search_google_books(book_query, limit=3)
             time.sleep(0.5)
             _process_results(results, "GoogleBooks", "book")
 
         # Books — Open Library
         if book_query and _src_on("open_library"):
+            progress.note("openlibrary", "searching", book_query)
             results = _search_open_library(book_query, limit=3)
             _process_results(results, "OpenLibrary", "book")
 
         # Web search — broader coverage
         if web_query and _src_on("web"):
+            progress.note("web_search", "searching", web_query)
             results = _search_web(web_query)
             _process_results(results, "WebSearch", "other")
 
