@@ -57,6 +57,15 @@ CREATE TABLE IF NOT EXISTS run_steps (
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_steps_run ON run_steps(run_id);
+
+-- Per-agent model choices for one run, set at creation or changed at a break.
+-- Persisted rather than held in memory because the worker that runs the
+-- agents is a different process from the web app that receives the change.
+CREATE TABLE IF NOT EXISTS run_model_overrides (
+    run_id      {ID} PRIMARY KEY,
+    overrides   {LONGTEXT} NOT NULL,   -- JSON {agent: {model, provider, ...}}
+    updated_at  {TEXT}
+);
 """
 
 _schema_ready = False
@@ -518,6 +527,65 @@ def advance(run_id: str, problem: str = None, config: dict = None,
         executed += 1
 
     return get_state(run_id)
+
+
+def set_model_overrides(run_id: str, overrides: dict) -> dict:
+    """
+    Record per-agent model choices for a run, and apply them in this process.
+
+    Merges with anything already stored, so a break can adjust one agent
+    without resetting the rest.
+    """
+    import json
+    from core import llm
+
+    init_steps_table()
+    known = set(STEP_BY_NAME)
+    cleaned = {k.lower(): v for k, v in (overrides or {}).items()
+               if k.lower() in known and isinstance(v, dict)}
+    if not cleaned:
+        return get_model_overrides(run_id)
+
+    merged = get_model_overrides(run_id)
+    for agent, spec in cleaned.items():
+        merged.setdefault(agent, {}).update(
+            {k: v for k, v in spec.items() if v is not None}
+        )
+
+    db.insert("run_model_overrides", {
+        "run_id":     run_id,
+        "overrides":  json.dumps(merged),
+        "updated_at": _now(),
+    })
+    llm.set_run_overrides(run_id, merged)
+    return merged
+
+
+def get_model_overrides(run_id: str) -> dict:
+    """Stored per-agent model choices for a run."""
+    import json
+    init_steps_table()
+    rows = db.fetch("run_model_overrides", {"run_id": run_id})
+    if not rows:
+        return {}
+    try:
+        return json.loads(rows[0].get("overrides") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def apply_model_overrides(run_id: str) -> dict:
+    """
+    Load a run's stored model choices into this process.
+
+    The worker calls this before advancing, since the choices were made in
+    the web process.
+    """
+    from core import llm
+    overrides = get_model_overrides(run_id)
+    if overrides:
+        llm.set_run_overrides(run_id, overrides)
+    return overrides
 
 
 def create_run(problem: str, run_id: str = None) -> str:

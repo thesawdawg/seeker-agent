@@ -240,7 +240,36 @@ _TRANSPORTS = {"openai": _post_openai, "anthropic": _post_anthropic}
 # ---------------------------------------------------------------------------
 
 _run_overrides: dict = {}
+_run_providers: dict = {}
 _overrides_lock = threading.Lock()
+
+
+def set_run_providers(run_id: str, providers: dict) -> None:
+    """
+    Supply provider configs for one run, overlaying config.json.
+
+    This is how a multi-user deployment runs the pipeline against the
+    requesting user's own endpoint and API key: the worker loads their stored
+    credentials and registers them here before advancing the run. Credentials
+    never touch global state, so concurrent runs for different users cannot
+    borrow each other's keys.
+    """
+    with _overrides_lock:
+        current = dict(_run_providers.get(run_id) or {})
+        current.update({name: cfg for name, cfg in (providers or {}).items() if cfg})
+        _run_providers[run_id] = current
+    logger.info(f"[LLM] Provider overlay set for run {run_id}: "
+                f"{sorted((providers or {}).keys())}")
+
+
+def get_run_providers(run_id: str) -> dict:
+    with _overrides_lock:
+        return dict(_run_providers.get(run_id) or {})
+
+
+def clear_run_providers(run_id: str) -> None:
+    with _overrides_lock:
+        _run_providers.pop(run_id, None)
 
 
 def set_run_overrides(run_id: str, overrides: dict) -> None:
@@ -308,14 +337,22 @@ class LLMClient:
         """
         profile = _apply_overrides(self.settings.profile_for(agent_name), agent_name, run_id)
 
+        # A run's own providers win over config.json, and are tried first —
+        # the user configured them precisely so their run uses them.
+        run_providers = get_run_providers(run_id) if run_id else {}
+
         if profile.provider:
             steps = [ChainStep(profile.provider, profile.model, profile.model_role)]
         else:
             steps = list(self.settings.chain)
+            known = {s.provider for s in steps}
+            steps = ([ChainStep(name) for name in run_providers if name not in known]
+                     + steps)
 
         attempts = []
         for step in steps:
-            provider = self.settings.providers.get(step.provider)
+            provider = run_providers.get(step.provider) or \
+                self.settings.providers.get(step.provider)
             if not provider:
                 continue
             if not provider.configured:
@@ -435,7 +472,8 @@ class LLMClient:
         raise LLMError(f"[{agent_name}] All LLM providers failed. Tried: {tried}")
 
     def _plan_single(self, provider_name, agent_name, run_id):
-        prov = self.settings.providers.get(provider_name)
+        prov = (get_run_providers(run_id).get(provider_name) if run_id else None) \
+            or self.settings.providers.get(provider_name)
         if not prov or not prov.configured:
             return []
         profile = _apply_overrides(self.settings.profile_for(agent_name), agent_name, run_id)
