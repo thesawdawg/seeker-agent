@@ -29,6 +29,9 @@ const state = {
   tab: 'overview',
   breakDraft: null,   // in-progress break edits
   pollTimer: null,
+  activityLog: [],    // accumulated service notes for this run
+  activitySeen: null, // dedupe key set, reset per run
+  elapsedTimer: null,
 };
 
 /* ── tiny helpers ────────────────────────────────────────────────────── */
@@ -381,6 +384,8 @@ async function openRun(runId) {
   state.runId = runId;
   state.tab = 'overview';
   state.breakDraft = null;
+  state.activityLog = [];
+  state.activitySeen = new Set();
   showView('run');
 
   const detail = await api(`/api/runs/${runId}`);
@@ -409,12 +414,16 @@ function startPolling() {
 function stopPolling() {
   if (state.pollTimer) clearTimeout(state.pollTimer);
   state.pollTimer = null;
+  stopElapsedTicker();
 }
 
 async function refreshStatus() {
   const previous = state.status;
   const status = await api(`/api/runs/${state.runId}/status`);
   state.status = status;
+
+  if (!state.activitySeen) state.activitySeen = new Set();
+  recordActivity(status);
 
   renderRail(status);
   renderTabs(status);
@@ -468,6 +477,7 @@ function renderRail(status) {
       ? (step.activity || services)
       : (step.status === 'pending' ? services : '');
 
+    const elapsed = stepElapsed(step);
     const row = el('li', {
       class: `rail-step status-${step.status} ${isBreak ? 'is-break' : ''} ` +
              `${step.name === status.current_step ? 'is-current' : ''}`,
@@ -475,7 +485,11 @@ function renderRail(status) {
     },
       el('span', { class: 'rail-step-icon' }, icon),
       el('span', { class: 'rail-step-body' },
-        el('span', { class: 'rail-step-label', text: step.label }),
+        el('span', { class: 'rail-step-label' },
+          step.label,
+          elapsed !== null
+            ? el('span', { class: 'rail-step-time', text: fmtDuration(elapsed) })
+            : null),
         detail ? el('span', { class: 'rail-step-detail', text: detail }) : null,
       ),
     );
@@ -503,62 +517,242 @@ function renderTabs(status) {
   }
 }
 
-function renderOverview(status) {
+/*
+ * The overview is rebuilt in place rather than from scratch on each poll, so
+ * the activity log keeps its history and the page does not flicker every two
+ * seconds.
+ */
+function ensureOverviewSkeleton() {
   const panel = $('#panel-overview');
+  if ($('#live-card', panel)) return panel;
   clear(panel);
+  panel.append(
+    el('div', { id: 'live-card' }),
+    el('div', { id: 'stat-grid', class: 'stat-grid' }),
+    el('div', { id: 'routing-note' }),
+    el('div', { class: 'review-group' },
+      el('h3', {},
+        'Activity log',
+        el('span', { class: 'muted small', id: 'activity-count' })),
+      el('p', { class: 'muted small',
+                text: 'Every service the pipeline contacts, newest last.' }),
+      el('div', { class: 'activity-log', id: 'activity-log' },
+        el('p', { class: 'muted small', text: 'Waiting for the first step…' })),
+    ),
+  );
+  return panel;
+}
+
+function fmtDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  const total = Math.floor(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+           : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function stepElapsed(step) {
+  if (!step || !step.started_at) return null;
+  const start = new Date(step.started_at).getTime();
+  if (Number.isNaN(start)) return null;
+  const end = step.finished_at ? new Date(step.finished_at).getTime() : Date.now();
+  return end - start;
+}
+
+/* The prominent "what is happening right now" card. */
+function renderLiveCard(status) {
+  const card = $('#live-card');
+  if (!card) return;
+  clear(card);
+
+  const running = status.steps.find(s => s.status === 'running');
+  const shape = running ? state.steps.find(s => s.name === running.name) : null;
+  const services = shape ? (shape.services || []).map(s => s.label) : [];
+  const position = running
+    ? status.steps.findIndex(s => s.name === running.name) + 1 : 0;
 
   if (status.failed_steps.length) {
     const failed = status.steps.find(s => s.status === 'failed');
-    panel.append(el('div', { class: 'break-header' },
-      el('h2', { text: `Stopped at ${failed ? failed.label : status.failed_steps[0]}` }),
-      el('p', { class: 'small', text: (failed && failed.error) || '' }),
-      el('button', {
-        class: 'btn btn-small', type: 'button',
-        onClick: () => retryRun(),
-      }, 'Retry this step'),
+    card.append(el('div', { class: 'live-card is-failed' },
+      el('div', { class: 'live-head' },
+        el('h2', { text: `Stopped at ${failed ? failed.label : status.failed_steps[0]}` })),
+      el('p', { class: 'live-activity', text: (failed && failed.error) || '' }),
+      el('button', { class: 'btn btn-small', type: 'button',
+                     onClick: () => retryRun() }, 'Retry this step'),
     ));
-  } else if (status.awaiting_break !== null) {
-    panel.append(el('div', { class: 'break-header' },
-      el('h2', { text: `Break ${status.awaiting_break} — your turn` }),
-      el('p', { class: 'small',
-                text: 'The pipeline is paused. Review what it found, then set the direction.' }),
-      el('button', {
-        class: 'btn btn-primary btn-small', type: 'button',
-        onClick: () => openBreak(status.awaiting_break),
-      }, 'Review and respond'),
-    ));
-  } else if (status.complete) {
-    panel.append(el('div', { class: 'break-header' },
-      el('h2', { text: 'Pipeline complete' }),
-      el('p', { class: 'small', text: 'Your outputs are under Artifacts.' }),
-    ));
+    return;
   }
 
-  api(`/api/runs/${state.runId}`).then(detail => {
-    if (state.tab !== 'overview' || state.runId !== detail.run_id) return;
-    const counts = detail.counts || {};
-    const grid = el('div', { class: 'stat-grid' });
-    for (const [key, label] of [
-      ['sources', 'Sources'], ['gaps', 'Gaps'], ['implications', 'Implications'],
-      ['proposals', 'Proposals'], ['evaluations', 'Evaluations'],
-      ['directions', 'Directions'], ['artifacts', 'Artifacts'],
-    ]) {
-      grid.append(el('div', { class: 'stat' },
-        el('div', { class: 'stat-value', text: counts[key] ?? 0 }),
-        el('div', { class: 'stat-label', text: label }),
-      ));
-    }
-    panel.append(grid);
+  if (status.awaiting_break !== null) {
+    card.append(el('div', { class: 'live-card is-break' },
+      el('div', { class: 'live-head' },
+        el('h2', { text: `Break ${status.awaiting_break} — your turn` })),
+      el('p', { class: 'live-activity',
+                text: 'The pipeline is paused. Nothing runs until you respond.' }),
+      el('button', { class: 'btn btn-primary btn-small', type: 'button',
+                     onClick: () => openBreak(status.awaiting_break) },
+        'Review and respond'),
+    ));
+    return;
+  }
 
-    const overrides = detail.model_overrides || {};
-    if (Object.keys(overrides).length) {
-      panel.append(el('div', { class: 'review-group' },
-        el('h3', {}, 'Model routing for this run'),
-        el('div', { class: 'directive-preview',
-          text: Object.entries(overrides)
-            .map(([agent, spec]) => `${agent}: ${spec.model || spec.provider || ''}`)
-            .join('\n') }),
-      ));
+  if (status.complete) {
+    card.append(el('div', { class: 'live-card is-done' },
+      el('div', { class: 'live-head' }, el('h2', { text: 'Pipeline complete' })),
+      el('p', { class: 'live-activity',
+                text: 'All 14 steps finished. Your outputs are under Artifacts.' }),
+    ));
+    return;
+  }
+
+  if (running) {
+    card.append(el('div', { class: 'live-card is-running' },
+      el('div', { class: 'live-head' },
+        el('span', { class: 'spinner spinner-lg' }),
+        el('h2', { text: running.label }),
+        el('span', { class: 'live-elapsed', id: 'live-elapsed',
+                     'data-started': running.started_at || '',
+                     text: fmtDuration(stepElapsed(running)) }),
+      ),
+      el('p', { class: 'live-activity', id: 'live-activity',
+                text: running.activity || 'starting…' }),
+      el('p', { class: 'live-meta', text:
+        `Step ${position} of ${status.progress.total}` +
+        (services.length ? ` · uses ${services.join(', ')}` : '') }),
+    ));
+    return;
+  }
+
+  card.append(el('div', { class: 'live-card' },
+    el('div', { class: 'live-head' },
+      el('span', { class: 'spinner spinner-lg' }),
+      el('h2', { text: status.queued ? 'Queued' : 'Starting' })),
+    el('p', { class: 'live-activity',
+              text: status.queued
+                ? 'Waiting for a worker to pick this run up…'
+                : 'Preparing the next step…' }),
+  ));
+}
+
+/*
+ * Accumulate distinct activity notes as polling observes them, so the page
+ * shows a history of what was contacted rather than only the latest line.
+ */
+function recordActivity(status) {
+  let added = 0;
+  for (const step of status.steps) {
+    if (!step.activity) continue;
+    const key = `${step.name}|${step.activity}`;
+    if (state.activitySeen.has(key)) continue;
+    state.activitySeen.add(key);
+    state.activityLog.push({
+      at: step.activity_at || new Date().toISOString(),
+      step: step.label,
+      text: step.activity,
+    });
+    added++;
+  }
+  if (added) {
+    state.activityLog.sort((a, b) => (a.at || '').localeCompare(b.at || ''));
+    // Keep memory bounded on very long runs
+    if (state.activityLog.length > 400) {
+      state.activityLog = state.activityLog.slice(-400);
+    }
+  }
+  return added;
+}
+
+function renderActivityLog() {
+  const log = $('#activity-log');
+  if (!log) return;
+  clear(log);
+
+  const count = $('#activity-count');
+  if (count) {
+    count.textContent = state.activityLog.length
+      ? `${state.activityLog.length} events` : '';
+  }
+
+  if (!state.activityLog.length) {
+    log.append(el('p', { class: 'muted small',
+      text: 'Nothing reported yet — the first step will appear here.' }));
+    return;
+  }
+
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  for (const entry of state.activityLog) {
+    const [service, ...rest] = entry.text.split(' — ');
+    log.append(el('div', { class: 'activity-row' },
+      el('span', { class: 'activity-time',
+                   text: (entry.at || '').slice(11, 19) }),
+      el('span', { class: 'activity-step', text: entry.step }),
+      el('span', { class: 'activity-service', text: service }),
+      el('span', { class: 'activity-detail', text: rest.join(' — ') }),
+    ));
+  }
+  // Follow the tail unless the reader has scrolled up to look at history
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+/* A one-second timer so elapsed time moves between polls. */
+function startElapsedTicker() {
+  stopElapsedTicker();
+  state.elapsedTimer = setInterval(() => {
+    const node = $('#live-elapsed');
+    if (!node) return;
+    const started = node.dataset.started;
+    if (!started) return;
+    const ms = Date.now() - new Date(started).getTime();
+    node.textContent = fmtDuration(ms);
+  }, 1000);
+}
+
+function stopElapsedTicker() {
+  if (state.elapsedTimer) clearInterval(state.elapsedTimer);
+  state.elapsedTimer = null;
+}
+
+function renderOverview(status) {
+  ensureOverviewSkeleton();
+  renderLiveCard(status);
+  renderActivityLog();
+
+  if (status.running || status.queued) startElapsedTicker();
+  else stopElapsedTicker();
+
+  api(`/api/runs/${state.runId}`).then(detail => {
+    if (state.runId !== detail.run_id) return;
+    const grid = $('#stat-grid');
+    if (grid) {
+      clear(grid);
+      const counts = detail.counts || {};
+      for (const [key, label] of [
+        ['sources', 'Sources'], ['gaps', 'Gaps'], ['implications', 'Implications'],
+        ['proposals', 'Proposals'], ['evaluations', 'Evaluations'],
+        ['directions', 'Directions'], ['artifacts', 'Artifacts'],
+      ]) {
+        grid.append(el('div', { class: 'stat' },
+          el('div', { class: 'stat-value', text: counts[key] ?? 0 }),
+          el('div', { class: 'stat-label', text: label }),
+        ));
+      }
+    }
+
+    const note = $('#routing-note');
+    if (note) {
+      clear(note);
+      const overrides = detail.model_overrides || {};
+      if (Object.keys(overrides).length) {
+        note.append(el('div', { class: 'review-group' },
+          el('h3', {}, 'Model routing for this run'),
+          el('div', { class: 'directive-preview',
+            text: Object.entries(overrides)
+              .map(([agent, spec]) => `${agent}: ${spec.model || spec.provider || ''}`)
+              .join('\n') }),
+        ));
+      }
     }
   }).catch(() => { /* overview stats are non-essential */ });
 }
