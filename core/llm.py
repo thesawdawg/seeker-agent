@@ -18,6 +18,7 @@ models mid-pipeline) are registered with set_run_overrides() and take precedence
 over config for that run only.
 """
 
+import contextvars
 import os
 import time
 import logging
@@ -243,6 +244,30 @@ _run_overrides: dict = {}
 _run_providers: dict = {}
 _overrides_lock = threading.Lock()
 
+# The run currently being executed.
+#
+# Agents call llm.call(prompt, system, agent_name=...) without a run_id — that
+# is the seam's whole value, and threading an extra argument through every call
+# site would mean any new one silently loses per-run routing. The driver sets
+# this once per step instead, and call() falls back to it.
+_current_run: contextvars.ContextVar = contextvars.ContextVar("seeker_run_id", default=None)
+
+
+def set_current_run(run_id: Optional[str]):
+    """Bind subsequent LLM calls to a run. Returns a token for reset()."""
+    return _current_run.set(run_id)
+
+
+def current_run() -> Optional[str]:
+    return _current_run.get()
+
+
+def reset_current_run(token) -> None:
+    try:
+        _current_run.reset(token)
+    except (ValueError, LookupError):
+        _current_run.set(None)
+
 
 def set_run_providers(run_id: str, providers: dict) -> None:
     """
@@ -335,6 +360,9 @@ class LLMClient:
         A pinned provider on the agent replaces the chain; the chain is the
         fallback ladder otherwise.
         """
+        # Resolved here rather than only in call(), so describe_plan() and
+        # every other consumer see the same routing an agent would get.
+        run_id = run_id or current_run()
         profile = _apply_overrides(self.settings.profile_for(agent_name), agent_name, run_id)
 
         # A run's own providers win over config.json, and are tried first —
@@ -445,8 +473,10 @@ class LLMClient:
         Route one completion, walking the fallback chain until one succeeds.
 
         provider — pin a single provider for this call, bypassing the chain.
-        run_id   — apply any per-run model overrides set at a break.
+        run_id   — apply per-run routing. Defaults to the run the driver bound
+                   with set_current_run(), so agents need not pass it.
         """
+        run_id = run_id or current_run()
         if provider:
             attempts = [
                 (p, m, prof) for p, m, prof in self._plan(agent_name, run_id)
@@ -472,6 +502,7 @@ class LLMClient:
         raise LLMError(f"[{agent_name}] All LLM providers failed. Tried: {tried}")
 
     def _plan_single(self, provider_name, agent_name, run_id):
+        run_id = run_id or current_run()
         prov = (get_run_providers(run_id).get(provider_name) if run_id else None) \
             or self.settings.providers.get(provider_name)
         if not prov or not prov.configured:
@@ -575,7 +606,8 @@ def call(
     provider: Optional[str] = None,
 ) -> str:
     """Convenience function — use this in agents."""
-    return get_client().call(prompt, system, agent_name, run_id, provider)
+    return get_client().call(prompt, system, agent_name,
+                             run_id or current_run(), provider)
 
 
 def list_models(provider_name: Optional[str] = None) -> list[str]:

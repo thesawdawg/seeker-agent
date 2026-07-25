@@ -430,6 +430,112 @@ def test_break0_directives_reach_the_social_step(env, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Per-run LLM routing actually reaching the agents
+#
+# Agents call llm.call(prompt, system, agent_name=...) with no run_id. If the
+# driver does not bind the run, a user's own provider and any model override
+# are silently ignored and every agent falls through to config.json.
+# ---------------------------------------------------------------------------
+
+def test_advance_binds_the_run_for_llm_calls(env, monkeypatch):
+    from core import llm, pipeline as pl
+    db, pipeline, config = env
+    seen = []
+
+    def capture(step_name, run_id, problem, config_):
+        # Exactly how agents call it — no run_id argument
+        seen.append((step_name, llm.current_run()))
+
+    monkeypatch.setattr(pipeline, "_run_agent_step", capture)
+    monkeypatch.setattr(pipeline, "_run_concept_mapper",
+                        lambda r, p, c: seen.append(("concept_mapper", llm.current_run())))
+
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+    pipeline.submit_break(run_id, 0, "CONFIRMED")
+    pipeline.advance(run_id, config=config)
+
+    assert seen, "no steps ran"
+    for step_name, bound in seen:
+        assert bound == run_id, f"{step_name} ran without the run bound"
+
+
+def test_binding_is_cleared_after_advance(env, stub_agents):
+    """A worker handles many runs; the binding must not leak between them."""
+    from core import llm
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+    assert llm.current_run() is None
+
+
+def test_a_users_provider_reaches_an_agents_call(env, monkeypatch):
+    """The end-to-end path M4 depends on, exercised through advance()."""
+    from core import llm
+    db, pipeline, config = env
+    resolved = {}
+
+    def capture(step_name, run_id, problem, config_):
+        if step_name == "grounder":
+            # No run_id passed — the plan must still find the user's provider
+            resolved['plan'] = llm.get_client().describe_plan("grounder")
+
+    monkeypatch.setattr(pipeline, "_run_agent_step", capture)
+    monkeypatch.setattr(pipeline, "_run_concept_mapper", lambda *a: None)
+
+    run_id = pipeline.create_run("A problem")
+    llm.set_run_providers(run_id, {"their-owui": llm.ProviderConfig(
+        name="their-owui", kind="openai", base_url="http://their-host/api",
+        api_key="sk-theirs", models={"primary": "their-model"})})
+    try:
+        pipeline.advance(run_id, config=config)
+        pipeline.submit_break(run_id, 0, "CONFIRMED")
+        pipeline.advance(run_id, config=config)
+
+        plan = resolved.get('plan')
+        assert plan, "grounder never ran"
+        assert plan[0]["provider"] == "their-owui"
+        assert plan[0]["model"] == "their-model"
+    finally:
+        llm.clear_run_providers(run_id)
+
+
+def test_stored_model_override_reaches_an_agents_call(env, monkeypatch):
+    """A model chosen at a break must apply without agents passing run_id."""
+    from core import llm
+    db, pipeline, config = env
+    resolved = {}
+
+    def capture(step_name, run_id, problem, config_):
+        if step_name == "vision":
+            resolved['plan'] = llm.get_client().describe_plan("vision")
+
+    monkeypatch.setattr(pipeline, "_run_agent_step", capture)
+    monkeypatch.setattr(pipeline, "_run_concept_mapper", lambda *a: None)
+
+    run_id = pipeline.create_run("A problem")
+    llm.set_run_providers(run_id, {"owui": llm.ProviderConfig(
+        name="owui", kind="openai", base_url="http://host/api",
+        api_key="k", models={"primary": "default-model"})})
+    try:
+        pipeline.advance(run_id, config=config)
+        pipeline.submit_break(run_id, 0, "CONFIRMED")
+        pipeline.set_model_overrides(run_id, {"vision": {"model": "chosen-at-break"}})
+        # Simulate a fresh worker process: only the database carries the choice
+        llm.clear_run_overrides(run_id)
+
+        pipeline.advance(run_id, config=config)
+        pipeline.submit_break(run_id, 1, "CONFIRMED")
+        pipeline.advance(run_id, config=config)
+
+        assert resolved.get('plan'), "vision never ran"
+        assert resolved['plan'][0]["model"] == "chosen-at-break"
+    finally:
+        llm.clear_run_providers(run_id)
+        llm.clear_run_overrides(run_id)
+
+
+# ---------------------------------------------------------------------------
 # State shape consumed by the CLI and (next) the HTTP API
 # ---------------------------------------------------------------------------
 

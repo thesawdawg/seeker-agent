@@ -476,6 +476,22 @@ def advance(run_id: str, problem: str = None, config: dict = None,
     ensure_steps(run_id)
     executed = 0
 
+    # Bind LLM calls to this run for the duration. Agents call
+    # llm.call(prompt, system, agent_name=...) without a run_id, so without
+    # this the run's own providers and model overrides would never apply.
+    from core import llm
+    apply_model_overrides(run_id)
+    run_token = llm.set_current_run(run_id)
+    try:
+        return _advance_loop(run_id, problem, config, max_steps)
+    finally:
+        llm.reset_current_run(run_token)
+
+
+def _advance_loop(run_id: str, problem: str, config: dict,
+                  max_steps: Optional[int]) -> dict:
+    executed = 0
+
     while True:
         if max_steps is not None and executed >= max_steps:
             break

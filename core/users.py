@@ -149,6 +149,23 @@ def set_credentials(user_id: str, provider: str, base_url: str,
     return public_credentials(record)
 
 
+def set_models(user_id: str, provider: str, models: dict) -> Optional[dict]:
+    """
+    Update only which models a provider serves for each role.
+
+    Separate from set_credentials because the API key is never returned to
+    the client, so the UI cannot re-submit it just to change a model.
+    """
+    import json
+    row = get_credentials_row(user_id, provider)
+    if not row:
+        return None
+    db.update("user_credentials",
+              {"models": json.dumps(models or {}), "updated_at": _now()},
+              {"user_id": user_id, "provider": provider})
+    return public_credentials(get_credentials_row(user_id, provider))
+
+
 def get_credentials_row(user_id: str, provider: str) -> Optional[dict]:
     init_users_tables()
     rows = db.fetch("user_credentials", {"user_id": user_id, "provider": provider})
