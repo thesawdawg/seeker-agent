@@ -35,3 +35,6 @@ exports/
 # OS
 .DS_Store
 Thumbs.db
+
+# Web frontend build output (M5)
+web/static/*.map
