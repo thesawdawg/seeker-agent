@@ -106,6 +106,13 @@ class BreakSubmission(BaseModel):
     )
 
 
+class ModelRolesRequest(BaseModel):
+    models: dict = Field(
+        default_factory=dict,
+        description='Which model fills each role, e.g. {"primary": "qwen3:32b", "light": "llama3.2:3b"}',
+    )
+
+
 class RerunRequest(BaseModel):
     cascade: bool = True
 
@@ -177,6 +184,23 @@ def put_credentials(body: CredentialRequest,
     stored = users.set_credentials(user["user_id"], body.provider,
                                    body.base_url, body.api_key, body.models)
     return {"credential": stored, "available_models": models}
+
+
+@app.patch("/api/credentials/{provider}/models")
+def patch_credential_models(provider: str, body: ModelRolesRequest,
+                            user: dict = Depends(auth.resolve_user)):
+    """
+    Set which model fills each role for a provider.
+
+    Agents choose a role ('primary' or 'light'), not a model name, so this is
+    what makes a freshly configured provider actually usable. Separate from
+    PUT /api/credentials because the API key is never returned to the client.
+    """
+    updated = users.set_models(user["user_id"], provider, body.models)
+    if not updated:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"No credentials stored for provider '{provider}'")
+    return {"credential": updated}
 
 
 @app.delete("/api/credentials/{provider}")

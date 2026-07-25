@@ -261,6 +261,53 @@ function collectModelOverrides(container) {
   return overrides;
 }
 
+function currentCredential() {
+  const name = $('#new-provider').value;
+  return state.providers.find(c => c.provider === name) || state.providers[0] || {};
+}
+
+/*
+ * Agents choose a model *role*, not a model name, so a provider with no roles
+ * assigned has nothing for them to call. A freshly signed-in user has none, so
+ * this is asked for before the first run rather than failing mid-pipeline.
+ */
+function buildRoleGrid() {
+  const grid = $('#role-grid');
+  clear(grid);
+  const models = (currentCredential().models) || {};
+
+  if (!state.models.length) {
+    grid.append(el('p', { class: 'muted small',
+      text: 'Could not list models from your provider. Check it is reachable, ' +
+            'then reload — the pipeline needs at least one model.' }));
+    return;
+  }
+
+  for (const [role, help] of [
+    ['primary', 'Grounder, Historian, Gaper, Vision, Theorist, Rude, Synthesizer, Thinker'],
+    ['light',   'Social, Scribe'],
+  ]) {
+    grid.append(el('div', { class: 'model-row' },
+      el('label', { for: `role-${role}`, text: role }),
+      el('select', { id: `role-${role}`, 'data-role': role },
+        [el('option', { value: '', text: role === 'light' ? 'same as primary' : 'choose a model…' })]
+          .concat(state.models.map(name => el('option', {
+            value: name, selected: models[role] === name, text: name,
+          })))),
+      el('span', { class: 'field-hint', text: help }),
+    ));
+  }
+}
+
+function collectRoles() {
+  const roles = {};
+  $$('#role-grid select[data-role]').forEach(select => {
+    if (select.value) roles[select.dataset.role] = select.value;
+  });
+  if (roles.primary && !roles.light) roles.light = roles.primary;
+  return roles;
+}
+
 function showNewRun() {
   showView('new');
   const providerSelect = $('#new-provider');
@@ -268,22 +315,45 @@ function showNewRun() {
   for (const cred of state.providers) {
     providerSelect.append(el('option', { value: cred.provider, text: cred.provider }));
   }
+  buildRoleGrid();
   buildModelGrid($('#new-model-grid'));
   $('#new-error').hidden = true;
+  $('#role-warning').hidden = true;
 }
 
 function wireNewRun() {
   $('#btn-new-run').addEventListener('click', showNewRun);
+  $('#new-provider').addEventListener('change', () => {
+    loadModels().then(() => { buildRoleGrid(); buildModelGrid($('#new-model-grid')); });
+  });
 
   $('#form-new-run').addEventListener('submit', async ev => {
     ev.preventDefault();
     const button = $('#btn-start-run');
     const error = $('#new-error');
     error.hidden = true;
+
+    // Without a primary model the run would start and then fail at the first
+    // agent, so it is refused here instead.
+    const roles = collectRoles();
+    if (!roles.primary) {
+      $('#role-warning').hidden = false;
+      $('#role-primary')?.focus();
+      return;
+    }
+    $('#role-warning').hidden = true;
+
     button.disabled = true;
     button.textContent = 'Starting…';
 
     try {
+      const provider = $('#new-provider').value;
+      const saved = await api(
+        `/api/credentials/${encodeURIComponent(provider)}/models`,
+        { method: 'PATCH', body: { models: roles } });
+      const index = state.providers.findIndex(c => c.provider === provider);
+      if (index >= 0) state.providers[index] = saved.credential;
+
       const body = await api('/api/runs', {
         method: 'POST',
         body: {

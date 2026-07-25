@@ -226,6 +226,56 @@ def test_stored_key_is_encrypted_at_rest(client, provider):
     assert cfg.api_key == provider.valid_key
 
 
+def test_model_roles_can_be_set_without_resending_the_key(client, provider):
+    """
+    Agents pick a role, not a model name, so a provider with no roles assigned
+    has nothing for them to call. The key is never returned to the client, so
+    roles must be settable on their own.
+    """
+    from core import users
+    sign_in(client, provider)
+    me = client.get("/api/auth/me").json()
+    assert me["credentials"][0]["models"] == {}, "a new sign-in has no roles yet"
+
+    resp = client.patch("/api/credentials/open-webui/models",
+                        json={"models": {"primary": "qwen3:32b",
+                                         "light": "llama3.2:3b"}})
+    assert resp.status_code == 200
+    assert resp.json()["credential"]["models"]["primary"] == "qwen3:32b"
+
+    # ...and the roles reach the provider config the worker builds
+    cfg = users.provider_config(me["user_id"], "open-webui")
+    assert cfg.model_for_role("primary") == "qwen3:32b"
+    assert cfg.model_for_role("light") == "llama3.2:3b"
+    assert cfg.api_key == provider.valid_key, "the key must survive a roles update"
+
+
+def test_model_roles_for_unknown_provider_is_404(client, provider):
+    sign_in(client, provider)
+    assert client.patch("/api/credentials/vllm/models",
+                        json={"models": {"primary": "x"}}).status_code == 404
+
+
+def test_configured_roles_make_the_run_plan_usable(client, provider):
+    """The end the gap actually mattered at: an agent resolving a model."""
+    from core import llm, users
+    sign_in(client, provider)
+    me = client.get("/api/auth/me").json()
+    client.patch("/api/credentials/open-webui/models",
+                 json={"models": {"primary": "qwen3:32b", "light": "llama3.2:3b"}})
+
+    run_id = "RUN-PLAN-1"
+    llm.set_run_providers(run_id, {
+        "open-webui": users.provider_config(me["user_id"], "open-webui")})
+    try:
+        plan = llm.get_client().describe_plan("grounder", run_id)
+        assert plan and plan[0]["provider"] == "open-webui"
+        assert plan[0]["model"] == "qwen3:32b"
+        assert llm.get_client().describe_plan("scribe", run_id)[0]["model"] == "llama3.2:3b"
+    finally:
+        llm.clear_run_providers(run_id)
+
+
 def test_put_credentials_validates_before_storing(client, provider):
     sign_in(client, provider)
     resp = client.put("/api/credentials", json={

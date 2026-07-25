@@ -150,10 +150,39 @@ vision  theorist  rude  synthesizer  break2  thinker  scribe
 The CLI drives the pipeline for one person on one machine. The web interface
 serves multiple researchers, each using their own model provider and API key.
 
+### With Docker (recommended)
+
+```bash
+cp .env.example .env
+echo "SEEKER_SECRET_KEY=$(python3 -c \
+  'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> .env
+
+docker compose up -d
+```
+
+Then open **http://localhost:8000**.
+
+Five services: `mysql`, `redis`, a one-shot `conceptnet` unpacker, `web`, and
+`worker`. Compose **refuses to start without `SEEKER_SECRET_KEY`** rather than
+leaving users' provider keys unprotected.
+
+```bash
+docker compose logs -f worker      # watch the pipeline
+docker compose up -d --scale worker=3   # more concurrent runs
+docker compose down                # stop; volumes and data persist
+```
+
+> **Reaching a provider on your host.** Containers cannot see your host's
+> `localhost`. If Open-WebUI runs on the host machine, sign in with the Docker
+> gateway address rather than `localhost` — e.g.
+> `http://172.17.0.1:3000/api`, or `http://host.docker.internal:3000/api` on
+> Docker Desktop. A provider running in another container is reachable by its
+> service name.
+
+### Without Docker
+
 ```bash
 pip install -r requirements.txt
-
-# Required — encrypts users' stored provider API keys
 export SEEKER_SECRET_KEY=$(python3 -c \
   "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
 
@@ -163,6 +192,9 @@ uvicorn web.app:app --host 0.0.0.0 --port 8000
 # Terminal 2 — worker (claims jobs and advances runs)
 python3 worker.py
 ```
+
+Defaults to SQLite and in-process sessions, which is fine for one web process.
+Set `MYSQL_URL` and `REDIS_URL` for anything larger.
 
 ### How it fits together
 
@@ -183,6 +215,11 @@ There are no passwords. A user signs in with the API key for their own model
 provider — Open-WebUI by default. The key is validated against the provider,
 then identifies the account by fingerprint.
 
+On the first run you also choose which model fills each **role**: `primary`
+for the heavy reasoning agents, `light` for Social and Scribe. Agents pick a
+role rather than a model name, so routing survives changing provider. These are
+saved against your provider and reused.
+
 Provider keys are **encrypted at rest** with `SEEKER_SECRET_KEY` and never
 returned by the API; endpoints expose only a masked hint. Without that
 variable the app refuses to store a key rather than keeping it in plaintext.
@@ -198,6 +235,7 @@ integration replaces it and leaves every route, model and worker untouched.
 | `GET` | `/api/auth/me` | Current user and configured providers |
 | `PUT` | `/api/credentials` | Add/replace a provider's endpoint + key |
 | `GET` | `/api/models` | Models the user's provider serves |
+| `PATCH` | `/api/credentials/{provider}/models` | Set the primary/light roles |
 | `GET` | `/api/runs` | The caller's runs |
 | `POST` | `/api/runs` | Start a run |
 | `GET` | `/api/runs/{id}/status` | **Polled** — step-level progress |
@@ -424,6 +462,10 @@ basis_research_agents/
 │   ├── argument_tree.py # Persistent argument tree (TreeBuilder class)
 │   ├── llm.py           # LLM router (any OpenAI-compatible provider + fallback chain)
 │   ├── db_backend.py    # SQL dialect + connections (sqlite | mysql)
+│   ├── pipeline.py      # resumable state machine (steps, breaks, re-runs)
+│   ├── jobs.py          # DB-backed job queue claimed by workers
+│   ├── users.py         # users, provider credentials, run ownership
+│   └── crypto.py        # encrypts stored provider API keys
 │   ├── database.py      # SQLite schema (12 tables)
 │   ├── context.py       # Context assembly with tree injection
 │   ├── concept_mapper.py# Problem → theme activation (130 disciplines)

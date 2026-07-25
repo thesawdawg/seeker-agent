@@ -12,6 +12,8 @@ env/
 # Databases (user-generated — the compressed template is tracked)
 db/pipeline.db
 db/conceptnet.db
+db/*.db-shm
+db/*.db-wal
 db/consensus_tokens.json
 
 # Credentials

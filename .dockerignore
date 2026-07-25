@@ -1,0 +1,24 @@
+# Databases are bind-mounted, not baked in — conceptnet.db.gz alone is 67 MB.
+db/
+exports/
+artifacts/
+logs/
+
+.git/
+.gitignore
+.venv/
+venv/
+.venv-check/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+.env
+API.txt
+
+app-design-output/
+dogfood-output/
+.vscode/
+.idea/
+*.swp
+.DS_Store

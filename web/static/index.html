@@ -111,6 +111,19 @@
         <select id="new-provider"></select>
       </label>
 
+      <div class="field" id="role-field">
+        <span class="field-label">Which models should the agents use?</span>
+        <span class="field-hint">
+          Heavy reasoning agents use <strong>primary</strong>; Social and
+          Scribe use <strong>light</strong>. Saved against your provider and
+          reused for future runs.
+        </span>
+        <div class="model-grid" id="role-grid"></div>
+        <p class="error" id="role-warning" hidden>
+          Pick a primary model — without one, agents have nothing to call.
+        </p>
+      </div>
+
       <details class="disclosure">
         <summary>Model routing <span class="muted">(optional)</span></summary>
         <p class="muted small">

@@ -1,0 +1,131 @@
+# SEEKER — full stack.
+#
+#   mysql       persistent state
+#   redis       sessions and cache
+#   conceptnet  one-shot: unpacks the ConceptNet corpus on first boot
+#   web         HTTP API + frontend. Never runs pipeline work.
+#   worker      claims jobs and advances runs. Scale this one.
+#
+# Quick start:
+#   cp .env.example .env
+#   echo "SEEKER_SECRET_KEY=$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> .env
+#   docker compose up -d
+#
+# Then open http://localhost:8000
+
+name: seeker
+
+x-app: &app
+  build: .
+  restart: unless-stopped
+  environment:
+    # Storage
+    SEEKER_DB_BACKEND: mysql
+    MYSQL_HOST: mysql
+    MYSQL_PORT: "3306"
+    MYSQL_USER: ${MYSQL_USER:-seeker}
+    MYSQL_PASSWORD: ${MYSQL_PASSWORD:-seeker}
+    MYSQL_DATABASE: ${MYSQL_DATABASE:-seeker}
+    REDIS_URL: redis://redis:6379/0
+    # Required — encrypts users' stored provider API keys. Compose refuses
+    # to start without it rather than leaving keys unprotected.
+    SEEKER_SECRET_KEY: ${SEEKER_SECRET_KEY:?set SEEKER_SECRET_KEY in .env — see README}
+    SEEKER_SESSION_TTL: ${SEEKER_SESSION_TTL:-86400}
+    SEEKER_CORS_ORIGINS: ${SEEKER_CORS_ORIGINS:-}
+    # Academic source keys are optional; pass through whatever is set.
+    OPENALEX_EMAIL: ${OPENALEX_EMAIL:-}
+    NCBI_API_KEY: ${NCBI_API_KEY:-}
+    NCBI_EMAIL: ${NCBI_EMAIL:-}
+    SEMANTIC_SCHOLAR_API_KEY: ${SEMANTIC_SCHOLAR_API_KEY:-}
+    CORE_API_KEY: ${CORE_API_KEY:-}
+    SCOPUS_API_KEY: ${SCOPUS_API_KEY:-}
+    SCOPUS_INST_TOKEN: ${SCOPUS_INST_TOKEN:-}
+  volumes:
+    - ./db:/app/db                 # conceptnet.db — read-mostly, large
+    - artifacts:/app/artifacts     # Scribe outputs, served through the API
+    - logs:/app/logs
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    conceptnet:
+      condition: service_completed_successfully
+
+services:
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpw}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-seeker}
+      MYSQL_USER: ${MYSQL_USER:-seeker}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-seeker}
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      # The app cannot connect until MySQL is genuinely accepting queries;
+      # a running container is not the same thing.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1",
+             "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpw}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    # Uncomment to reach the database from the host.
+    # ports: ["3306:3306"]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  conceptnet:
+    # One-shot. Unpacks db/conceptnet.db.gz (67 MB → ~184 MB) if it has not
+    # been unpacked yet, then exits. Without it the concept mapper falls back
+    # to keyword-only mode, which still works but expands less.
+    image: alpine:3.20
+    volumes:
+      - ./db:/db
+    command: >
+      sh -c '
+        if [ -f /db/conceptnet.db ]; then
+          echo "conceptnet.db present — nothing to do";
+        elif [ -f /db/conceptnet.db.gz ]; then
+          echo "Unpacking conceptnet.db.gz (this takes a minute)...";
+          gunzip -c /db/conceptnet.db.gz > /db/conceptnet.db &&
+          echo "conceptnet.db ready";
+        else
+          echo "No conceptnet.db.gz found — concept mapper will use keyword-only mode";
+        fi'
+    restart: "no"
+
+  web:
+    <<: *app
+    command: ["uvicorn", "web.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${SEEKER_PORT:-8000}:8000"
+
+  worker:
+    <<: *app
+    # Runs the pipeline. Scale with: docker compose up -d --scale worker=3
+    command: ["python3", "worker.py"]
+    healthcheck:
+      disable: true
+
+volumes:
+  mysql-data:
+  redis-data:
+  artifacts:
+  logs:
