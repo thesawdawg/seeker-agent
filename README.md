@@ -120,6 +120,43 @@ python3 main.py run --problem "your problem" --run-id RUN-20260407-022355-242D -
 
 The pipeline detects which agents already completed (by checking the database) and skips them.
 
+## Database Backends
+
+SEEKER runs on either backend. All pipeline state goes through
+`core/database.py`, and the SQL dialect lives in `core/db_backend.py`.
+
+| Backend | When | Setup |
+|---|---|---|
+| **SQLite** (default) | local CLI use, tests | none — `db/pipeline.db` |
+| **MySQL** | multi-user / Docker deployment | set `MYSQL_URL` or `MYSQL_*` |
+
+Selection order: `SEEKER_DB_BACKEND=sqlite|mysql`, else MySQL if `MYSQL_HOST`
+or `MYSQL_URL` is set, else SQLite.
+
+```bash
+# MySQL, via a single URL
+export MYSQL_URL=mysql://seeker:secret@localhost:3306/seeker
+
+# or discrete variables
+export MYSQL_HOST=localhost MYSQL_USER=seeker \
+       MYSQL_PASSWORD=secret MYSQL_DATABASE=seeker
+```
+
+MySQL needs the driver: `pip install 'PyMySQL>=1.1.0'`.
+
+`db/conceptnet.db` stays SQLite on both — it is a read-only reference corpus,
+not pipeline state.
+
+### Running the MySQL tests
+
+They skip unless pointed at a scratch database. **Never aim them at a database
+holding real runs** — they clear every table.
+
+```bash
+export SEEKER_TEST_MYSQL_URL=mysql://user:pass@127.0.0.1:3306/seeker_test
+pytest tests/test_mysql_backend.py
+```
+
 ## Model Providers
 
 Providers are declared in `config.json` under `llm.providers`. Each one is just
@@ -248,6 +285,7 @@ basis_research_agents/
 ├── core/                # Infrastructure
 │   ├── argument_tree.py # Persistent argument tree (TreeBuilder class)
 │   ├── llm.py           # LLM router (any OpenAI-compatible provider + fallback chain)
+│   ├── db_backend.py    # SQL dialect + connections (sqlite | mysql)
 │   ├── database.py      # SQLite schema (12 tables)
 │   ├── context.py       # Context assembly with tree injection
 │   ├── concept_mapper.py# Problem → theme activation (130 disciplines)

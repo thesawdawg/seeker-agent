@@ -31,10 +31,13 @@ import os
 import sys
 import json
 import time
-import sqlite3
 import logging
 import argparse
 from pathlib import Path
+
+# Running from tools/ — put the repo root on the path so `core` resolves.
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -85,8 +88,7 @@ class ClaimResult:
 
 def load_sources(db_path: Path, run_id: str,
                  types: list[str] | None = None) -> list[SourceRecord]:
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+    from core import database as db
 
     query = "SELECT * FROM sources WHERE run_id = ?"
     params: list = [run_id]
@@ -100,8 +102,7 @@ def load_sources(db_path: Path, run_id: str,
     query += "  OR historical_reason IS NOT NULL AND historical_reason != '')"
     query += " ORDER BY type, year"
 
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
+    rows = db.query(query, tuple(params))
 
     sources = []
     for r in rows:
@@ -128,11 +129,9 @@ def load_sources(db_path: Path, run_id: str,
 
 
 def get_problem(db_path: Path, run_id: str) -> str:
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT problem FROM runs WHERE run_id=?", (run_id,)).fetchone()
-    conn.close()
-    return row["problem"] if row else run_id
+    from core import database as db
+    rows = db.query("SELECT problem FROM runs WHERE run_id=?", (run_id,))
+    return rows[0]["problem"] if rows else run_id
 
 
 # ─── Verification: Claude LLM ─────────────────────────────────────────────────
@@ -468,6 +467,11 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     db_path = Path(args.db)
+    # --db selects a specific SQLite file; otherwise the configured backend
+    # (SQLite or MySQL) is used as-is.
+    if args.db != str(DB_PATH):
+        from core import database as _db
+        _db.use_sqlite_file(db_path)
     if not db_path.exists():
         print(f"Database not found: {db_path}")
         sys.exit(1)

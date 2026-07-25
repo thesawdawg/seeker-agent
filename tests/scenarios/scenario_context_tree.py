@@ -15,7 +15,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Patch DB paths before importing
 import core.argument_tree as at
-at.DB_PATH = TEST_DB
+from core import database, db_backend
+database.DB_PATH = TEST_DB
+db_backend.reset_backend()
 
 import core.database as database
 database.DB_PATH = TEST_DB

@@ -252,13 +252,6 @@ def _fetch_targeted_sources(
     run_id: str, gap_sketches: list[dict], per_gap_limit: int = 10
 ) -> dict[str, list[dict]]:
     """Pull relevant current sources per analytical gap from DB."""
-    import sqlite3
-    from pathlib import Path
-
-    db_path = Path(__file__).parent.parent / "db" / "pipeline.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-
     targeted: dict[str, list[dict]] = {}
 
     for gs in gap_sketches:
@@ -270,14 +263,13 @@ def _fetch_targeted_sources(
 
         results = []
         for theme in themes:
-            rows = conn.execute(
+            results.extend(db.query(
                 """SELECT * FROM sources
                    WHERE run_id = ? AND type = 'current' AND theme_tags LIKE ?
                    ORDER BY CASE relevance_rating WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 ELSE 3 END, year DESC
                    LIMIT ?""",
                 (run_id, f'%"{theme}"%', per_gap_limit)
-            ).fetchall()
-            results.extend(dict(r) for r in rows)
+            ))
 
         seen = set()
         deduped = []
@@ -291,7 +283,6 @@ def _fetch_targeted_sources(
 
         targeted[sketch_id] = deduped
 
-    conn.close()
     return targeted
 
 
@@ -491,14 +482,11 @@ def run(context: str, run_id: str, **kwargs):
             if not ref_title:
                 continue
             # Search sources table for this title
-            import sqlite3 as _sql
-            _conn = _sql.connect(str(db.DB_PATH))
-            _conn.row_factory = _sql.Row
-            _row = _conn.execute(
+            _rows = db.query(
                 "SELECT source_id, type FROM sources WHERE run_id = ? AND title LIKE ? LIMIT 1",
                 (run_id, f"%{ref_title[:50]}%")
-            ).fetchone()
-            _conn.close()
+            )
+            _row = _rows[0] if _rows else None
 
             if _row:
                 source_id = _row["source_id"]

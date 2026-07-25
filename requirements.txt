@@ -2,6 +2,10 @@
 # so the pipeline needs no vendor SDK.
 requests>=2.31.0
 
+# MySQL backend (multi-user / Docker deployment).
+# Not needed for the default SQLite backend.
+PyMySQL>=1.1.0
+
 # Academic source handlers
 arxiv>=2.1.0
 

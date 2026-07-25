@@ -35,10 +35,13 @@ import re
 import sys
 import json
 import time
-import sqlite3
 import logging
 import argparse
 from pathlib import Path
+
+# Running from tools/ — put the repo root on the path so `core` resolves.
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -104,8 +107,7 @@ class VerifyResult:
 def load_sources(run_id: str, types: list[str] | None = None,
                  db_path: Path = DB_PATH) -> list[SourceRecord]:
     """Load sources from the pipeline database for a given run."""
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+    from core import database as db
 
     query = "SELECT * FROM sources WHERE run_id = ?"
     params: list = [run_id]
@@ -117,8 +119,7 @@ def load_sources(run_id: str, types: list[str] | None = None,
 
     query += " ORDER BY type, year"
 
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
+    rows = db.query(query, tuple(params))
 
     sources = []
     for r in rows:
@@ -620,6 +621,11 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     db_path = Path(args.db)
+    # --db selects a specific SQLite file; otherwise the configured backend
+    # (SQLite or MySQL) is used as-is.
+    if args.db != str(DB_PATH):
+        from core import database as _db
+        _db.use_sqlite_file(db_path)
     if not db_path.exists():
         print(f"Database not found: {db_path}")
         sys.exit(1)
@@ -645,11 +651,9 @@ def main():
     print(f"  Loaded {len(sources)} sources to verify\n")
 
     # Get problem from runs table
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    run_row = conn.execute("SELECT problem FROM runs WHERE run_id = ?", (args.run_id,)).fetchone()
-    problem = run_row["problem"] if run_row else args.run_id
-    conn.close()
+    from core import database as db
+    _run_rows = db.query("SELECT problem FROM runs WHERE run_id = ?", (args.run_id,))
+    problem = _run_rows[0]["problem"] if _run_rows else args.run_id
 
     # Verify each source
     results: list[VerifyResult] = []

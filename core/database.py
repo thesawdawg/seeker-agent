@@ -1,8 +1,15 @@
 """
 Database Interface
 ------------------
-Single SQLite file: db/pipeline.db
-Handles all agent output storage with full metadata.
+All agent output storage, on either backend (see core/db_backend.py):
+
+  sqlite  — default, db/pipeline.db. Zero setup, used by the CLI and tests.
+  mysql   — the multi-user Docker deployment.
+
+Everything routes through the generic helpers below (insert/fetch/update/
+count/query/execute), so the SQL dialect lives in one place. Do not open a
+raw connection to pipeline state — db/conceptnet.db is the sole exception,
+being a read-only reference corpus.
 
 Tables:
   - runs             Pipeline run registry
@@ -18,15 +25,17 @@ Tables:
   - seminal_bank     Grounder proposed themes
 """
 
-import sqlite3
 import json
 import logging
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Any
 
+from core import db_backend
+
 logger = logging.getLogger(__name__)
 
+# SQLite backend only. Ignored when the MySQL backend is selected.
 DB_PATH = Path(__file__).parent.parent / "db" / "pipeline.db"
 
 
@@ -34,13 +43,38 @@ DB_PATH = Path(__file__).parent.parent / "db" / "pipeline.db"
 # Connection helper
 # ---------------------------------------------------------------------------
 
-def get_connection() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+def get_connection():
+    """
+    Raw connection for the current backend.
+
+    Prefer db_backend.cursor() or the generic helpers below — this exists for
+    the few callers that need direct control, and the caller must close it.
+    """
+    return db_backend.get_backend().connect()
+
+
+def connection():
+    """Transactional context manager — commits on success, rolls back on error."""
+    return db_backend.connection()
+
+
+def backend_name() -> str:
+    return db_backend.get_backend().name
+
+
+def use_sqlite_file(path) -> None:
+    """
+    Point the data layer at a specific SQLite file.
+
+    For the offline tools in tools/, which accept a --db argument, and for
+    tests. Has no effect on an already-running MySQL deployment beyond
+    switching this process over.
+    """
+    global DB_PATH
+    import os
+    DB_PATH = Path(path)
+    os.environ["SEEKER_DB_BACKEND"] = "sqlite"
+    db_backend.reset_backend()
 
 
 # ---------------------------------------------------------------------------
@@ -50,215 +84,215 @@ def get_connection() -> sqlite3.Connection:
 SCHEMA = """
 -- Pipeline runs registry
 CREATE TABLE IF NOT EXISTS runs (
-    run_id          TEXT PRIMARY KEY,
-    problem         TEXT NOT NULL,
-    created_at      TEXT NOT NULL,
-    status          TEXT DEFAULT 'active',
-    break0_done     INTEGER DEFAULT 0,
-    break1_done     INTEGER DEFAULT 0,
-    break2_done     INTEGER DEFAULT 0,
-    completed_at    TEXT
+    run_id          {ID} PRIMARY KEY,
+    problem         {LONGTEXT} NOT NULL,
+    created_at      {TEXT} NOT NULL,
+    status          {KEY} DEFAULT 'active',
+    break0_done     {INT} DEFAULT 0,
+    break1_done     {INT} DEFAULT 0,
+    break2_done     {INT} DEFAULT 0,
+    completed_at    {TEXT}
 );
 
 -- Sources: current (Social), seminal (Grounder), historical (Historian)
 CREATE TABLE IF NOT EXISTS sources (
-    source_id       TEXT PRIMARY KEY,
-    title           TEXT NOT NULL,
-    authors         TEXT,                -- JSON array
-    year            INTEGER,
-    source_name     TEXT,
-    doi             TEXT,
-    abstract        TEXT,
-    active_link     TEXT,
-    theme_tags      TEXT,                -- JSON array
-    type            TEXT NOT NULL,       -- current / seminal / historical
-    relevance_rating TEXT,              -- High / Medium / Low (current)
-    relevance_reason TEXT,
-    seminal_reason  TEXT,               -- Grounder
-    historical_reason TEXT,             -- Historian
-    phase_tag       TEXT,               -- Historian phase classification
-    intersection_tags TEXT,             -- JSON array
-    added_by        TEXT,
-    date_collected  TEXT,
-    last_checked    TEXT,
-    link_status     TEXT DEFAULT 'active', -- active / redirected / dead / flagged
-    run_id          TEXT
+    source_id       {ID} PRIMARY KEY,
+    title           {TEXT} NOT NULL,
+    authors         {TEXT},                -- JSON array
+    year            {INT},
+    source_name     {TEXT},
+    doi             {TEXT},
+    abstract        {LONGTEXT},
+    active_link     {TEXT},
+    theme_tags      {TEXT},                -- JSON array
+    type            {KEY} NOT NULL,       -- current / seminal / historical
+    relevance_rating {TEXT},              -- High / Medium / Low (current)
+    relevance_reason {TEXT},
+    seminal_reason  {TEXT},               -- Grounder
+    historical_reason {TEXT},             -- Historian
+    phase_tag       {TEXT},               -- Historian phase classification
+    intersection_tags {TEXT},             -- JSON array
+    added_by        {TEXT},
+    date_collected  {TEXT},
+    last_checked    {TEXT},
+    link_status     {KEY} DEFAULT 'active', -- active / redirected / dead / flagged
+    run_id          {ID}
 );
 
 -- Dead links archive
 CREATE TABLE IF NOT EXISTS dead_links (
-    dead_id         TEXT PRIMARY KEY,
-    source_id       TEXT,
-    title           TEXT,
-    original_link   TEXT,
-    theme_tags      TEXT,
-    type            TEXT,
-    date_collected  TEXT,
-    date_confirmed_dead TEXT,
-    last_active     TEXT
+    dead_id         {ID} PRIMARY KEY,
+    source_id       {ID},
+    title           {TEXT},
+    original_link   {TEXT},
+    theme_tags      {TEXT},
+    type            {KEY},
+    date_collected  {TEXT},
+    date_confirmed_dead {TEXT},
+    last_active     {TEXT}
 );
 
 -- Gaper: gaps
 CREATE TABLE IF NOT EXISTS gaps (
-    gap_id          TEXT PRIMARY KEY,
-    run_id          TEXT NOT NULL,
-    problem_origin  TEXT,
-    gap_type        TEXT,               -- unstudied / incomplete / contradicted etc.
-    description     TEXT NOT NULL,
-    significance    TEXT,               -- High / Medium / Low
-    significance_reason TEXT,
-    primary_evaluation TEXT,            -- answered / partial / unanswered
-    references_grounder TEXT,           -- JSON array of source_ids
-    references_historian TEXT,          -- JSON array of source_ids
-    references_social TEXT,             -- JSON array of source_ids
-    dead_end_revisit INTEGER DEFAULT 0,
-    recurring_pattern INTEGER DEFAULT 0,
-    recurring_reason TEXT,
-    added_by        TEXT DEFAULT 'Gaper',
-    date_identified TEXT,
-    status          TEXT DEFAULT 'open' -- open / addressed / resolved / deferred
+    gap_id          {ID} PRIMARY KEY,
+    run_id          {ID} NOT NULL,
+    problem_origin  {TEXT},
+    gap_type        {TEXT},               -- unstudied / incomplete / contradicted etc.
+    description     {LONGTEXT} NOT NULL,
+    significance    {KEY},               -- High / Medium / Low
+    significance_reason {TEXT},
+    primary_evaluation {TEXT},            -- answered / partial / unanswered
+    references_grounder {TEXT},           -- JSON array of source_ids
+    references_historian {TEXT},          -- JSON array of source_ids
+    references_social {TEXT},             -- JSON array of source_ids
+    dead_end_revisit {INT} DEFAULT 0,
+    recurring_pattern {INT} DEFAULT 0,
+    recurring_reason {TEXT},
+    added_by        {KEY} DEFAULT 'Gaper',
+    date_identified {TEXT},
+    status          {KEY} DEFAULT 'open' -- open / addressed / resolved / deferred
 );
 
 -- Vision: implications
 CREATE TABLE IF NOT EXISTS implications (
-    implication_id  TEXT PRIMARY KEY,
-    run_id          TEXT NOT NULL,
-    problem_origin  TEXT,
-    implication     TEXT NOT NULL,
-    implication_type TEXT,              -- direct / logical_chain / second_order etc.
-    strength        TEXT,               -- Strong / Moderate / Speculative
-    strength_reason TEXT,
-    scope           TEXT,               -- immediate / second_order
-    derived_grounder TEXT,              -- JSON array
-    derived_historian TEXT,             -- JSON array
-    derived_gaper   TEXT,               -- JSON array
-    derived_social  TEXT,               -- JSON array
-    hidden_assumption INTEGER DEFAULT 0,
-    assumption_note TEXT,
-    currently_pursued INTEGER DEFAULT 0,
-    pursuit_reference TEXT,
-    added_by        TEXT DEFAULT 'Vision',
-    date_identified TEXT,
-    status          TEXT DEFAULT 'active'
+    implication_id  {ID} PRIMARY KEY,
+    run_id          {ID} NOT NULL,
+    problem_origin  {TEXT},
+    implication     {LONGTEXT} NOT NULL,
+    implication_type {TEXT},              -- direct / logical_chain / second_order etc.
+    strength        {TEXT},               -- Strong / Moderate / Speculative
+    strength_reason {TEXT},
+    scope           {TEXT},               -- immediate / second_order
+    derived_grounder {TEXT},              -- JSON array
+    derived_historian {TEXT},             -- JSON array
+    derived_gaper   {TEXT},               -- JSON array
+    derived_social  {TEXT},               -- JSON array
+    hidden_assumption {INT} DEFAULT 0,
+    assumption_note {TEXT},
+    currently_pursued {INT} DEFAULT 0,
+    pursuit_reference {TEXT},
+    added_by        {KEY} DEFAULT 'Vision',
+    date_identified {TEXT},
+    status          {KEY} DEFAULT 'active'
 );
 
 -- Theorist: proposals
 CREATE TABLE IF NOT EXISTS proposals (
-    proposal_id     TEXT PRIMARY KEY,
-    run_id          TEXT NOT NULL,
-    problem_origin  TEXT,
-    proposal        TEXT NOT NULL,
-    proposal_type   TEXT,               -- novel / extension / revival / hybrid
-    addresses_gaps  TEXT,               -- JSON array of gap_ids
-    addresses_implications TEXT,        -- JSON array of implication_ids
-    addresses_foundations TEXT,         -- JSON array of source_ids
-    assumptions     TEXT,               -- JSON array
-    requirements    TEXT,               -- JSON array
-    predictions     TEXT,               -- JSON array
-    dead_end_reassessment INTEGER DEFAULT 0,
-    dead_end_reference TEXT,
-    dead_end_reason TEXT,
-    interdependencies TEXT,             -- JSON array of proposal_ids
-    promise_rating  TEXT,               -- High / Medium / Low
-    promise_reason  TEXT,
-    novel_vs_extension TEXT,
-    scope           TEXT,
-    added_by        TEXT DEFAULT 'Theorist',
-    date_proposed   TEXT,
-    status          TEXT DEFAULT 'proposed'
+    proposal_id     {ID} PRIMARY KEY,
+    run_id          {ID} NOT NULL,
+    problem_origin  {TEXT},
+    proposal        {LONGTEXT} NOT NULL,
+    proposal_type   {TEXT},               -- novel / extension / revival / hybrid
+    addresses_gaps  {TEXT},               -- JSON array of gap_ids
+    addresses_implications {TEXT},        -- JSON array of implication_ids
+    addresses_foundations {TEXT},         -- JSON array of source_ids
+    assumptions     {TEXT},               -- JSON array
+    requirements    {TEXT},               -- JSON array
+    predictions     {TEXT},               -- JSON array
+    dead_end_reassessment {INT} DEFAULT 0,
+    dead_end_reference {TEXT},
+    dead_end_reason {TEXT},
+    interdependencies {TEXT},             -- JSON array of proposal_ids
+    promise_rating  {TEXT},               -- High / Medium / Low
+    promise_reason  {TEXT},
+    novel_vs_extension {TEXT},
+    scope           {TEXT},
+    added_by        {KEY} DEFAULT 'Theorist',
+    date_proposed   {TEXT},
+    status          {KEY} DEFAULT 'proposed'
 );
 
 -- Rude: evaluations
 CREATE TABLE IF NOT EXISTS evaluations (
-    evaluation_id   TEXT PRIMARY KEY,
-    run_id          TEXT NOT NULL,
-    proposal_id     TEXT NOT NULL,
-    problem_origin  TEXT,
-    verdict         TEXT NOT NULL,      -- feasible / partially_feasible / unfeasible / insufficient_evidence
-    verdict_reason  TEXT,
-    weakest_empirical_link TEXT,
-    dead_end_references TEXT,           -- JSON array
-    social_evidence_references TEXT,    -- JSON array
-    evidence_to_change_verdict TEXT,
-    added_by        TEXT DEFAULT 'Rude',
-    date_evaluated  TEXT,
-    status          TEXT DEFAULT 'active'
+    evaluation_id   {ID} PRIMARY KEY,
+    run_id          {ID} NOT NULL,
+    proposal_id     {ID} NOT NULL,
+    problem_origin  {TEXT},
+    verdict         {TEXT} NOT NULL,      -- feasible / partially_feasible / unfeasible / insufficient_evidence
+    verdict_reason  {TEXT},
+    weakest_empirical_link {TEXT},
+    dead_end_references {TEXT},           -- JSON array
+    social_evidence_references {TEXT},    -- JSON array
+    evidence_to_change_verdict {TEXT},
+    added_by        {KEY} DEFAULT 'Rude',
+    date_evaluated  {TEXT},
+    status          {KEY} DEFAULT 'active'
 );
 
 -- Synthesizer: research narratives
 CREATE TABLE IF NOT EXISTS syntheses (
-    synthesis_id    TEXT PRIMARY KEY,
-    run_id          TEXT NOT NULL,
-    problem_origin  TEXT,
-    sharpened_problem TEXT,
-    trajectory_statement TEXT,
-    key_tensions    TEXT,               -- JSON array
-    override_log    TEXT,               -- JSON array
-    viable_proposal_ids TEXT,           -- JSON array
-    top_gap_ids     TEXT,               -- JSON array
-    top_implication_ids TEXT,           -- JSON array
-    full_narrative  TEXT,               -- full text of the narrative
-    added_by        TEXT DEFAULT 'Synthesizer',
-    date_produced   TEXT,
-    status          TEXT DEFAULT 'draft'
+    synthesis_id    {ID} PRIMARY KEY,
+    run_id          {ID} NOT NULL,
+    problem_origin  {TEXT},
+    sharpened_problem {LONGTEXT},
+    trajectory_statement {LONGTEXT},
+    key_tensions    {TEXT},               -- JSON array
+    override_log    {TEXT},               -- JSON array
+    viable_proposal_ids {TEXT},           -- JSON array
+    top_gap_ids     {TEXT},               -- JSON array
+    top_implication_ids {TEXT},           -- JSON array
+    full_narrative  {LONGTEXT},               -- full text of the narrative
+    added_by        {KEY} DEFAULT 'Synthesizer',
+    date_produced   {TEXT},
+    status          {KEY} DEFAULT 'draft'
 );
 
 -- Thinker: new directions
 CREATE TABLE IF NOT EXISTS directions (
-    direction_id    TEXT PRIMARY KEY,
-    run_id          TEXT NOT NULL,
-    problem_origin  TEXT,
-    direction       TEXT NOT NULL,
-    direction_type  TEXT,               -- new_research / new_framing / adjacent_field etc.
-    grounding_reference TEXT,
-    distance_rating TEXT,               -- Near / Mid / Far
-    synthesis_id    TEXT,
-    added_by        TEXT DEFAULT 'Thinker',
-    date_proposed   TEXT,
-    status          TEXT DEFAULT 'proposed'
+    direction_id    {ID} PRIMARY KEY,
+    run_id          {ID} NOT NULL,
+    problem_origin  {TEXT},
+    direction       {LONGTEXT} NOT NULL,
+    direction_type  {TEXT},               -- new_research / new_framing / adjacent_field etc.
+    grounding_reference {TEXT},
+    distance_rating {TEXT},               -- Near / Mid / Far
+    synthesis_id    {ID},
+    added_by        {KEY} DEFAULT 'Thinker',
+    date_proposed   {TEXT},
+    status          {KEY} DEFAULT 'proposed'
 );
 
 -- Scribe: produced artifacts
 CREATE TABLE IF NOT EXISTS artifacts (
-    artifact_id     TEXT PRIMARY KEY,
-    run_id          TEXT NOT NULL,
-    problem_origin  TEXT,
-    output_type     TEXT,               -- blog_post / research_brief / paper_section etc.
-    format          TEXT,               -- md / tex
-    title           TEXT,
-    audience        TEXT,
-    synthesis_id    TEXT,
-    directions_used TEXT,               -- JSON array of direction_ids
-    file_path       TEXT,
-    word_count      INTEGER,
-    added_by        TEXT DEFAULT 'Scribe',
-    date_produced   TEXT,
-    status          TEXT DEFAULT 'draft'
+    artifact_id     {ID} PRIMARY KEY,
+    run_id          {ID} NOT NULL,
+    problem_origin  {TEXT},
+    output_type     {TEXT},               -- blog_post / research_brief / paper_section etc.
+    format          {TEXT},               -- md / tex
+    title           {TEXT},
+    audience        {TEXT},
+    synthesis_id    {ID},
+    directions_used {TEXT},               -- JSON array of direction_ids
+    file_path       {TEXT},
+    word_count      {INT},
+    added_by        {KEY} DEFAULT 'Scribe',
+    date_produced   {TEXT},
+    status          {KEY} DEFAULT 'draft'
 );
 
 -- Grounder: proposed themes for seminal bank
 CREATE TABLE IF NOT EXISTS seminal_bank (
-    bank_id         TEXT PRIMARY KEY,
-    proposed_theme  TEXT NOT NULL,
-    proposed_by     TEXT DEFAULT 'Grounder',
-    problem_origin  TEXT,
-    reason          TEXT,
-    suggested_keywords TEXT,            -- JSON array
-    suggested_sources TEXT,             -- JSON array
-    date_proposed   TEXT,
-    status          TEXT DEFAULT 'pending_review' -- pending_review / approved / rejected
+    bank_id         {ID} PRIMARY KEY,
+    proposed_theme  {TEXT} NOT NULL,
+    proposed_by     {KEY} DEFAULT 'Grounder',
+    problem_origin  {TEXT},
+    reason          {TEXT},
+    suggested_keywords {TEXT},            -- JSON array
+    suggested_sources {TEXT},             -- JSON array
+    date_proposed   {TEXT},
+    status          {KEY} DEFAULT 'pending_review' -- pending_review / approved / rejected
 );
 
 -- Human-in-the-loop break instructions, persisted verbatim.
 -- Without this, resuming a run loses the researcher's steering input.
 CREATE TABLE IF NOT EXISTS break_instructions (
-    instruction_id  TEXT PRIMARY KEY,
-    run_id          TEXT NOT NULL,
-    break_num       INTEGER NOT NULL,
-    instructions    TEXT NOT NULL,       -- raw text, exactly as the human wrote it
-    contradictions  TEXT DEFAULT '[]',   -- JSON array of contradiction notices
-    source          TEXT DEFAULT 'cli',  -- cli / web
-    created_at      TEXT NOT NULL,
+    instruction_id  {ID} PRIMARY KEY,
+    run_id          {ID} NOT NULL,
+    break_num       {INT} NOT NULL,
+    instructions    {LONGTEXT} NOT NULL,       -- raw text, exactly as the human wrote it
+    contradictions  {KEY} DEFAULT '[]',   -- JSON array of contradiction notices
+    source          {KEY} DEFAULT 'cli',  -- cli / web
+    created_at      {TEXT} NOT NULL,
     UNIQUE (run_id, break_num)
 );
 
@@ -280,12 +314,13 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_run    ON artifacts(run_id);
 
 def init_db():
     """Initialize database — create all tables if they don't exist."""
-    with get_connection() as conn:
-        conn.executescript(SCHEMA)
-    # Initialize argument tree table
+    backend = db_backend.get_backend()
+    backend.init_schema(SCHEMA)
+    # Argument tree lives in its own module but the same database
     from core.argument_tree import init_tree_table
     init_tree_table()
-    logger.info(f"Database initialized at {DB_PATH}")
+    target = DB_PATH if backend.name == "sqlite" else backend._settings["database"]
+    logger.info(f"Database initialized ({backend.name}) at {target}")
 
 
 # ---------------------------------------------------------------------------
@@ -312,13 +347,12 @@ def _from_json(value: Optional[str]) -> Any:
 
 
 def insert(table: str, data: dict) -> bool:
-    """Generic insert into any table."""
-    cols = ", ".join(data.keys())
-    placeholders = ", ".join(["?"] * len(data))
-    sql = f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({placeholders})"
+    """Generic upsert into any table."""
+    backend = db_backend.get_backend()
+    sql = backend.upsert_sql(table, list(data.keys()))
     try:
-        with get_connection() as conn:
-            conn.execute(sql, list(data.values()))
+        with db_backend.cursor() as cur:
+            cur.execute(sql, list(data.values()))
         return True
     except Exception as e:
         logger.error(f"Insert into {table} failed: {e}")
@@ -327,18 +361,18 @@ def insert(table: str, data: dict) -> bool:
 
 def fetch(table: str, where: dict = None, limit: int = None) -> list[dict]:
     """Generic fetch from any table."""
+    ph = db_backend.placeholder()
     sql = f"SELECT * FROM {table}"
     params = []
     if where:
-        conditions = " AND ".join([f"{k} = ?" for k in where.keys()])
-        sql += f" WHERE {conditions}"
+        sql += " WHERE " + " AND ".join(f"{k} = {ph}" for k in where)
         params = list(where.values())
     if limit:
-        sql += f" LIMIT {limit}"
+        sql += f" LIMIT {int(limit)}"
     try:
-        with get_connection() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        with db_backend.cursor() as cur:
+            cur.execute(sql, params)
+            return db_backend.rows_to_dicts(cur.fetchall())
     except Exception as e:
         logger.error(f"Fetch from {table} failed: {e}")
         return []
@@ -346,13 +380,13 @@ def fetch(table: str, where: dict = None, limit: int = None) -> list[dict]:
 
 def update(table: str, data: dict, where: dict) -> bool:
     """Generic update on any table."""
-    set_clause = ", ".join([f"{k} = ?" for k in data.keys()])
-    where_clause = " AND ".join([f"{k} = ?" for k in where.keys()])
+    ph = db_backend.placeholder()
+    set_clause   = ", ".join(f"{k} = {ph}" for k in data)
+    where_clause = " AND ".join(f"{k} = {ph}" for k in where)
     sql = f"UPDATE {table} SET {set_clause} WHERE {where_clause}"
-    params = list(data.values()) + list(where.values())
     try:
-        with get_connection() as conn:
-            conn.execute(sql, params)
+        with db_backend.cursor() as cur:
+            cur.execute(sql, list(data.values()) + list(where.values()))
         return True
     except Exception as e:
         logger.error(f"Update {table} failed: {e}")
@@ -361,18 +395,54 @@ def update(table: str, data: dict, where: dict) -> bool:
 
 def count(table: str, where: dict = None) -> int:
     """Count rows in a table."""
-    sql = f"SELECT COUNT(*) FROM {table}"
+    ph = db_backend.placeholder()
+    sql = f"SELECT COUNT(*) AS n FROM {table}"
     params = []
     if where:
-        conditions = " AND ".join([f"{k} = ?" for k in where.keys()])
-        sql += f" WHERE {conditions}"
+        sql += " WHERE " + " AND ".join(f"{k} = {ph}" for k in where)
         params = list(where.values())
     try:
-        with get_connection() as conn:
-            return conn.execute(sql, params).fetchone()[0]
+        with db_backend.cursor() as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            if row is None:
+                return 0
+            # sqlite3.Row indexes by position; DictCursor by name.
+            return int(dict(row)["n"]) if not isinstance(row, dict) else int(row["n"])
     except Exception as e:
         logger.error(f"Count {table} failed: {e}")
         return 0
+
+
+def query(sql: str, params: tuple = ()) -> list[dict]:
+    """
+    Run a read query written with '?' placeholders, translated per backend.
+    For the handful of call sites that need SQL the generic helpers cannot express.
+    """
+    ph = db_backend.placeholder()
+    if ph != "?":
+        sql = sql.replace("?", ph)
+    try:
+        with db_backend.cursor() as cur:
+            cur.execute(sql, params)
+            return db_backend.rows_to_dicts(cur.fetchall())
+    except Exception as e:
+        logger.error(f"Query failed: {e}\n  SQL: {sql}")
+        return []
+
+
+def execute(sql: str, params: tuple = ()) -> bool:
+    """Run a write statement written with '?' placeholders, translated per backend."""
+    ph = db_backend.placeholder()
+    if ph != "?":
+        sql = sql.replace("?", ph)
+    try:
+        with db_backend.cursor() as cur:
+            cur.execute(sql, params)
+        return True
+    except Exception as e:
+        logger.error(f"Execute failed: {e}\n  SQL: {sql}")
+        return False
 
 
 # ---------------------------------------------------------------------------

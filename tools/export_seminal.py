@@ -23,11 +23,14 @@ import csv
 import json
 import os
 import re
-import sqlite3
 import sys
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
+
+# Running from tools/ — put the repo root on the path so `core` resolves.
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,25 +94,21 @@ def load_seminal(db_path: Path, run_id: str | None = None) -> list[dict]:
     Return all seminal sources from the pipeline DB as a list of dicts.
     Optionally filter by run_id.
     """
-    if not db_path.exists():
+    from core import database as db
+    if db.backend_name() == "sqlite" and not db_path.exists():
         sys.exit(f"[ERROR] Database not found: {db_path}\n"
                  f"        Make sure you run the pipeline at least once first, "
                  f"or pass --db with the correct path.")
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-
     if run_id:
-        rows = conn.execute(
+        rows = db.query(
             "SELECT * FROM sources WHERE type='seminal' AND run_id=? ORDER BY year ASC",
             (run_id,)
-        ).fetchall()
+        )
     else:
-        rows = conn.execute(
+        rows = db.query(
             "SELECT * FROM sources WHERE type='seminal' ORDER BY year ASC"
-        ).fetchall()
-
-    conn.close()
+        )
 
     papers = []
     for row in rows:
@@ -399,23 +398,28 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # --db selects a specific SQLite file; otherwise the configured backend
+    # (SQLite or MySQL) is used as-is.
+    if Path(args.db) != DEFAULT_DB:
+        from core import database as _db
+        _db.use_sqlite_file(args.db)
+
     # ── list runs mode ───────────────────────────────────────────────────────
     if args.list_runs:
-        if not args.db.exists():
+        from core import database as db
+        if db.backend_name() == "sqlite" and not args.db.exists():
             sys.exit(f"[ERROR] Database not found: {args.db}")
-        conn = sqlite3.connect(args.db)
-        rows = conn.execute(
+        rows = db.query(
             "SELECT run_id, COUNT(*) as n FROM sources "
             "WHERE type='seminal' GROUP BY run_id ORDER BY run_id"
-        ).fetchall()
-        conn.close()
+        )
         if not rows:
             print("No seminal papers found in the database yet.")
             print("Run the pipeline first: python3 main.py run --problem '...'")
         else:
             print(f"\nRuns with seminal papers:")
-            for run_id, count in rows:
-                print(f"  {run_id}  —  {count} papers")
+            for row in rows:
+                print(f"  {row['run_id']}  —  {row['n']} papers")
             print()
         return
 
