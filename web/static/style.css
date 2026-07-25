@@ -37,6 +37,17 @@
 
 * { box-sizing: border-box; }
 
+/*
+ * The hidden attribute must win.
+ *
+ * A UA stylesheet's `[hidden] { display: none }` loses to any author rule that
+ * sets `display` — so an element carrying both `hidden` and a class like
+ * `.modal-backdrop { display: flex }` stays painted, and toggling `.hidden`
+ * from JavaScript does nothing. This restores the attribute's meaning for
+ * every element, including ones added later.
+ */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);
