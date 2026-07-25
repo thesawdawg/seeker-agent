@@ -469,29 +469,16 @@ function renderRail(status) {
       ? el('span', { class: 'spinner' })
       : el('span', { text: STEP_ICON[step.status] || '·' });
 
-    // What this step talks to: live activity while running, otherwise the
-    // services it is configured to use.
-    const shape = state.steps.find(s => s.name === step.name) || {};
-    const services = (shape.services || []).map(s => s.label).join(', ');
-    const detail = step.status === 'running'
-      ? (step.activity || services)
-      : (step.status === 'pending' ? services : '');
-
-    const elapsed = stepElapsed(step);
+    // Where the run stands, and nothing more. What a step is doing right now
+    // belongs to the live card and activity log, so the rail stays a stable
+    // map of the pipeline rather than a second, competing feed.
     const row = el('li', {
       class: `rail-step status-${step.status} ${isBreak ? 'is-break' : ''} ` +
              `${step.name === status.current_step ? 'is-current' : ''}`,
-      title: step.error || (services ? `${step.label} — uses ${services}` : step.label),
+      title: step.error || step.label,
     },
       el('span', { class: 'rail-step-icon' }, icon),
-      el('span', { class: 'rail-step-body' },
-        el('span', { class: 'rail-step-label' },
-          step.label,
-          elapsed !== null
-            ? el('span', { class: 'rail-step-time', text: fmtDuration(elapsed) })
-            : null),
-        detail ? el('span', { class: 'rail-step-detail', text: detail }) : null,
-      ),
+      el('span', { class: 'rail-step-label', text: step.label }),
     );
 
     if (isBreak && ['done', 'awaiting_input'].includes(step.status)) {
