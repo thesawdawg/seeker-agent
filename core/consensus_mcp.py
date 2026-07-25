@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import threading
 import webbrowser
 from pathlib import Path
@@ -243,17 +244,63 @@ class _CallbackServer:
         return self._result  # type: ignore[return-value]
 
 
-_callback_server = _CallbackServer()
-_callback_server.start()
+# Started lazily, and only when interactive auth is permitted. Starting it at
+# import time would bind a port in every worker and web process that merely
+# imports this module.
+_callback_server: "_CallbackServer | None" = None
+
+
+class ConsensusAuthRequired(RuntimeError):
+    """
+    Consensus needs a browser login that this process must not perform.
+
+    Servers and workers run unattended: opening a browser is impossible and
+    blocking on a callback would stall the run. Callers treat this as
+    "the source is unavailable" and carry on without it.
+    """
+
+
+def interactive_auth_allowed() -> bool:
+    """
+    Whether this process may open a browser and wait for a human.
+
+    Off by default. A worker or web process must never block on OAuth, so
+    interactive login is opt-in and additionally requires a real terminal.
+    Authenticate once with:
+
+        python3 core/consensus_mcp.py --login
+
+    which stores tokens in db/consensus_tokens.json for every process to reuse.
+    """
+    import sys
+    if os.environ.get("SEEKER_CONSENSUS_INTERACTIVE", "").strip().lower() not in (
+            "1", "true", "yes"):
+        return False
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
 
 
 async def _redirect_handler(url: str) -> None:
-    print(f"\n[Consensus] Opening browser for authentication...")
+    if not interactive_auth_allowed():
+        raise ConsensusAuthRequired(
+            "Consensus requires a browser login, which this process cannot do. "
+            "Run 'python3 core/consensus_mcp.py --login' once to store tokens, "
+            "or remove 'consensus' from agent_sources in config.json."
+        )
+    global _callback_server
+    if _callback_server is None:
+        _callback_server = _CallbackServer()
+        _callback_server.start()
+    print("\n[Consensus] Opening browser for authentication...")
     print(f"  If the browser does not open, visit:\n  {url}\n")
     webbrowser.open(url)
 
 
 async def _callback_handler() -> tuple[str, str | None]:
+    if not interactive_auth_allowed() or _callback_server is None:
+        raise ConsensusAuthRequired("Consensus browser login is not available here")
     print("[Consensus] Waiting for authentication callback...")
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, _callback_server.wait, 300.0)
@@ -431,12 +478,62 @@ async def _async_search(
     return results
 
 
+def have_tokens() -> bool:
+    """Whether a previous login left usable tokens on disk."""
+    try:
+        if not TOKEN_FILE.exists():
+            return False
+        return bool(json.loads(TOKEN_FILE.read_text()).get("tokens"))
+    except Exception:
+        return False
+
+
+# Logged once per process — a per-query warning would bury the real output.
+_warned_unavailable = False
+
+
+def available() -> bool:
+    """
+    Whether Consensus can be used without human interaction.
+
+    Unattended processes need stored tokens; only an interactive session may
+    obtain them.
+    """
+    return have_tokens() or interactive_auth_allowed()
+
+
 def search_consensus(query: str, limit: int = 10, **kwargs) -> list[dict]:
-    """Synchronous entry point. First call triggers registration + browser login."""
+    """
+    Synchronous entry point.
+
+    Returns [] rather than raising or blocking when Consensus is unavailable,
+    so it behaves like any other optional source.
+    """
+    global _warned_unavailable
+
+    if not available():
+        if not _warned_unavailable:
+            _warned_unavailable = True
+            logger.warning(
+                "[Consensus] Skipped — no stored credentials and this process "
+                "cannot open a browser. Run 'python3 core/consensus_mcp.py "
+                "--login' once, or remove 'consensus' from agent_sources in "
+                "config.json to stop attempting it."
+            )
+        return []
+
     try:
         return asyncio.run(_async_search(query, limit, **kwargs))
-    except RuntimeError as e:
-        logger.warning("[Consensus] %s", e)
+    except ConsensusAuthRequired as e:
+        if not _warned_unavailable:
+            _warned_unavailable = True
+            logger.warning("[Consensus] %s", e)
+        return []
+    except Exception as e:
+        # An optional source must never take the pipeline down with it
+        logger.warning("[Consensus] Search failed (%s) — continuing without it",
+                       type(e).__name__)
+        logger.debug("[Consensus] %s", e, exc_info=True)
         return []
 
 
@@ -445,7 +542,29 @@ def search_consensus(query: str, limit: int = 10, **kwargs) -> list[dict]:
 if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.INFO)
-    query = " ".join(sys.argv[1:]) or "effects of sleep on memory consolidation"
+
+    if "--login" in sys.argv:
+        # The one place a browser may open. Tokens land in
+        # db/consensus_tokens.json and every other process reuses them.
+        os.environ["SEEKER_CONSENSUS_INTERACTIVE"] = "1"
+        if not sys.stdin.isatty():
+            print("--login needs an interactive terminal.")
+            sys.exit(1)
+        print("\nAuthenticating with Consensus — a browser window will open.\n")
+        try:
+            asyncio.run(_async_search("authentication check", limit=1))
+        except Exception as e:
+            print(f"\nLogin failed: {e}")
+            sys.exit(1)
+        if have_tokens():
+            print(f"\nTokens stored at {TOKEN_FILE}")
+            print("Workers and the web app will now use Consensus.")
+            sys.exit(0)
+        print("\nNo tokens were stored — login did not complete.")
+        sys.exit(1)
+
+    query = " ".join(a for a in sys.argv[1:] if not a.startswith("-")) \
+        or "effects of sleep on memory consolidation"
     print(f"\nSearching Consensus MCP: '{query}'\n{'─'*60}")
     results = asyncio.run(_async_search(query, limit=5))
     if not results:

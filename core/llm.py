@@ -173,6 +173,18 @@ class LLMError(RuntimeError):
 _warned_missing_model: set = set()
 
 
+def _note_progress(provider: ProviderConfig, model: str) -> None:
+    """
+    Surface which model is being called. Imported lazily and never allowed to
+    raise — progress reporting must not be able to break a completion.
+    """
+    try:
+        from core import progress
+        progress.note("llm", f"{provider.name} · {model}")
+    except Exception:
+        pass
+
+
 def _headers(provider: ProviderConfig) -> dict:
     if provider.kind == "anthropic":
         return {
@@ -493,6 +505,7 @@ class LLMClient:
             )
 
         for prov, model, profile in attempts:
+            _note_progress(prov, model)
             result = self._attempt(prov, model, prompt, system, profile, agent_name)
             if result:
                 return result

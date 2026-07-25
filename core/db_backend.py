@@ -313,6 +313,57 @@ def cursor():
                 pass
 
 
+def existing_columns(table: str) -> set:
+    """Column names currently on a table, or an empty set if it does not exist."""
+    backend = get_backend()
+    try:
+        with cursor() as cur:
+            if backend.name == "mysql":
+                cur.execute(
+                    "SELECT column_name AS c FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() AND table_name = %s", (table,))
+                return {r["c"] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
+            cur.execute(f"PRAGMA table_info({table})")
+            return {r["name"] if not isinstance(r, tuple) else r[1]
+                    for r in rows_to_dicts(cur.fetchall())}
+    except Exception as e:
+        logger.debug(f"[DB] could not inspect {table}: {e}")
+        return set()
+
+
+def ensure_columns(table: str, columns: dict) -> list:
+    """
+    Add columns that a later version introduced to an already-created table.
+
+    CREATE TABLE IF NOT EXISTS silently does nothing when the table exists, so
+    a new column never appears and every write to it fails — quietly, because
+    the generic helpers log and return False. Call this after init_schema for
+    any table that has gained a column.
+
+    `columns` maps name to a type token, e.g. {"activity": "{TEXT}"}.
+    """
+    present = existing_columns(table)
+    if not present:
+        return []            # table absent; init_schema will create it in full
+
+    backend = get_backend()
+    added = []
+    for name, token in columns.items():
+        if name in present:
+            continue
+        sql_type = render_schema(token, backend.name)
+        try:
+            with cursor() as cur:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+            added.append(name)
+            logger.info(f"[DB] added column {table}.{name}")
+        except Exception as e:
+            # A parallel process may have added it between the check and here
+            if "duplicate" not in str(e).lower():
+                logger.warning(f"[DB] could not add {table}.{name}: {e}")
+    return added
+
+
 def rows_to_dicts(rows) -> list[dict]:
     """Normalise sqlite3.Row and PyMySQL DictCursor output to plain dicts."""
     return [dict(r) for r in (rows or [])]
