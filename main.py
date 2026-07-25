@@ -1,7 +1,8 @@
 """
 Pipeline Runner
 ---------------
-Main entry point. Orchestrates the full pipeline:
+CLI entry point. The pipeline itself lives in core/pipeline.py as a resumable
+state machine; this module drives it, answering breaks at the terminal.
 
   Concept Mapper → Break 0 (theme confirmation)
   → Grounder (builds argument tree) → Social (contemporary + bridges)
@@ -11,15 +12,16 @@ Main entry point. Orchestrates the full pipeline:
 
 Usage:
   python3 main.py run  --problem "Your research problem here"
-  python3 main.py run  --problem "..." --run-id RUN-20260330-XXXX  (resume)
-  python3 main.py collect                                            (Social passive scan)
-  python3 main.py recheck                                            (link health check)
-  python3 main.py status --run-id RUN-20260330-XXXX                 (check run status)
-  python3 main.py bank                                               (show seminal bank proposals)
+  python3 main.py run  --run-id RUN-20260330-XXXX --resume            (resume)
+  python3 main.py steps   --run-id RUN-...                     (per-step status)
+  python3 main.py rerun   --run-id RUN-... --step grounder     (re-run a step)
+  python3 main.py collect                                    (Social passive scan)
+  python3 main.py recheck                                     (link health check)
+  python3 main.py status  --run-id RUN-20260330-XXXX            (check run status)
+  python3 main.py bank                                (seminal bank proposals)
 """
 
 import sys
-import json
 import argparse
 import logging
 from pathlib import Path
@@ -32,98 +34,64 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core.keys import _load_env
 _load_env()
 
-from core.utils     import setup_logging, generate_run_id, load_config
-from core           import database as db
-from core           import breaks
-from core.context   import (
-    for_grounder, for_historian, for_gaper,
-    for_vision, for_theorist, for_rude,
-    for_synthesizer, for_thinker, for_scribe
-)
-from agents.social  import feed as social_feed, collect as social_collect
-from agents.social  import produce_intelligence_package, recheck_links
-from agents.social  import run as social_run
-from core.concept_mapper import expand as concept_expand, print_expansion_report
+from core.utils    import setup_logging, generate_run_id, load_config
+from core          import database as db
+from core          import breaks
+from core          import pipeline
+from agents.social import collect as social_collect
+from agents.social import recheck_links
 
 
 # ---------------------------------------------------------------------------
-# Agent imports — each agent exposes a run(context, run_id) function
+# Status rendering
 # ---------------------------------------------------------------------------
 
-def _import_agents():
-    """Lazy import agents to give clear error if one is missing."""
-    from agents.grounder    import run as run_grounder
-    from agents.historian   import run as run_historian
-    from agents.gaper       import run as run_gaper
-    from agents.vision      import run as run_vision
-    from agents.theorist    import run as run_theorist
-    from agents.rude        import run as run_rude
-    from agents.synthesizer import run as run_synthesizer
-    from agents.thinker     import run as run_thinker
-    from agents.scribe      import run as run_scribe
-    from agents.social import run as run_social
-    return {
-        "grounder":    run_grounder,
-        "social":      run_social,
-        "historian":   run_historian,
-        "gaper":       run_gaper,
-        "vision":      run_vision,
-        "theorist":    run_theorist,
-        "rude":        run_rude,
-        "synthesizer": run_synthesizer,
-        "thinker":     run_thinker,
-        "scribe":      run_scribe,
-    }
+_STATUS_ICON = {
+    "pending":        "·",
+    "running":        "▶",
+    "awaiting_input": "⏸",
+    "done":           "✓",
+    "failed":         "✗",
+    "skipped":        "⊘",
+}
+
+
+def _print_steps(state: dict):
+    print(f"\n  {'─'*60}")
+    print(f"  Steps — {state['progress']['done']}/{state['progress']['total']} complete")
+    print(f"  {'─'*60}")
+    for step in state["steps"]:
+        icon = _STATUS_ICON.get(step["status"], "?")
+        line = f"  {icon}  {step['label']:<34} {step['status']}"
+        if step.get("error"):
+            line += f"\n       └─ {step['error'][:100]}"
+        print(line)
+    print(f"  {'─'*60}\n")
 
 
 # ---------------------------------------------------------------------------
-# Pipeline step runner
+# Main pipeline — drive the state machine, answering breaks at the terminal
 # ---------------------------------------------------------------------------
 
-def _run_step(
-    step_name: str,
-    agent_fn,
-    context: str,
-    run_id: str,
-    extra: dict = None
-) -> bool:
-    """
-    Run a single pipeline step with error handling.
-    Returns True on success, False on failure.
-    """
-    logger = logging.getLogger("pipeline")
-    print(f"\n{'─'*60}")
-    print(f"  ▶  {step_name.upper()}")
-    print(f"{'─'*60}")
-    logger.info(f"Starting step: {step_name}")
-
-    try:
-        if extra:
-            agent_fn(context, run_id, **extra)
-        else:
-            agent_fn(context, run_id)
-        logger.info(f"Step complete: {step_name}")
-        print(f"  ✓  {step_name} complete")
-        return True
-    except Exception as e:
-        logger.error(f"Step failed: {step_name} — {e}", exc_info=True)
-        print(f"  ✗  {step_name} FAILED: {e}")
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Main pipeline
-# ---------------------------------------------------------------------------
-
-def run_pipeline(problem: str, run_id: str = None, resume: bool = False):
+def run_pipeline(problem: str = None, run_id: str = None, resume: bool = False):
     logger = logging.getLogger("pipeline")
 
-    # Setup
-    if run_id is None:
-        run_id = generate_run_id()
-    log = setup_logging(run_id)
     db.init_db()
     config = load_config()
+
+    existing = db.get_run(run_id) if run_id else None
+    if existing and not resume:
+        print(f"Run {run_id} already exists. Use --resume to continue.")
+        return
+    if existing:
+        problem = problem or existing.get("problem", "")
+    else:
+        if not problem:
+            print("A new run needs --problem.")
+            return
+        run_id = pipeline.create_run(problem, run_id)
+
+    log = setup_logging(run_id)
 
     print(f"\n{'='*60}")
     print(f"  MULTI-AGENT RESEARCH PIPELINE")
@@ -131,278 +99,48 @@ def run_pipeline(problem: str, run_id: str = None, resume: bool = False):
     print(f"  Run ID:  {run_id}")
     print(f"  Problem: {problem[:70]}{'...' if len(problem) > 70 else ''}")
     print(f"  Started: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"  Storage: {db.backend_name()}")
     print(f"{'='*60}\n")
 
-    # Create or retrieve run
-    existing_run = db.get_run(run_id)
-    if existing_run and not resume:
-        print(f"Run {run_id} already exists. Use --resume to continue.")
-        return
-    if not existing_run:
-        db.create_run(run_id, problem)
-        logger.info(f"New run created: {run_id}")
+    # Drive: advance until a break, then answer it here and continue.
+    while True:
+        state = pipeline.advance(run_id, problem, config)
 
-    run = db.get_run(run_id)
-
-    # -----------------------------------------------------------------------
-    # CONCEPT MAPPER + BREAK 0 (theme selection + confirmation)
-    # -----------------------------------------------------------------------
-
-    if not run.get("break0_done"):
-        # Concept mapper — translate problem into conceptual territory
-        print("\n▶  CONCEPT MAPPER — Semantic expansion...")
-        try:
-            expansion = concept_expand(problem, run_id, config)
-            print_expansion_report(expansion)
-            activated_theme_ids = expansion["final_themes"]
-            selected_themes = [t for t in config.get("themes", [])
-                               if t["theme_id"] in activated_theme_ids]
-            excluded_themes = [{"theme_id": t["theme_id"], "label": t.get("label",""),
-                                 "reason": "Not activated by concept mapper"}
-                                for t in config.get("themes", [])
-                                if t["theme_id"] not in activated_theme_ids]
-            logger.info(f"Concept mapper activated {len(selected_themes)} themes")
-        except Exception as e:
-            logger.warning(f"Concept mapper failed ({e}) — falling back to all themes")
-            selected_themes = config.get("themes", [])
-            excluded_themes = []
-            expansion = None
-
-        # Break 0 — human confirms/adjusts themes before any search begins
-        break0_instructions = breaks.break0(
-            run_id, problem, selected_themes, excluded_themes
-        )
-        logger.info(f"Break 0 instructions received: {len(break0_instructions)} chars")
-    else:
-        print("  ↩  Break 0 already completed — resuming")
-        break0_instructions = breaks.resume_instructions(run_id, 0)
-        selected_themes = config.get("themes", [])
-
-    agents = _import_agents()
-
-    # -----------------------------------------------------------------------
-    # GROUNDER (builds argument tree)
-    # -----------------------------------------------------------------------
-
-    if _agent_done(run_id, "grounder"):
-        print("  ↩  Grounder already completed — skipping")
-    else:
-        grounder_ctx = for_grounder(run_id, problem, [])
-        if not _run_step("Grounder", agents["grounder"], grounder_ctx, run_id):
-            _abort(run_id, "Grounder")
+        if state["failed_steps"]:
+            _print_steps(state)
+            _abort(run_id, state["failed_steps"][0])
             return
 
-    # -----------------------------------------------------------------------
-    # SOCIAL (contemporary + bridge papers — reads tree from Grounder)
-    # -----------------------------------------------------------------------
+        if state["awaiting_break"] is not None:
+            _print_steps(state)
+            breaks.answer_break_interactively(run_id, state["awaiting_break"], config)
+            continue
 
-    if _agent_done(run_id, "social"):
-        print("  ↩  Social already completed — skipping")
-    else:
-        social_ctx = f"PROBLEM:\n{problem}"
-        if not _run_step("Social", agents["social"], social_ctx, run_id,
-                         extra={"config": config, "selected_themes": selected_themes}):
-            logger.warning("Social failed — continuing (non-fatal)")
+        if state["complete"]:
+            break
 
-    # -----------------------------------------------------------------------
-    # HISTORIAN (audit tree + historical search + external factors)
-    # -----------------------------------------------------------------------
-
-    if _agent_done(run_id, "historian"):
-        print("  ↩  Historian already completed — skipping")
-    else:
-        historian_ctx = for_historian(run_id, problem)
-        if not _run_step("Historian", agents["historian"], historian_ctx, run_id):
-            _abort(run_id, "Historian")
-            return
-
-    # -----------------------------------------------------------------------
-    # GAPER (tree-native gap mapping)
-    # -----------------------------------------------------------------------
-
-    if _agent_done(run_id, "gaper"):
-        print("  ↩  Gaper already completed — skipping")
-    else:
-        gaper_ctx = for_gaper(run_id, problem)
-        if not _run_step("Gaper", agents["gaper"], gaper_ctx, run_id):
-            _abort(run_id, "Gaper")
-            return
-
-    # -----------------------------------------------------------------------
-    # BREAK 1
-    # -----------------------------------------------------------------------
-
-    if not run.get("break1_done"):
-        break1_instructions = breaks.break1(run_id, problem)
-        logger.info(f"Break 1 instructions received: {len(break1_instructions)} chars")
-    else:
-        print("  ↩  Break 1 already completed — resuming")
-        break1_instructions = breaks.resume_instructions(run_id, 1)
-
-    # -----------------------------------------------------------------------
-    # VISION
-    # -----------------------------------------------------------------------
-
-    if _agent_done(run_id, "vision"):
-        print("  ↩  Vision already completed — skipping")
-    else:
-        vision_ctx = for_vision(run_id, problem, break1_instructions)
-        if not _run_step("Vision", agents["vision"], vision_ctx, run_id):
-            _abort(run_id, "Vision")
-            return
-
-    # -----------------------------------------------------------------------
-    # THEORIST
-    # -----------------------------------------------------------------------
-
-    if _agent_done(run_id, "theorist"):
-        print("  ↩  Theorist already completed — skipping")
-    else:
-        theorist_ctx = for_theorist(run_id, problem, break1_instructions)
-        if not _run_step("Theorist", agents["theorist"], theorist_ctx, run_id):
-            _abort(run_id, "Theorist")
-            return
-
-    # -----------------------------------------------------------------------
-    # RUDE
-    # -----------------------------------------------------------------------
-
-    if _agent_done(run_id, "rude"):
-        print("  ↩  Rude already completed — skipping")
-    else:
-        rude_ctx = for_rude(run_id, problem, break1_instructions)
-        if not _run_step("Rude", agents["rude"], rude_ctx, run_id):
-            _abort(run_id, "Rude")
-            return
-
-    # -----------------------------------------------------------------------
-    # SYNTHESIZER
-    # -----------------------------------------------------------------------
-
-    if _agent_done(run_id, "synthesizer"):
-        print("  ↩  Synthesizer already completed — skipping")
-    else:
-        synthesizer_ctx = for_synthesizer(run_id, problem, break1_instructions)
-        if not _run_step("Synthesizer", agents["synthesizer"], synthesizer_ctx, run_id):
-            _abort(run_id, "Synthesizer")
-            return
-
-    # -----------------------------------------------------------------------
-    # BREAK 2
-    # -----------------------------------------------------------------------
-
-    if not run.get("break2_done"):
-        break2_instructions = breaks.break2(run_id, problem)
-        logger.info(f"Break 2 instructions received: {len(break2_instructions)} chars")
-    else:
-        print("  ↩  Break 2 already completed — resuming")
-        break2_instructions = breaks.resume_instructions(run_id, 2)
-
-    # Parse Scribe output requests
-    scribe_requests = breaks.parse_scribe_requests(break2_instructions)
-
-    # -----------------------------------------------------------------------
-    # THINKER
-    # -----------------------------------------------------------------------
-
-    if _agent_done(run_id, "thinker"):
-        print("  ↩  Thinker already completed — skipping")
-    else:
-        thinker_ctx = for_thinker(run_id, problem, break2_instructions)
-        if not _run_step("Thinker", agents["thinker"], thinker_ctx, run_id):
-            _abort(run_id, "Thinker")
-            return
-
-    # -----------------------------------------------------------------------
-    # SCRIBE — Understanding Map (always generated, every run)
-    # -----------------------------------------------------------------------
-
-    from core.context import for_understanding_map
-    umap_ctx = for_understanding_map(run_id, problem)
-    if not _run_step(
-        "Scribe [understanding_map]",
-        agents["scribe"],
-        umap_ctx,
-        run_id,
-        extra={"output_type": "understanding_map", "audience": "researcher"}
-    ):
-        logger.warning("Scribe failed for understanding_map — continuing")
-
-    # -----------------------------------------------------------------------
-    # SCRIBE — one artifact per requested output type
-    # -----------------------------------------------------------------------
-
-    for req in scribe_requests:
-        output_type = req["output_type"]
-        audience    = req["audience"]
-        scribe_ctx  = for_scribe(run_id, problem, output_type, audience, break2_instructions)
-        if not _run_step(
-            f"Scribe [{output_type}]",
-            agents["scribe"],
-            scribe_ctx,
-            run_id,
-            extra={"output_type": output_type, "audience": audience}
-        ):
-            logger.warning(f"Scribe failed for output type: {output_type}")
-
-    # -----------------------------------------------------------------------
-    # COMPLETE
-    # -----------------------------------------------------------------------
-
-    db.update_run_status(run_id, "completed")
+    _print_steps(pipeline.get_state(run_id))
 
     artifacts = db.get_artifacts(run_id)
-    print(f"\n{'='*60}")
+    print(f"{'='*60}")
     print(f"  PIPELINE COMPLETE")
     print(f"{'='*60}")
     print(f"  Run ID:    {run_id}")
     print(f"  Artifacts: {len(artifacts)} produced")
     for art in artifacts:
         print(f"    → [{art.get('output_type')}] {art.get('file_path','')}")
-    print(f"  Database:  {db.DB_PATH}")
     print(f"  Logs:      logs/{run_id}.log")
     print(f"{'='*60}\n")
     logger.info(f"Pipeline complete: {run_id}")
 
 
 def _abort(run_id: str, step: str):
-    db.update_run_status(run_id, f"failed:{step}")
     logging.getLogger("pipeline").error(f"Pipeline aborted at: {step}")
     print(f"\n  Pipeline aborted at step: {step}")
     print(f"  Run ID saved: {run_id}")
-    print(f"  You can resume with: python3 main.py run --problem \'...\'  --run-id {run_id} --resume")
-
-
-def _agent_done(run_id: str, agent: str) -> bool:
-    """
-    Infer whether an agent already ran for this run by checking for data
-    in the table it writes to. Used to skip re-running agents on resume.
-
-    Table presence map:
-      grounder   → seminal sources
-      historian  → historical sources
-      gaper      → gaps
-      vision     → implications
-      theorist   → proposals
-      rude       → evaluations
-      synthesizer→ synthesis record
-      thinker    → directions
-      scribe     → artifacts
-    """
-    checks = {
-        "grounder":    lambda: bool(db.get_sources_by_type("seminal",    run_id)),
-        "social":      lambda: bool(db.get_sources_by_type("current",    run_id)),
-        "historian":   lambda: bool(db.get_sources_by_type("historical", run_id)),
-        "gaper":       lambda: bool(db.get_gaps(run_id)),
-        "vision":      lambda: bool(db.get_implications(run_id)),
-        "theorist":    lambda: bool(db.get_proposals(run_id)),
-        "rude":        lambda: bool(db.get_evaluations(run_id)),
-        "synthesizer": lambda: db.get_synthesis(run_id) is not None,
-        "thinker":     lambda: bool(db.get_directions(run_id)),
-        "scribe":      lambda: bool(db.get_artifacts(run_id)),
-    }
-    check = checks.get(agent)
-    return bool(check and check())
+    print(f"  Resume with:  python3 main.py run --run-id {run_id} --resume")
+    print(f"  Or re-run just that step:")
+    print(f"                python3 main.py rerun --run-id {run_id} --step {step}")
 
 
 # ---------------------------------------------------------------------------
@@ -423,11 +161,67 @@ def cmd_run(args):
     else:
         chain = " → ".join(f"{s['provider']}:{s['model']}" for s in plan)
         print(f"\n  ✅  LLM chain: {chain}")
+    if not args.problem and not args.run_id:
+        print("\n  A new run needs --problem, or pass --run-id to resume one.\n")
+        return
     run_pipeline(
         problem=args.problem,
         run_id=args.run_id,
         resume=args.resume
     )
+
+
+def cmd_steps(args):
+    """Show per-step progress for a run."""
+    db.init_db()
+    state = pipeline.get_state(args.run_id)
+    if not state.get("exists"):
+        print(f"Run not found: {args.run_id}")
+        return
+    print(f"\n  Run:     {args.run_id}")
+    print(f"  Problem: {state['problem'][:70]}")
+    print(f"  Status:  {state['status']}")
+    _print_steps(state)
+    if state["awaiting_break"] is not None:
+        print(f"  ⏸  Waiting on Break {state['awaiting_break']}.")
+        print(f"     Answer it with: python3 main.py run --run-id {args.run_id} --resume\n")
+
+
+def cmd_rerun(args):
+    """Re-run a completed step, discarding it and everything downstream."""
+    db.init_db()
+    if args.step not in pipeline.STEP_BY_NAME:
+        print(f"Unknown step: {args.step}")
+        print(f"Valid steps: {', '.join(s.name for s in pipeline.STEP_DEFS)}")
+        return
+
+    state = pipeline.get_state(args.run_id)
+    if not state.get("exists"):
+        print(f"Run not found: {args.run_id}")
+        return
+
+    affected = [args.step] + ([] if args.only else pipeline.downstream_steps(args.step))
+    done = {s["step_name"] for s in state["steps"]
+            if s["status"] in ("done", "skipped")}
+    discarding = [n for n in affected if n in done]
+
+    print(f"\n  Re-running '{args.step}' for {args.run_id}")
+    if discarding:
+        print(f"  This DISCARDS the output of {len(discarding)} completed step(s):")
+        for name in discarding:
+            print(f"    - {pipeline.STEP_BY_NAME[name].label}")
+    else:
+        print("  No completed steps will be discarded.")
+
+    if not args.yes:
+        answer = input("\n  Proceed? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("  Cancelled.\n")
+            return
+
+    reset = pipeline.reset_step(args.run_id, args.step, cascade=not args.only)
+    print(f"\n  Reset {len(reset)} step(s). Continue with:")
+    print(f"    python3 main.py run --run-id {args.run_id} --resume\n")
 
 
 def cmd_collect(args):
@@ -474,6 +268,13 @@ def cmd_status(args):
     print(f"  Break 1:     {'✓' if run['break1_done'] else '✗'}")
     print(f"  Break 2:     {'✓' if run['break2_done'] else '✗'}")
     print(f"  Completed:   {run.get('completed_at', '—')}")
+
+    state = pipeline.get_state(args.run_id)
+    print(f"  Progress:    {state['progress']['done']}/{state['progress']['total']} steps")
+    if state["awaiting_break"] is not None:
+        print(f"  Waiting on:  Break {state['awaiting_break']}")
+    elif state["failed_steps"]:
+        print(f"  Failed at:   {', '.join(state['failed_steps'])}")
 
     # Counts
     print(f"\n  Database entries:")
@@ -625,10 +426,26 @@ Commands:
 
     # run
     p_run = sub.add_parser("run", help="Run the pipeline")
-    p_run.add_argument("--problem", required=True, help="Research problem statement")
+    p_run.add_argument("--problem", default=None,
+                       help="Research problem statement (required for a new run)")
     p_run.add_argument("--run-id",  default=None,  help="Resume an existing run")
     p_run.add_argument("--resume",  action="store_true", help="Resume from last completed step")
     p_run.set_defaults(func=cmd_run)
+
+    # steps
+    p_steps = sub.add_parser("steps", help="Show per-step progress for a run")
+    p_steps.add_argument("--run-id", required=True)
+    p_steps.set_defaults(func=cmd_steps)
+
+    # rerun
+    p_rerun = sub.add_parser("rerun", help="Re-run a step and everything after it")
+    p_rerun.add_argument("--run-id", required=True)
+    p_rerun.add_argument("--step",   required=True,
+                         help=f"One of: {', '.join(s.name for s in pipeline.STEP_DEFS)}")
+    p_rerun.add_argument("--only",   action="store_true",
+                         help="Reset just this step, leaving later steps alone")
+    p_rerun.add_argument("--yes",    action="store_true", help="Skip the confirmation")
+    p_rerun.set_defaults(func=cmd_rerun)
 
     # collect
     p_collect = sub.add_parser("collect", help="Social passive collection")

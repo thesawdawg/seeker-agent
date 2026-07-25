@@ -316,9 +316,11 @@ def init_db():
     """Initialize database — create all tables if they don't exist."""
     backend = db_backend.get_backend()
     backend.init_schema(SCHEMA)
-    # Argument tree lives in its own module but the same database
+    # These live in their own modules but share the same database
     from core.argument_tree import init_tree_table
+    from core.pipeline import init_steps_table
     init_tree_table()
+    init_steps_table()
     target = DB_PATH if backend.name == "sqlite" else backend._settings["database"]
     logger.info(f"Database initialized ({backend.name}) at {target}")
 

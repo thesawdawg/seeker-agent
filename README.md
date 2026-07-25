@@ -112,13 +112,38 @@ The pipeline will:
 
 ### 5. Resume a run
 
-If the pipeline is interrupted or you want to re-run from a break point:
+The pipeline is a **resumable state machine**. Every step is a record with an
+explicit status, so a run can be interrupted, inspected and continued.
 
 ```bash
-python3 main.py run --problem "your problem" --run-id RUN-20260407-022355-242D --resume
+# See exactly where a run stands
+python3 main.py steps --run-id RUN-20260407-022355-242D
+
+# Continue — retries a failed step, or re-asks an unanswered break
+python3 main.py run --run-id RUN-20260407-022355-242D --resume
 ```
 
-The pipeline detects which agents already completed (by checking the database) and skips them.
+A resume never steps over a failed step, and never re-asks a break you have
+already answered — your instructions are stored and replayed.
+
+### 6. Re-run a step
+
+To redo a step and everything that depended on it:
+
+```bash
+python3 main.py rerun --run-id RUN-... --step gaper
+```
+
+This **discards** that step's output and all downstream output, then leaves
+the run ready to resume. It lists what will be lost and asks first. Use
+`--only` to reset a single step without touching later ones.
+
+Steps, in order:
+
+```
+concept_mapper  break0  grounder  social  historian  gaper  break1
+vision  theorist  rude  synthesizer  break2  thinker  scribe
+```
 
 ## Database Backends
 

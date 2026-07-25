@@ -289,6 +289,11 @@ def _extract_instructions(document_content: str) -> str:
     return ""
 
 
+def check_contradictions(instructions: str, run_id: str, break_num: int) -> list[str]:
+    """Public alias — see _check_contradictions."""
+    return _check_contradictions(instructions, run_id, break_num)
+
+
 def _check_contradictions(instructions: str, run_id: str, break_num: int) -> list[str]:
     """
     Check if instructions contradict prior agent outputs.
@@ -330,52 +335,24 @@ def _check_contradictions(instructions: str, run_id: str, break_num: int) -> lis
 # Public break interface
 # ---------------------------------------------------------------------------
 
-def break0(run_id: str, problem: str, selected_themes: list, excluded_themes: list) -> str:
+def answer_break_interactively(run_id: str, break_num: int,
+                               config: dict = None) -> str:
     """
-    Break 0 — Theme confirmation.
-    Returns the human's instructions as a string.
-    """
-    doc_path = _produce_break0_doc(run_id, problem, selected_themes, excluded_themes)
-    instructions = _wait_for_instruction_file(doc_path, "BREAK 0")
-    contradictions = _check_contradictions(instructions, run_id, 0)
-    db.save_break_instructions(run_id, 0, instructions, contradictions)
-    db.mark_break_done(run_id, 0)
-    if contradictions:
-        logger.info(f"Break 0: {len(contradictions)} contradiction(s) noted")
-    return instructions
+    Prompt for a break at the terminal and record the answer.
 
+    CLI only — this blocks on stdin, so it must never be called from the web
+    app or a worker. Those submit through core.pipeline.submit_break instead,
+    which this function also uses, so both paths share one code path for
+    persistence and contradiction checking.
+    """
+    from core import pipeline
 
-def break1(run_id: str, problem: str) -> str:
-    """
-    Break 1 — Ground truth validation.
-    Returns the human's instructions as a string.
-    """
-    doc_path = _produce_break1_doc(run_id, problem)
-    instructions = _wait_for_instruction_file(doc_path, "BREAK 1")
-    contradictions = _check_contradictions(instructions, run_id, 1)
-    db.save_break_instructions(run_id, 1, instructions, contradictions)
-    db.mark_break_done(run_id, 1)
-    if contradictions:
-        contradiction_log = "\n".join(contradictions)
-        logger.info(f"Break 1: {len(contradictions)} contradiction(s) logged")
-        instructions = instructions + f"\n\n--- CONTRADICTION LOG ---\n{contradiction_log}"
-    return instructions
+    doc_path = produce_document(run_id, break_num, config)
+    instructions = _wait_for_instruction_file(doc_path, f"BREAK {break_num}")
+    result = pipeline.submit_break(run_id, break_num, instructions, source="cli")
 
-
-def break2(run_id: str, problem: str) -> str:
-    """
-    Break 2 — Trajectory evaluation.
-    Returns the human's instructions as a string.
-    """
-    doc_path = _produce_break2_doc(run_id, problem)
-    instructions = _wait_for_instruction_file(doc_path, "BREAK 2")
-    contradictions = _check_contradictions(instructions, run_id, 2)
-    db.save_break_instructions(run_id, 2, instructions, contradictions)
-    db.mark_break_done(run_id, 2)
-    if contradictions:
-        contradiction_log = "\n".join(contradictions)
-        logger.info(f"Break 2: {len(contradictions)} contradiction(s) logged")
-        instructions = instructions + f"\n\n--- CONTRADICTION LOG ---\n{contradiction_log}"
+    if result["contradictions"]:
+        logger.info(f"Break {break_num}: {len(result['contradictions'])} contradiction(s) logged")
     return instructions
 
 
@@ -409,6 +386,162 @@ def resume_instructions(run_id: str, break_num: int) -> str:
         f"resuming with CONFIRMED. Human steering for this break is lost."
     )
     return "CONFIRMED"
+
+
+# ---------------------------------------------------------------------------
+# Structured payloads
+#
+# One source of truth for what a break shows. The CLI renders it to markdown;
+# the web UI renders it to widgets. Both produce the same directive language,
+# so a run answered in the browser and a run answered at the terminal are
+# indistinguishable downstream.
+# ---------------------------------------------------------------------------
+
+def _theme_options(run_id: str, config: dict) -> list[dict]:
+    """Every theme, flagged with whether the concept mapper activated it."""
+    import json
+    all_themes = (config or {}).get("themes", [])
+
+    activated = None
+    try:
+        from core.concept_mapper import get_expansion
+        expansion = get_expansion(run_id)
+        if expansion:
+            raw = expansion.get("final_themes")
+            activated = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception as e:
+        logger.warning(f"Could not read concept expansion for {run_id}: {e}")
+
+    activated_set = set(activated) if activated else None
+    options = []
+    for t in all_themes:
+        tid = t.get("theme_id", "")
+        options.append({
+            "theme_id": tid,
+            "label":    t.get("label", ""),
+            "keywords": [k.get("seed", "") for k in t.get("keywords", [])],
+            "selected": True if activated_set is None else tid in activated_set,
+        })
+    return options
+
+
+def apply_theme_directives(instructions: str, selected: list[dict],
+                           all_themes: list[dict]) -> list[dict]:
+    """
+    Apply `ADD THEME: <id>` / `REMOVE THEME: <id>` from Break 0 instructions.
+    """
+    by_id = {t.get("theme_id"): t for t in all_themes}
+    chosen = {t.get("theme_id"): t for t in selected}
+
+    for line in (instructions or "").splitlines():
+        line = line.strip()
+        upper = line.upper()
+        if upper.startswith("ADD THEME:"):
+            tid = line.split(":", 1)[1].strip()
+            if tid in by_id:
+                chosen[tid] = by_id[tid]
+            else:
+                logger.warning(f"ADD THEME references unknown theme: {tid}")
+        elif upper.startswith("REMOVE THEME:"):
+            tid = line.split(":", 1)[1].strip()
+            chosen.pop(tid, None)
+
+    return list(chosen.values())
+
+
+def build_payload(run_id: str, break_num: int, config: dict = None) -> dict:
+    """
+    Structured content for a break, plus the rendered review document.
+
+    Shape is stable across breaks: `fields` carries the reviewable items,
+    `directives` documents the commands a human may issue.
+    """
+    run = db.get_run(run_id) or {}
+    problem = run.get("problem", "")
+    stored = db.get_break_instructions(run_id, break_num)
+
+    payload = {
+        "run_id":      run_id,
+        "break_num":   break_num,
+        "problem":     problem,
+        "generated":   _now_str(),
+        "answered":    stored is not None,
+        "instructions": (stored or {}).get("instructions", ""),
+        "fields":      {},
+        "directives":  [],
+    }
+
+    if break_num == 0:
+        payload["title"] = "Break 0 — Theme Confirmation"
+        payload["fields"]["themes"] = _theme_options(run_id, config or {})
+        payload["directives"] = [
+            {"command": "CONFIRMED", "description": "Accept the selection as-is"},
+            {"command": "ADD THEME: <theme_id>", "description": "Include an excluded theme"},
+            {"command": "REMOVE THEME: <theme_id>", "description": "Drop a selected theme"},
+        ]
+
+    elif break_num == 1:
+        payload["title"] = "Break 1 — Ground Truth Validation"
+        payload["fields"]["seminal"]    = db.get_sources_by_type("seminal", run_id)
+        payload["fields"]["historical"] = db.get_sources_by_type("historical", run_id)
+        payload["fields"]["gaps"]       = db.get_gaps(run_id)
+        payload["directives"] = [
+            {"command": "CONFIRMED", "description": "Everything is correct"},
+            {"command": "CORRECT GAP <gap_id>: <text>", "description": "Revise a gap"},
+            {"command": "REMOVE GAP <gap_id>", "description": "Drop a gap"},
+            {"command": "ADD GAP: <description>", "description": "Add a missed gap"},
+            {"command": "OVERRIDE SEMINAL <source_id>: <note>",
+             "description": "Correct a seminal assessment"},
+        ]
+
+    elif break_num == 2:
+        payload["title"] = "Break 2 — Trajectory Evaluation"
+        proposals   = db.get_proposals(run_id)
+        evaluations = db.get_evaluations(run_id)
+        by_id = {p["proposal_id"]: p for p in proposals}
+        payload["fields"]["synthesis"] = db.get_synthesis(run_id) or {}
+        payload["fields"]["evaluations"] = [
+            {**e, "proposal_text": (by_id.get(e.get("proposal_id"), {}) or {}).get("proposal", "")}
+            for e in evaluations
+        ]
+        payload["fields"]["output_types"] = [
+            "research_brief", "understanding_map", "blog_post",
+            "paper_section", "literature_review",
+        ]
+        payload["directives"] = [
+            {"command": "CONFIRMED", "description": "Accept the trajectory"},
+            {"command": "OVERRIDE VERDICT <evaluation_id>: <reasoning>",
+             "description": "Disagree with a feasibility verdict"},
+            {"command": "SCRIBE OUTPUT: <type> | audience: <audience>",
+             "description": "Request an output artifact"},
+        ]
+
+    else:
+        raise ValueError(f"Unknown break: {break_num}")
+
+    payload["document"] = str(produce_document(run_id, break_num, config))
+    return payload
+
+
+def produce_document(run_id: str, break_num: int, config: dict = None) -> Path:
+    """Write the markdown review document for a break and return its path."""
+    run = db.get_run(run_id) or {}
+    problem = run.get("problem", "")
+
+    if break_num == 0:
+        options = _theme_options(run_id, config or {})
+        selected = [{"theme_id": o["theme_id"], "label": o["label"],
+                     "keywords": [{"seed": k} for k in o["keywords"]]}
+                    for o in options if o["selected"]]
+        excluded = [{"theme_id": o["theme_id"],
+                     "reason": "Not activated by concept mapper"}
+                    for o in options if not o["selected"]]
+        return _produce_break0_doc(run_id, problem, selected, excluded)
+    if break_num == 1:
+        return _produce_break1_doc(run_id, problem)
+    if break_num == 2:
+        return _produce_break2_doc(run_id, problem)
+    raise ValueError(f"Unknown break: {break_num}")
 
 
 def parse_scribe_requests(instructions: str) -> list[dict]:
