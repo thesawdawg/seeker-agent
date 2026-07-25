@@ -24,11 +24,13 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from core import llm
+from core import database as db
 from core.utils import generate_id
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).parent.parent / "db" / "pipeline.db"
+# Pipeline state goes through core.database. conceptnet.db below stays SQLite —
+# it is a read-only reference corpus, not pipeline state.
 CONCEPT_MAP_PATH = Path(__file__).parent.parent / "concept_map.json"
 
 CONCEPTNET_DB_PATH = Path(__file__).parent.parent / "db" / "conceptnet.db"
@@ -39,33 +41,40 @@ CONCEPTNET_DB_PATH = Path(__file__).parent.parent / "db" / "conceptnet.db"
 
 CACHE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS concept_cache (
-    cache_key      TEXT PRIMARY KEY,
-    term           TEXT NOT NULL,
-    relations      TEXT NOT NULL,   -- JSON array of {rel, target, weight}
-    fetched_at     TEXT NOT NULL
+    cache_key      {ID} PRIMARY KEY,
+    term           {KEY} NOT NULL,
+    relations      {LONGTEXT} NOT NULL,   -- JSON array of {rel, target, weight}
+    fetched_at     {TEXT} NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS concept_expansions (
-    expansion_id   TEXT PRIMARY KEY,
-    run_id         TEXT NOT NULL,
-    problem        TEXT NOT NULL,
-    raw_terms      TEXT NOT NULL,   -- JSON array
-    expanded_concepts TEXT NOT NULL,-- JSON array of {concept, source, weight, cluster_ids}
-    activated_clusters TEXT NOT NULL,-- JSON array of cluster_ids
-    activated_disciplines TEXT NOT NULL,-- JSON array
-    bridge_concepts TEXT NOT NULL,  -- JSON array
-    final_themes   TEXT NOT NULL,   -- JSON array of theme_ids to activate
-    llm_reasoning  TEXT,
-    created_at     TEXT NOT NULL
+    expansion_id   {ID} PRIMARY KEY,
+    run_id         {ID} NOT NULL,
+    problem        {LONGTEXT} NOT NULL,
+    raw_terms      {LONGTEXT} NOT NULL,   -- JSON array
+    expanded_concepts {LONGTEXT} NOT NULL,-- JSON array of {concept, source, weight, cluster_ids}
+    activated_clusters {LONGTEXT} NOT NULL,-- JSON array of cluster_ids
+    activated_disciplines {LONGTEXT} NOT NULL,-- JSON array
+    bridge_concepts {LONGTEXT} NOT NULL,  -- JSON array
+    final_themes   {LONGTEXT} NOT NULL,   -- JSON array of theme_ids to activate
+    llm_reasoning  {LONGTEXT},
+    created_at     {TEXT} NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_concept_exp_run ON concept_expansions(run_id);
 """
 
-def _get_conn() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.executescript(CACHE_SCHEMA)
-    return conn
+_cache_tables_ready = False
+
+
+def _init_cache_tables():
+    """Create the concept cache tables once per process."""
+    global _cache_tables_ready
+    if _cache_tables_ready:
+        return
+    from core import db_backend
+    db_backend.get_backend().init_schema(CACHE_SCHEMA)
+    _cache_tables_ready = True
 
 
 # ---------------------------------------------------------------------------
@@ -97,16 +106,15 @@ def _fetch_conceptnet(term: str, limit: int = 30) -> list[dict]:
     Falls back to empty list if conceptnet.db not available.
     """
     cache_key_val = _cache_key(term)
-    conn = _get_conn()
+    _init_cache_tables()
 
-    # Check pipeline.db cache
-    row = conn.execute(
+    # Check the pipeline cache
+    cached = db.query(
         "SELECT relations FROM concept_cache WHERE cache_key = ?", (cache_key_val,)
-    ).fetchone()
-    if row:
-        conn.close()
+    )
+    if cached:
         logger.debug(f"[ConceptMapper] Cache hit: {term}")
-        return json.loads(row["relations"])
+        return json.loads(cached[0]["relations"])
 
     # Check if local ConceptNet DB is available
     if not _conceptnet_available():
@@ -114,7 +122,6 @@ def _fetch_conceptnet(term: str, limit: int = 30) -> list[dict]:
             f"[ConceptMapper] conceptnet.db not found at {CONCEPTNET_DB_PATH}. "
             f"Run: python3 tools/import_conceptnet.py --input /path/to/conceptnet-assertions-5.7.0.csv.gz"
         )
-        conn.close()
         return []
 
     # Query local conceptnet.db
@@ -158,16 +165,14 @@ def _fetch_conceptnet(term: str, limit: int = 30) -> list[dict]:
 
     except Exception as e:
         logger.warning(f"[ConceptMapper] Local DB query failed for '{term}': {e}")
-        conn.close()
         return []
 
-    # Cache into pipeline.db
-    conn.execute(
-        "INSERT OR REPLACE INTO concept_cache (cache_key, term, relations, fetched_at) VALUES (?,?,?,?)",
-        (cache_key_val, term, json.dumps(relations), datetime.now(timezone.utc).isoformat())
-    )
-    conn.commit()
-    conn.close()
+    db.insert("concept_cache", {
+        "cache_key":  cache_key_val,
+        "term":       term,
+        "relations":  json.dumps(relations),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    })
 
     return relations
 
@@ -759,42 +764,32 @@ def expand(problem: str, run_id: str, config: dict) -> dict:
     }
 
     # Save to database
-    conn = _get_conn()
-    conn.execute(
-        """INSERT OR REPLACE INTO concept_expansions
-           (expansion_id, run_id, problem, raw_terms, expanded_concepts,
-            activated_clusters, activated_disciplines, bridge_concepts,
-            final_themes, llm_reasoning, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            generate_id("EXP"), run_id, problem,
-            json.dumps(raw_terms),
-            json.dumps(expanded_concepts),
-            json.dumps(activated_clusters),
-            json.dumps(all_disciplines),
-            json.dumps(all_bridges),
-            json.dumps(final_themes),
-            result["llm_reasoning"],
-            datetime.now(timezone.utc).isoformat()
-        )
-    )
-    conn.commit()
-    conn.close()
+    _init_cache_tables()
+    db.insert("concept_expansions", {
+        "expansion_id":          generate_id("EXP"),
+        "run_id":                run_id,
+        "problem":               problem,
+        "raw_terms":             json.dumps(raw_terms),
+        "expanded_concepts":     json.dumps(expanded_concepts),
+        "activated_clusters":    json.dumps(activated_clusters),
+        "activated_disciplines": json.dumps(all_disciplines),
+        "bridge_concepts":       json.dumps(all_bridges),
+        "final_themes":          json.dumps(final_themes),
+        "llm_reasoning":         result["llm_reasoning"],
+        "created_at":            datetime.now(timezone.utc).isoformat(),
+    })
 
     return result
 
 
 def get_expansion(run_id: str) -> Optional[dict]:
     """Retrieve a cached expansion for a run."""
-    conn = _get_conn()
-    row = conn.execute(
+    _init_cache_tables()
+    rows = db.query(
         "SELECT * FROM concept_expansions WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
         (run_id,)
-    ).fetchone()
-    conn.close()
-    if not row:
-        return None
-    return dict(row)
+    )
+    return rows[0] if rows else None
 
 
 def print_expansion_report(result: dict):

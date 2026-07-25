@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import sqlite3
 import time
 import urllib.parse
 from dataclasses import dataclass, field, asdict
@@ -214,7 +213,7 @@ def build_manifest(run_id: str) -> list[CitableSource]:
 
     citables: list[CitableSource] = []
     for r in rows:
-        # rows may be sqlite3.Row or dict
+        # rows may be sqlite3.Row, DictCursor dict, or plain dict
         get = r.get if isinstance(r, dict) else (lambda k, _r=r: _r[k] if k in _r.keys() else None)
         title   = (get("title") or "").strip()
         if not title:
@@ -246,15 +245,9 @@ def build_manifest(run_id: str) -> list[CitableSource]:
 
 
 def _fallback_get_sources(run_id: str) -> list[dict]:
-    """Direct SQL fallback if database.py doesn't expose a helper."""
-    db_path = Path(__file__).parent.parent / "db" / "pipeline.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT * FROM sources WHERE run_id = ?", (run_id,)
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    """Fallback if database.py doesn't expose a suitable helper."""
+    from core import database as db
+    return db.fetch("sources", {"run_id": run_id})
 
 
 # ---------------------------------------------------------------------------
@@ -411,49 +404,49 @@ OPENALEX_API = "https://api.openalex.org/works"
 
 _VERIFY_CACHE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS reference_verifications (
-    source_id     TEXT PRIMARY KEY,
-    doi           TEXT,
-    url           TEXT,
-    exists_online INTEGER,      -- 1/0
-    verified_via  TEXT,
-    note          TEXT,
-    checked_at    TEXT
+    source_id     {ID} PRIMARY KEY,
+    doi           {TEXT},
+    url           {TEXT},
+    exists_online {INT},      -- 1/0
+    verified_via  {TEXT},
+    note          {TEXT},
+    checked_at    {TEXT}
 );
 """
 
+_verify_cache_ready = False
 
-def _verify_conn() -> sqlite3.Connection:
-    db_path = Path(__file__).parent.parent / "db" / "pipeline.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(_VERIFY_CACHE_SCHEMA)
-    return conn
+
+def _init_verify_cache():
+    """Create the verification cache table once per process."""
+    global _verify_cache_ready
+    if _verify_cache_ready:
+        return
+    from core import db_backend
+    db_backend.get_backend().init_schema(_VERIFY_CACHE_SCHEMA)
+    _verify_cache_ready = True
 
 
 def _cached_verification(source_id: str) -> Optional[dict]:
-    conn = _verify_conn()
-    conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        "SELECT * FROM reference_verifications WHERE source_id = ?",
-        (source_id,)
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    from core import database as db
+    _init_verify_cache()
+    rows = db.fetch("reference_verifications", {"source_id": source_id})
+    return rows[0] if rows else None
 
 
 def _cache_verification(src: CitableSource) -> None:
     from datetime import datetime, timezone
-    conn = _verify_conn()
-    conn.execute(
-        """INSERT OR REPLACE INTO reference_verifications
-           (source_id, doi, url, exists_online, verified_via, note, checked_at)
-           VALUES (?,?,?,?,?,?,?)""",
-        (src.source_id, _clean_doi(src.doi), src.url,
-         int(bool(src.exists_online)) if src.exists_online is not None else None,
-         src.verified_via, src.verification_note,
-         datetime.now(timezone.utc).isoformat())
-    )
-    conn.commit()
-    conn.close()
+    from core import database as db
+    _init_verify_cache()
+    db.insert("reference_verifications", {
+        "source_id":     src.source_id,
+        "doi":           _clean_doi(src.doi),
+        "url":           src.url,
+        "exists_online": int(bool(src.exists_online)) if src.exists_online is not None else None,
+        "verified_via":  src.verified_via,
+        "note":          src.verification_note,
+        "checked_at":    datetime.now(timezone.utc).isoformat(),
+    })
 
 
 def _check_crossref(doi: str, client: httpx.Client) -> tuple[bool, str]:

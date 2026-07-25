@@ -15,7 +15,9 @@ if TEST_DB.exists():
 # Patch DB path before imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import core.argument_tree as at
-at.DB_PATH = TEST_DB
+from core import database, db_backend
+database.DB_PATH = TEST_DB
+db_backend.reset_backend()
 
 # Create minimal schema
 conn = sqlite3.connect(str(TEST_DB))

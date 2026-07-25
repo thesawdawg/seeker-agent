@@ -15,15 +15,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 @pytest.fixture()
 def isolated_db(tmp_path, monkeypatch):
-    """Point the database layer at a throwaway file for each test."""
+    """Point the database layer at a throwaway SQLite file for each test."""
     import core.database as db
-    import core.argument_tree as at
+    from core import db_backend
 
-    db_path = tmp_path / "pipeline.db"
-    monkeypatch.setattr(db, "DB_PATH", db_path)
-    monkeypatch.setattr(at, "DB_PATH", db_path)
+    monkeypatch.setenv("SEEKER_DB_BACKEND", "sqlite")
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "pipeline.db")
+    db_backend.reset_backend()
     db.init_db()
-    return db
+    yield db
+    db_backend.reset_backend()
 
 
 def test_instructions_round_trip(isolated_db):

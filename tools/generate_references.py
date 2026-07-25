@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import sys
 import json
-import sqlite3
 import argparse
 import logging
 from pathlib import Path
+
+# Running from tools/ — put the repo root on the path so `core` resolves.
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -34,12 +37,8 @@ ARTIFACTS_DIR = _HERE / "artifacts"
 
 def load_tree_sources(db_path: Path, run_id: str) -> list[str]:
     """Get all source_ids from the argument tree for a run."""
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT source_ids FROM argument_tree WHERE run_id = ?", (run_id,)
-    ).fetchall()
-    conn.close()
+    from core import database as db
+    rows = db.query("SELECT source_ids FROM argument_tree WHERE run_id = ?", (run_id,))
 
     all_ids = set()
     for row in rows:
@@ -55,27 +54,21 @@ def load_sources_by_ids(db_path: Path, source_ids: list[str]) -> list[dict]:
     """Load full source records by their IDs."""
     if not source_ids:
         return []
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+    from core import database as db
     placeholders = ",".join("?" * len(source_ids))
-    rows = conn.execute(
+    return db.query(
         f"SELECT * FROM sources WHERE source_id IN ({placeholders})",
-        source_ids
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+        tuple(source_ids)
+    )
 
 
 def load_all_run_sources(db_path: Path, run_id: str) -> list[dict]:
     """Fallback: load all sources for a run if no tree exists."""
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
+    from core import database as db
+    return db.query(
         "SELECT * FROM sources WHERE run_id = ? ORDER BY type, year",
         (run_id,)
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    )
 
 
 def format_apa(source: dict) -> str:
@@ -273,6 +266,11 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     db_path = Path(args.db)
+    # --db selects a specific SQLite file; otherwise the configured backend
+    # (SQLite or MySQL) is used as-is.
+    if args.db != str(DB_PATH):
+        from core import database as _db
+        _db.use_sqlite_file(db_path)
     if not db_path.exists():
         print(f"Database not found: {db_path}")
         sys.exit(1)

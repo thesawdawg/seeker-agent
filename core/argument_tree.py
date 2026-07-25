@@ -67,9 +67,7 @@ Usage:
 from __future__ import annotations
 
 import json
-import sqlite3
 import logging
-from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -77,35 +75,42 @@ from core.utils import generate_id
 
 logger = logging.getLogger(__name__)
 
-_HERE   = Path(__file__).parent.parent
-DB_PATH = _HERE / "db" / "pipeline.db"
+# The tree lives in the same database as everything else — connections and
+# dialect come from core.db_backend. To point tests at a throwaway database,
+# set core.database.DB_PATH (sqlite) rather than a path here.
 
 
 # ─── Schema ───────────────────────────────────────────────────────────────────
 
+# Types are tokens rendered per dialect by core.db_backend — MySQL cannot
+# index TEXT without a prefix length, so keys must be VARCHAR.
 TREE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS argument_tree (
-    node_id         TEXT PRIMARY KEY,
-    run_id          TEXT NOT NULL,
-    parent_node_id  TEXT,
-    node_type       TEXT NOT NULL,
-    depth           INTEGER DEFAULT 0,
-    content         TEXT NOT NULL,
-    status          TEXT DEFAULT 'unsupported',
-    confidence      REAL DEFAULT 0.0,
-    source_ids      TEXT DEFAULT '[]',
-    agent_origin    TEXT DEFAULT '',
-    created_at      TEXT NOT NULL,
-    metadata        TEXT DEFAULT '{}',
-
-    FOREIGN KEY (run_id) REFERENCES runs(run_id),
-    FOREIGN KEY (parent_node_id) REFERENCES argument_tree(node_id)
+    node_id         {ID} PRIMARY KEY,
+    run_id          {ID} NOT NULL,
+    parent_node_id  {ID},
+    node_type       {KEY} NOT NULL,
+    depth           {INT} DEFAULT 0,
+    content         {LONGTEXT} NOT NULL,
+    status          {KEY} DEFAULT 'unsupported',
+    confidence      {REAL} DEFAULT 0.0,
+    source_ids      {TEXT},
+    agent_origin    {KEY},
+    created_at      {TEXT} NOT NULL,
+    metadata        {TEXT}
 );
 
 CREATE INDEX IF NOT EXISTS idx_tree_run ON argument_tree(run_id);
 CREATE INDEX IF NOT EXISTS idx_tree_parent ON argument_tree(parent_node_id);
 CREATE INDEX IF NOT EXISTS idx_tree_type ON argument_tree(run_id, node_type);
 """
+
+# Column order for the node upsert — must match the tuple built in _insert().
+_TREE_COLUMNS = [
+    "node_id", "run_id", "parent_node_id", "node_type", "depth",
+    "content", "status", "confidence", "source_ids",
+    "agent_origin", "created_at", "metadata",
+]
 
 VALID_NODE_TYPES = {
     "root", "question", "claim", "evidence", "bridge",
@@ -127,10 +132,8 @@ VALID_STATUSES = {
 
 def init_tree_table():
     """Create the argument_tree table if it doesn't exist."""
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.executescript(TREE_SCHEMA)
-    conn.commit()
-    conn.close()
+    from core import db_backend
+    db_backend.get_backend().init_schema(TREE_SCHEMA)
     logger.debug("[Tree] Table initialized")
 
 
@@ -143,16 +146,27 @@ class TreeBuilder:
     """
 
     def __init__(self, run_id: str):
-        self.run_id = run_id
-        self._conn = sqlite3.connect(str(DB_PATH))
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        # Ensure table exists
-        self._conn.executescript(TREE_SCHEMA)
-        self._conn.commit()
+        from core import db_backend
+        self.run_id   = run_id
+        self._backend = db_backend.get_backend()
+        self._ph      = self._backend.placeholder
+        init_tree_table()
+        self._conn = self._backend.connect()
+
+    def _sql(self, sql: str) -> str:
+        """Translate '?' placeholders for the active backend."""
+        return sql if self._ph == "?" else sql.replace("?", self._ph)
+
+    def _q(self, sql: str, params: tuple = ()):
+        """Execute and return a cursor. Rows are subscriptable on both backends."""
+        cur = self._conn.cursor()
+        cur.execute(self._sql(sql), params)
+        return cur
 
     def close(self):
-        self._conn.close()
+        # MySQL connections are thread-local and reused; only SQLite closes here.
+        if self._backend.name == "sqlite":
+            self._conn.close()
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -163,18 +177,14 @@ class TreeBuilder:
                 metadata: dict = None) -> str:
         depth = 0
         if parent_id:
-            row = self._conn.execute(
+            row = self._q(
                 "SELECT depth FROM argument_tree WHERE node_id = ?", (parent_id,)
             ).fetchone()
             if row:
                 depth = row["depth"] + 1
 
-        self._conn.execute(
-            """INSERT OR REPLACE INTO argument_tree
-               (node_id, run_id, parent_node_id, node_type, depth,
-                content, status, confidence, source_ids,
-                agent_origin, created_at, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        self._q(
+            self._backend.upsert_sql("argument_tree", _TREE_COLUMNS),
             (
                 node_id, self.run_id, parent_id, node_type, depth,
                 content, status, confidence,
@@ -276,7 +286,7 @@ class TreeBuilder:
             source_ids=[source_id], agent=agent,
         )
         # Update parent claim status to contested
-        self._conn.execute(
+        self._q(
             "UPDATE argument_tree SET status = 'contested' WHERE node_id = ?",
             (parent_claim_id,)
         )
@@ -336,12 +346,12 @@ class TreeBuilder:
 
         # Update the target node if new values provided
         if new_status:
-            self._conn.execute(
+            self._q(
                 "UPDATE argument_tree SET status = ? WHERE node_id = ?",
                 (new_status, target_node_id)
             )
         if new_confidence is not None:
-            self._conn.execute(
+            self._q(
                 "UPDATE argument_tree SET confidence = ? WHERE node_id = ?",
                 (new_confidence, target_node_id)
             )
@@ -352,7 +362,7 @@ class TreeBuilder:
 
     def update_status(self, node_id: str, status: str):
         """Update a node's status."""
-        self._conn.execute(
+        self._q(
             "UPDATE argument_tree SET status = ? WHERE node_id = ?",
             (status, node_id)
         )
@@ -360,7 +370,7 @@ class TreeBuilder:
 
     def update_confidence(self, node_id: str, confidence: float):
         """Update a node's confidence."""
-        self._conn.execute(
+        self._q(
             "UPDATE argument_tree SET confidence = ? WHERE node_id = ?",
             (confidence, node_id)
         )
@@ -368,14 +378,14 @@ class TreeBuilder:
 
     def add_source_to_node(self, node_id: str, source_id: str):
         """Append a source_id to an existing node."""
-        row = self._conn.execute(
+        row = self._q(
             "SELECT source_ids FROM argument_tree WHERE node_id = ?", (node_id,)
         ).fetchone()
         if row:
             ids = json.loads(row["source_ids"])
             if source_id not in ids:
                 ids.append(source_id)
-                self._conn.execute(
+                self._q(
                     "UPDATE argument_tree SET source_ids = ? WHERE node_id = ?",
                     (json.dumps(ids), node_id)
                 )
@@ -384,21 +394,22 @@ class TreeBuilder:
     # ── Query methods ─────────────────────────────────────────────────────
 
     def _get_field(self, node_id: str, field: str):
-        row = self._conn.execute(
+        row = self._q(
             f"SELECT {field} FROM argument_tree WHERE node_id = ?", (node_id,)
         ).fetchone()
-        return row[0] if row else None
+        # Index by name, not position — MySQL rows are dicts, not tuples.
+        return row[field] if row else None
 
     def get_node(self, node_id: str) -> Optional[dict]:
         """Get a single node as a dict."""
-        row = self._conn.execute(
+        row = self._q(
             "SELECT * FROM argument_tree WHERE node_id = ?", (node_id,)
         ).fetchone()
         return dict(row) if row else None
 
     def get_children(self, node_id: str) -> list[dict]:
         """Get all direct children of a node."""
-        rows = self._conn.execute(
+        rows = self._q(
             "SELECT * FROM argument_tree WHERE parent_node_id = ? ORDER BY created_at",
             (node_id,)
         ).fetchall()
@@ -409,7 +420,7 @@ class TreeBuilder:
         Get the full tree as a nested dict. Efficient: one query, then
         build in memory.
         """
-        rows = self._conn.execute(
+        rows = self._q(
             "SELECT * FROM argument_tree WHERE run_id = ? ORDER BY depth, created_at",
             (self.run_id,)
         ).fetchall()
@@ -449,7 +460,7 @@ class TreeBuilder:
 
     def get_nodes_by_type(self, node_type: str) -> list[dict]:
         """Get all nodes of a specific type."""
-        rows = self._conn.execute(
+        rows = self._q(
             "SELECT * FROM argument_tree WHERE run_id = ? AND node_type = ? ORDER BY created_at",
             (self.run_id, node_type)
         ).fetchall()
@@ -457,7 +468,7 @@ class TreeBuilder:
 
     def get_all_source_ids(self) -> list[str]:
         """Get all unique source_ids referenced in the tree."""
-        rows = self._conn.execute(
+        rows = self._q(
             "SELECT source_ids FROM argument_tree WHERE run_id = ?",
             (self.run_id,)
         ).fetchall()
@@ -471,13 +482,13 @@ class TreeBuilder:
 
     def get_stats(self) -> dict:
         """Summary statistics of the tree."""
-        rows = self._conn.execute(
+        rows = self._q(
             "SELECT node_type, COUNT(*) as cnt FROM argument_tree WHERE run_id = ? GROUP BY node_type",
             (self.run_id,)
         ).fetchall()
         type_counts = {r["node_type"]: r["cnt"] for r in rows}
 
-        status_rows = self._conn.execute(
+        status_rows = self._q(
             "SELECT status, COUNT(*) as cnt FROM argument_tree WHERE run_id = ? AND node_type = 'claim' GROUP BY status",
             (self.run_id,)
         ).fetchall()
@@ -653,7 +664,7 @@ class TreeBuilder:
             return []
 
         placeholders = ",".join("?" * len(source_ids))
-        rows = self._conn.execute(
+        rows = self._q(
             f"SELECT * FROM sources WHERE source_id IN ({placeholders})",
             source_ids
         ).fetchall()
