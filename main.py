@@ -410,18 +410,19 @@ def _agent_done(run_id: str, agent: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def cmd_run(args):
-    # Check ANTHROPIC_API_KEY is available before starting
-    import os
+    # Confirm at least one LLM provider can serve the pipeline before starting
     from core import llm as llm_module
-    client = llm_module.get_client()
-    if client.anthropic_client is None:
-        print("\n  ⚠️  WARNING: ANTHROPIC_API_KEY is not set or not loaded.")
-        print("     The pipeline will use Ollama (local) for all LLM calls.")
-        print("     To use Claude API: add ANTHROPIC_API_KEY to your .env file.")
+    plan = llm_module.get_client().describe_plan("grounder")
+    if not plan:
+        print("\n  ⚠️  WARNING: no LLM provider is configured.")
+        print("     Set a provider in config.json under llm.providers and give it")
+        print("     a base_url + api key in .env — by default OPENWEBUI_BASE_URL")
+        print("     and OPENWEBUI_API_KEY. Run 'python3 main.py keys' for details.")
         print("     Continuing in 5 seconds...\n")
         import time; time.sleep(5)
     else:
-        print("\n  ✅  Claude API key loaded — using Claude for all agents.")
+        chain = " → ".join(f"{s['provider']}:{s['model']}" for s in plan)
+        print(f"\n  ✅  LLM chain: {chain}")
     run_pipeline(
         problem=args.problem,
         run_id=args.run_id,

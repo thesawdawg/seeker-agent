@@ -321,34 +321,53 @@ def _search_open_library(query: str, limit: int = 5) -> list[dict]:
 
 def _search_web(query: str) -> list[dict]:
     """
-    Use Claude's web search tool via Anthropic API to get broader coverage.
-    Returns results as pseudo-sources for the synthesis prompt.
+    Broader coverage via Anthropic's server-side web_search tool.
+
+    This is a search source, not a reasoning call, and the tool has no
+    OpenAI-compatible equivalent — so it stays Anthropic-specific rather than
+    going through the provider chain. It reads the 'anthropic' provider from
+    config.json and skips silently when that provider is not configured, which
+    is the normal case for a local-only deployment.
     """
-    from core.keys import anthropic as get_key
-    import os
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "") or get_key()
-    if not api_key:
-        logger.warning("[Grounder/WebSearch] No Anthropic key — skipping web search")
+    import requests
+    from core import llm
+
+    provider = llm.get_client().settings.providers.get("anthropic")
+    if not provider or not provider.configured or not provider.api_key:
+        logger.info("[Grounder/WebSearch] anthropic provider not configured — skipping web search")
         return []
+
+    model = provider.model_for_role("light") or provider.model_for_role("primary")
+    if not model:
+        logger.info("[Grounder/WebSearch] no anthropic model configured — skipping web search")
+        return []
+
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1500,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Search for foundational academic sources on: {query}\n"
-                    f"List the most important books, papers, and authors. "
-                    f"Include publication years and authors where known."
-                )
-            }]
+        response = requests.post(
+            f"{provider.base_url}/v1/messages",
+            headers={
+                "x-api-key": provider.api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": 1500,
+                "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        f"Search for foundational academic sources on: {query}\n"
+                        f"List the most important books, papers, and authors. "
+                        f"Include publication years and authors where known."
+                    )
+                }],
+            },
+            timeout=120,
         )
-        # Extract text from response
-        text_parts = [b.text for b in response.content if hasattr(b, "text") and b.text]
-        full_text  = "\n".join(text_parts)
+        response.raise_for_status()
+        blocks = response.json().get("content") or []
+        full_text = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
         if not full_text:
             return []
         # Return as a single web-search result entry for the synthesis prompt

@@ -80,7 +80,8 @@ def philpapers_key() -> str:
     return get("PHILPAPERS_API_KEY", required=False, source_name="PhilPapers (optional — OAI-PMH used as fallback)")
 
 def anthropic() -> str:
-    return get("ANTHROPIC_API_KEY", required=True, source_name="Anthropic Claude API")
+    # No longer required — Anthropic is one optional provider among many.
+    return get("ANTHROPIC_API_KEY", required=False, source_name="Anthropic Claude API")
 
 def google_books() -> str:
     return get("GOOGLE_BOOKS_API_KEY", required=False, source_name="Google Books (optional — higher quota)")
@@ -111,7 +112,6 @@ def print_key_status():
         ("SCOPUS_API_KEY",          "Scopus",           False, "dev.elsevier.com → Create API Key"),
         ("SCOPUS_INST_TOKEN",        "Scopus Inst Token",False, "email datasupport@elsevier.com"),
         ("GOOGLE_BOOKS_API_KEY",    "Google Books",     False, "console.cloud.google.com → Books API"),
-        ("ANTHROPIC_API_KEY",       "Anthropic Claude", True,  "console.anthropic.com"),
     ]
     print(f"\n  {'─'*60}")
     print(f"  API Key Status")
@@ -135,4 +135,51 @@ def print_key_status():
         print(f"     Copy .env.example → .env and fill in the values.")
     else:
         print(f"  ✅ All required keys are set.")
+
+    print_llm_status()
+
+
+def print_llm_status():
+    """Print LLM provider configuration and reachability."""
+    from core import llm
+
+    print(f"\n  {'─'*60}")
+    print(f"  LLM Providers")
+    print(f"  {'─'*60}")
+
+    for entry in llm.health():
+        if not entry["configured"]:
+            state = "⚠️  no base_url"
+        elif entry["reachable"] is None:
+            state = "✅ configured (not probed)" if entry["has_api_key"] else "⚠️  no api key"
+        elif entry["reachable"]:
+            state = f"✅ reachable ({entry['model_count']} models)"
+        else:
+            state = "❌ unreachable"
+        key_note = "" if entry["has_api_key"] else "  [no api key]"
+        print(f"  {entry['provider']:<14} {entry['kind']:<10} {state}{key_note}")
+        if entry["base_url"]:
+            print(f"  {'':<14} {entry['base_url']}")
+
+        provider = llm.get_client().settings.providers.get(entry["provider"])
+        models = {k: v for k, v in (provider.models if provider else {}).items() if v}
+        if models:
+            print(f"  {'':<14} models: " +
+                  ", ".join(f"{role}={name}" for role, name in models.items()))
+        else:
+            print(f"  {'':<14} models: none set — this provider will be skipped "
+                  f"(config.json → llm.providers.{entry['provider']}.models)")
+
+    print(f"  {'─'*60}")
+    print(f"  Routing per agent")
+    print(f"  {'─'*60}")
+    client = llm.get_client()
+    for agent in sorted(client.settings.agents):
+        plan = client.describe_plan(agent)
+        if plan:
+            chain = " → ".join(f"{s['provider']}:{s['model']}" for s in plan)
+            print(f"  {agent:<14} {chain}")
+        else:
+            print(f"  {agent:<14} ❌ no usable provider")
+    print(f"  {'─'*60}")
     print(f"  {'─'*60}\n")
