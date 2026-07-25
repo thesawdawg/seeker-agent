@@ -14,7 +14,7 @@ TEST_DB = Path("/tmp/test_gaper_tree.db")
 if TEST_DB.exists():
     TEST_DB.unlink()
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import core.argument_tree as at
 at.DB_PATH = TEST_DB
 
@@ -77,7 +77,7 @@ tree.add_evidence(c4b, "S4", "paper", "supports", "fMRI self-reference 2022", me
 tree.close()
 
 # ── Test Step 1: structural gap extraction ────────────────────────────────
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from agents.gaper import _get_structural_gaps
 
 structural = _get_structural_gaps(run_id)

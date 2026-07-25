@@ -17,4 +17,11 @@ consensus = ["mcp>=1.20.0"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]
-aranea = "main:main"
+seeker = "main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Scenario scripts run as subprocesses via tests/test_scenarios.py — collecting
+# them directly would import them into one process, where they overwrite each
+# other's module-level DB_PATH.
+norecursedirs = ["tests/scenarios"]

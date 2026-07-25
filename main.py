@@ -175,7 +175,7 @@ def run_pipeline(problem: str, run_id: str = None, resume: bool = False):
         logger.info(f"Break 0 instructions received: {len(break0_instructions)} chars")
     else:
         print("  ↩  Break 0 already completed — resuming")
-        break0_instructions = "CONFIRMED"
+        break0_instructions = breaks.resume_instructions(run_id, 0)
         selected_themes = config.get("themes", [])
 
     agents = _import_agents()
@@ -237,7 +237,7 @@ def run_pipeline(problem: str, run_id: str = None, resume: bool = False):
         logger.info(f"Break 1 instructions received: {len(break1_instructions)} chars")
     else:
         print("  ↩  Break 1 already completed — resuming")
-        break1_instructions = "CONFIRMED"
+        break1_instructions = breaks.resume_instructions(run_id, 1)
 
     # -----------------------------------------------------------------------
     # VISION
@@ -296,20 +296,7 @@ def run_pipeline(problem: str, run_id: str = None, resume: bool = False):
         logger.info(f"Break 2 instructions received: {len(break2_instructions)} chars")
     else:
         print("  ↩  Break 2 already completed — resuming")
-        # Try to recover actual instructions from the break2 review file
-        import re as _re
-        from pathlib import Path as _Path
-        _b2_path = _Path("artifacts") / f"{run_id}_break2_review.md"
-        if _b2_path.exists():
-            _b2_text = _b2_path.read_text()
-            # Instructions are everything after "**Your instructions:**"
-            _marker = "**Your instructions:**"
-            if _marker in _b2_text:
-                break2_instructions = _b2_text.split(_marker, 1)[1].strip()
-            else:
-                break2_instructions = "CONFIRMED\nSCRIBE OUTPUT: research_brief | audience: researcher"
-        else:
-            break2_instructions = "CONFIRMED\nSCRIBE OUTPUT: research_brief | audience: researcher"
+        break2_instructions = breaks.resume_instructions(run_id, 2)
 
     # Parse Scribe output requests
     scribe_requests = breaks.parse_scribe_requests(break2_instructions)
