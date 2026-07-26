@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from core import database as db
 from core import llm
 from core.utils import generate_id
+from core import progress
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +186,6 @@ def run(context: str, run_id: str, **kwargs):
         data = json.loads(clean)
     except json.JSONDecodeError:
         logger.warning("[Historian] JSON parse failed — partial extraction")
-        from core import progress
         progress.warn("Historical synthesis JSON parse failed — phases and historical works may be incomplete. The raw LLM response was kept in methods_evolution.")
         data = {"phases": [], "historical_works": [], "key_actors": [],
                 "dead_ends": [], "recurring_patterns": [],

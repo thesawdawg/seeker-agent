@@ -417,7 +417,6 @@ def _oai_pmh_search(oai_url: str, source_id: str, query: str, limit: int,
                     forbidden_codes: tuple = ()) -> list[dict]:
     """Paginate OAI-PMH ListRecords, filter client-side, cap at OAI_MAX_SCAN."""
     import xml.etree.ElementTree as ET
-    from core import progress
     forbidden = forbidden_codes or (forbidden_code,)
     query_terms = query.lower().replace('"', '').split()
     results: list[dict] = []

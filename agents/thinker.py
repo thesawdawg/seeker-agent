@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from core import database as db
 from core import llm
 from core.utils import generate_id
+from core import progress
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,6 @@ def run(context: str, run_id: str, **kwargs):
         data = json.loads(clean)
     except json.JSONDecodeError:
         logger.warning("[Thinker] JSON parse failed — partial extraction")
-        from core import progress
         progress.warn("New directions JSON parse failed — proposed directions may be incomplete.")
         data = {"directions": [], "challenged_assumptions": [],
                 "reconsidered_exclusions": [], "new_directions_summary": response[:2000]}

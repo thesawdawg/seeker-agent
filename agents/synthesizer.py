@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from core import database as db
 from core import llm
 from core.utils import generate_id
+from core import progress
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,6 @@ def run(context: str, run_id: str, **kwargs):
         data = json.loads(clean)
     except json.JSONDecodeError:
         logger.warning("[Synthesizer] JSON parse failed — using full response as narrative")
-        from core import progress
         progress.warn("Synthesis JSON parse failed — using the raw LLM response as the narrative. The sharpened problem may be unchanged.")
         data = {
             "sharpened_problem":           problem,
