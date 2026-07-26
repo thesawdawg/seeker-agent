@@ -167,6 +167,9 @@ def process_job(job: dict, config: dict) -> None:
             # (review U2). The keys module checks this context before env.
             from core import keys
             keys.set_current_user(owner["user_id"])
+        # Reset the missing-model warning cache so a config fix since the last
+        # attempt is noticed (review O10).
+        llm.reset_model_warnings()
         # Model choices were made in the web process — load them here
         pipeline.apply_model_overrides(run_id)
         # Per-run source enable/disable choices (review U1) — merge into the

@@ -161,6 +161,19 @@ function wireLogin() {
     state.user = null;
     showView('login');
   });
+
+  // Theme toggle (review U11) — remembers the choice in localStorage.
+  const savedTheme = localStorage.getItem('seeker-theme');
+  if (savedTheme) document.documentElement.setAttribute('data-theme', savedTheme);
+  $('#btn-theme').addEventListener('click', () => {
+    const current = document.documentElement.getAttribute('data-theme');
+    const isDark = current
+      ? current === 'dark'
+      : matchMedia('(prefers-color-scheme: dark)').matches;
+    const next = isDark ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('seeker-theme', next);
+  });
 }
 
 async function afterSignIn() {
@@ -349,8 +362,61 @@ function showNewRun() {
   buildModelGrid($('#new-model-grid'));
   buildSourceGrid();
   buildSourceKeys();
+  buildTemplateBar();
   $('#new-error').hidden = true;
   $('#role-warning').hidden = true;
+}
+
+// Config template bar (review U10) — save/restore model + source overrides.
+async function buildTemplateBar() {
+  const bar = $('#template-bar');
+  if (!bar) return;
+  clear(bar);
+  let templates = [];
+  try { templates = (await api('/api/templates')).templates || []; } catch {}
+  const select = el('select', { id: 'template-select' },
+    el('option', { value: '', text: '— load template —' }),
+    ...templates.map(t => el('option', { value: t.name, text: t.name })),
+  );
+  select.addEventListener('change', async () => {
+    const name = select.value;
+    if (!name) return;
+    const tpl = templates.find(t => t.name === name);
+    if (!tpl) return;
+    // Apply template to the form
+    const mo = tpl.config.model_overrides || {};
+    const so = tpl.config.source_overrides || {};
+    // Set model selects
+    $$('select[data-agent]', $('#new-model-grid')).forEach(sel => {
+      const spec = mo[sel.dataset.agent];
+      if (spec && spec.model) { sel.value = spec.model; }
+    });
+    // Set source checkboxes
+    $$('input[type=checkbox][data-source]', $('#new-source-grid')).forEach(cb => {
+      if (so[cb.dataset.source] !== undefined) cb.checked = so[cb.dataset.source];
+    });
+    // Set limit
+    const lim = $('#new-source-grid input[data-field="limit_per_source"]');
+    if (lim && so.limit_per_source) lim.value = so.limit_per_source;
+    toast(`Loaded template "${name}"`, 'ok');
+  });
+  const saveBtn = el('button', { class: 'btn btn-small', type: 'button',
+    onClick: async () => {
+      const name = prompt('Template name:');
+      if (!name) return;
+      try {
+        await api('/api/templates', { method: 'POST', body: {
+          name,
+          model_overrides: collectModelOverrides($('#new-model-grid')),
+          source_overrides: collectSourceOverrides($('#new-source-grid')),
+        }});
+        toast(`Saved template "${name}"`, 'ok');
+        buildTemplateBar();
+      } catch (e) { toast(`Could not save: ${e.message}`, 'error'); }
+    },
+  }, 'Save as template');
+  bar.append(el('span', { class: 'muted small', text: 'Templates:' }),
+    select, saveBtn);
 }
 
 // Pre-flight source health + per-run source enable/disable (review U1 + R8).
@@ -702,6 +768,57 @@ function stepElapsed(step) {
   return end - start;
 }
 
+/* Per-source progress for Grounder/Social steps (review U8). Fetches the
+ * /api/runs/{id}/sources endpoint and renders a compact list of which
+ * sources have been searched so far and their result counts. */
+async function refreshSourceProgress() {
+  const container = $('#source-progress');
+  if (!container || !state.runId) return;
+  try {
+    const data = await api(`/api/runs/${state.runId}/sources`);
+    const health = data.health || [];
+    if (!health.length) {
+      container.textContent = 'Searching sources…';
+      return;
+    }
+    clear(container);
+    const total = health.length;
+    const ok = health.filter(h => h.status === 'ok').length;
+    const degraded = health.filter(h => h.status === 'degraded').length;
+    const failed = health.filter(h => h.status === 'failed').length;
+    container.append(el('div', { class: 'source-progress-summary' },
+      el('span', { text: `${total} source call(s) so far` }),
+      ok ? el('span', { class: 'src-ok', text: `${ok} ok` }) : null,
+      degraded ? el('span', { class: 'src-warn', text: `${degraded} partial` }) : null,
+      failed ? el('span', { class: 'src-fail', text: `${failed} failed` }) : null,
+    ));
+    const list = el('div', { class: 'source-progress-list' });
+    for (const h of health.slice(-12)) {
+      list.append(el('div', { class: `source-progress-row src-${h.status}` },
+        el('span', { class: 'source-progress-name', text: h.source_id }),
+        el('span', { class: 'source-progress-count',
+                     text: `${h.results_returned || 0} results` }),
+        // Skip a problematic source for the rest of the run (review U9).
+        // Won't interrupt an in-flight call, but prevents future calls.
+        el('button', { class: 'btn btn-ghost btn-small', type: 'button',
+          title: 'Disable this source for the rest of the run',
+          onClick: async () => {
+            try {
+              await api(`/api/runs/${state.runId}/sources/override`, {
+                method: 'PUT',
+                body: JSON.stringify({ [h.source_id]: false }),
+              });
+              toast(`Disabled ${h.source_id} for this run`, 'ok');
+              refreshSourceProgress();
+            } catch (e) { toast(`Could not disable: ${e.message}`, 'error'); }
+          },
+        }, 'skip'),
+      ));
+    }
+    container.append(list);
+  } catch { /* non-essential */ }
+}
+
 /* The prominent "what is happening right now" card. */
 function renderLiveCard(status) {
   const card = $('#live-card');
@@ -783,6 +900,20 @@ function renderLiveCard(status) {
   }
 
   if (running) {
+    const isSourceStep = ['grounder', 'social'].includes(running.name);
+    // ETA based on average duration of completed steps in this run (review U7).
+    const completed = status.steps.filter(s =>
+      s.status === 'done' && s.started_at && s.finished_at);
+    let etaText = '';
+    if (completed.length >= 2) {
+      const avgMs = completed.reduce((sum, s) =>
+        sum + (new Date(s.finished_at) - new Date(s.started_at)), 0) / completed.length;
+      const remaining = status.progress.total - status.progress.done - 1;
+      if (remaining > 0) {
+        const etaMs = avgMs * remaining;
+        etaText = ` · ETA ~${fmtDuration(etaMs)} (${remaining} steps left)`;
+      }
+    }
     card.append(el('div', { class: 'live-card is-running' },
       el('div', { class: 'live-head' },
         el('span', { class: 'spinner spinner-lg' }),
@@ -795,12 +926,17 @@ function renderLiveCard(status) {
                 text: running.activity || 'starting…' }),
       el('p', { class: 'live-meta', text:
         `Step ${position} of ${status.progress.total}` +
-        (services.length ? ` · uses ${services.join(', ')}` : '') }),
+        (services.length ? ` · uses ${services.join(', ')}` : '') + etaText }),
+      // Per-source progress during Grounder/Social (review U8). Polled
+      // alongside the status poll — see refreshSourceProgress().
+      isSourceStep ? el('div', { id: 'source-progress',
+                                 class: 'source-progress' }) : null,
       el('div', { class: 'live-actions' },
         el('button', { class: 'btn btn-small', type: 'button', id: 'btn-stop',
                        onClick: stopRun },
           'Stop and change model')),
     ));
+    if (isSourceStep) refreshSourceProgress();
     return;
   }
 
@@ -1238,6 +1374,41 @@ function renderBreak0(panel, draft) {
     ));
   }
   group.append(grid);
+
+  // "Add a theme" widget (review U6) — lets the researcher add a theme the
+  // concept mapper missed without typing "ADD THEME:" in free-text.
+  const addedList = el('div', { class: 'added-themes-list' });
+  const rerenderAdded = () => {
+    clear(addedList);
+    for (const t of draft.addedThemes) {
+      if (themes.some(th => th.theme_id === t)) continue; // skip existing toggles
+      addedList.append(el('span', { class: 'theme-chip added-theme-chip' },
+        el('span', { class: 'theme-chip-name', text: t }),
+        el('button', { class: 'btn btn-ghost btn-small', type: 'button',
+          onClick: () => { draft.addedThemes.delete(t); rerenderAdded(); updatePreview(); },
+        }, '×'),
+      ));
+    }
+  };
+  const doAdd = () => {
+    const name = themeInput.value.trim();
+    if (!name) return;
+    draft.addedThemes.add(name);
+    themeInput.value = '';
+    rerenderAdded();
+    updatePreview();
+  };
+  const themeInput = el('input', {
+    type: 'text', placeholder: 'Add a theme the concept mapper missed…',
+    onKeyDown: ev => { if (ev.key === 'Enter') { ev.preventDefault(); doAdd(); } },
+  });
+  group.append(el('div', { class: 'add-theme-row' },
+    themeInput,
+    el('button', { class: 'btn btn-small', type: 'button',
+                   onClick: doAdd }, 'Add theme'),
+  ));
+  group.append(addedList);
+
   panel.append(group);
 }
 

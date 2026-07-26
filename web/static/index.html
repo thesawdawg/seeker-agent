@@ -16,6 +16,7 @@
   <div class="topbar-right">
     <span class="storage-badge" id="storage-badge"></span>
     <span class="user-chip" id="user-chip"></span>
+    <button class="btn btn-ghost" id="btn-theme" type="button" title="Toggle dark/light theme">◐</button>
     <button class="btn btn-ghost" id="btn-logout" type="button">Sign out</button>
   </div>
 </header>
@@ -96,6 +97,7 @@
     </div>
 
     <form class="card" id="form-new-run">
+      <div id="template-bar" class="template-bar"></div>
       <label class="field">
         <span class="field-label">Research problem</span>
         <textarea id="new-problem" rows="4" required minlength="8"

@@ -289,20 +289,25 @@ def list_agents():
 
 @app.get("/api/runs")
 def list_runs(user: dict = Depends(auth.resolve_user)):
-    """The caller's runs, newest first."""
+    """The caller's runs, newest first.
+
+    Uses get_run_summary (review O6) instead of get_state to avoid building
+    full step-state objects for every run when only progress and
+    awaiting_break are needed.
+    """
     out = []
     for run_id in users.runs_for_user(user["user_id"]):
         run = db.get_run(run_id)
         if not run:
             continue
-        state = pipeline.get_state(run_id)
+        summary = pipeline.get_run_summary(run_id)
         out.append({
             "run_id":         run_id,
             "problem":        run.get("problem", ""),
             "status":         run.get("status", ""),
             "created_at":     run.get("created_at"),
-            "progress":       state["progress"],
-            "awaiting_break": state["awaiting_break"],
+            "progress":       summary["progress"],
+            "awaiting_break": summary["awaiting_break"],
         })
     out.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     return {"runs": out}
@@ -421,6 +426,21 @@ def run_sources(run_id: str, user: dict = Depends(auth.resolve_user)):
     }
 
 
+@app.put("/api/runs/{run_id}/sources/override")
+def update_source_override(run_id: str, body: dict,
+                           user: dict = Depends(auth.resolve_user)):
+    """
+    Update source overrides mid-run (review U9).
+
+    Lets a researcher disable a problematic source without stopping the
+    whole run. The override is applied on the next step advance — an
+    in-flight call is not interrupted.
+    """
+    auth.require_run_access(user, run_id)
+    pipeline.set_source_overrides(run_id, body)
+    return {"overrides": pipeline.get_source_overrides(run_id)}
+
+
 @app.get("/api/sources/health")
 def sources_health(user: dict = Depends(auth.resolve_user)):
     """
@@ -479,6 +499,34 @@ def sources_health(user: dict = Depends(auth.resolve_user)):
             "exhausted_until": exhausted_until,
         })
     return {"sources": out}
+
+
+# ---------------------------------------------------------------------------
+# Config templates — save/restore a tuned set of model + source overrides
+# (review U10). Stored per-user so a researcher can apply a "Humanities deep
+# scan" preset to every new run without re-entering it.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/templates")
+def list_templates(user: dict = Depends(auth.resolve_user)):
+    """List the caller's saved config templates."""
+    return {"templates": users.list_templates(user["user_id"])}
+
+
+@app.post("/api/templates")
+def save_template(body: dict, user: dict = Depends(auth.resolve_user)):
+    """Save a config template (model_overrides + source_overrides + limit)."""
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "name is required")
+    users.save_template(user["user_id"], name, body)
+    return {"ok": True}
+
+
+@app.delete("/api/templates/{name}")
+def delete_template(name: str, user: dict = Depends(auth.resolve_user)):
+    users.delete_template(user["user_id"], name)
+    return {"ok": True}
 
 
 @app.post("/api/runs/{run_id}/stop")

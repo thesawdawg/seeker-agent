@@ -35,6 +35,36 @@
   }
 }
 
+/* Manual theme override (review U11) — wins over the media query. */
+[data-theme="dark"] {
+    --bg:        #16151a;
+    --surface:   #1e1d23;
+    --surface-2: #26252c;
+    --border:    #35333d;
+    --text:      #eceaf0;
+    --text-dim:  #9a96a5;
+    --accent:    #a98bff;
+    --accent-dim:#2a2340;
+    --ok:        #4ade80;
+    --warn:      #fbbf24;
+    --danger:    #f87171;
+    --running:   #60a5fa;
+}
+[data-theme="light"] {
+    --bg:        #f7f7f5;
+    --surface:   #ffffff;
+    --surface-2: #f0efec;
+    --border:    #dcdad4;
+    --text:      #1c1b19;
+    --text-dim:  #6b6862;
+    --accent:    #7c4dff;
+    --accent-dim:#efe9ff;
+    --ok:        #1f8a4c;
+    --warn:      #b26a00;
+    --danger:    #c0392b;
+    --running:   #2b6cb0;
+}
+
 * { box-sizing: border-box; }
 
 /*
@@ -243,6 +273,14 @@ input:focus, select:focus, textarea:focus {
 .item textarea { margin-top: .5rem; font-size: .88rem; }
 
 .theme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: .4rem; }
+.add-theme-row { display: flex; gap: .4rem; margin-top: .6rem; }
+.add-theme-row input { flex: 1; }
+.added-themes-list { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .4rem; }
+.added-theme-chip {
+  display: inline-flex; align-items: center; gap: .3rem;
+  background: var(--surface); border: 1px solid var(--ok); border-radius: 6px;
+  padding: .2rem .4rem;
+}
 .theme-chip {
   display: flex; align-items: flex-start; gap: .5rem;
   border: 1px solid var(--border); border-radius: 8px;
@@ -416,6 +454,35 @@ input:focus, select:focus, textarea:focus {
 .src-status.is-degraded { color: var(--warning, #d97706); }
 .src-status.is-failed   { color: var(--danger); }
 .src-status.is-skipped  { color: var(--muted); }
+
+/* ── Config template bar (review U10) ────────────────────────────────── */
+.template-bar {
+  display: flex; align-items: center; gap: .5rem; margin-bottom: .8rem;
+  padding-bottom: .6rem; border-bottom: 1px solid var(--border);
+}
+.template-bar select { font-size: .85rem; }
+
+/* ── Per-source progress (review U8) ─────────────────────────────────── */
+.source-progress {
+  margin-top: .5rem; padding: .5rem .6rem;
+  background: var(--bg); border-radius: 6px; font-size: .82rem;
+}
+.source-progress-summary {
+  display: flex; gap: .6rem; align-items: center; margin-bottom: .3rem;
+}
+.source-progress-summary .src-ok { color: var(--ok); }
+.source-progress-summary .src-warn { color: var(--warning, #d97706); }
+.source-progress-summary .src-fail { color: var(--danger); }
+.source-progress-list { display: grid; gap: .15rem; }
+.source-progress-row {
+  display: flex; justify-content: space-between;
+  padding: .1rem .2rem; border-radius: 4px;
+}
+.source-progress-row.src-ok { color: var(--text); }
+.source-progress-row.src-degraded { color: var(--warning, #d97706); }
+.source-progress-row.src-failed { color: var(--danger); }
+.source-progress-name { font-weight: 500; }
+.source-progress-count { color: var(--text-dim); }
 
 /* ── Step warnings (review E7) ──────────────────────────────────────── */
 .rail-warn-badge {
