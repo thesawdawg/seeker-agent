@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SEEKER</title>
-  <link rel="stylesheet" href="/static/style.css?v=8">
+  <link rel="stylesheet" href="/static/style.css?v=9">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔎</text></svg>">
 </head>
 <body>
@@ -131,13 +131,25 @@
         <summary>Model routing <span class="muted">(optional)</span></summary>
         <p class="muted small">
           Override which model each individual agent uses, and tune its
-          max tokens and temperature. Leave a field blank to inherit the
+          generation parameters. Leave a field blank to inherit the
           <strong>primary</strong> or <strong>light</strong> default from
-          above. Higher temperature (up to 2.0) produces more varied
-          output; lower (0.0) is more deterministic. Max tokens controls
-          how long each agent's response can be — higher values allow
-          more detailed reasoning but cost more. You can change these
-          mid-run at any break point.
+          above.
+        </p>
+        <p class="muted small">
+          <strong>Model</strong> — which LLM this agent calls. Pick from
+          the dropdown or leave blank to use the default.
+          <strong>Max tokens</strong> (256–32768) — the maximum length of
+          the agent's response. Higher values allow more detailed reasoning
+          but cost more and take longer. Default varies per agent.
+          <strong>Temperature</strong> (0.0–2.0) — controls randomness.
+          0.0 is deterministic (same input → same output), 0.7 is a good
+          general-purpose default, 1.5+ is highly creative but may
+          hallucinate. Use lower values for factual extraction (Grounder,
+          Historian) and higher for creative synthesis (Theorist,
+          Synthesizer).
+        </p>
+        <p class="muted small">
+          You can change all of these mid-run at any break point.
         </p>
         <div id="new-model-grid" class="model-grid"></div>
       </details>
@@ -294,6 +306,6 @@
 
 <div class="toast-stack" id="toasts"></div>
 
-<script src="/static/app.js?v=8"></script>
+<script src="/static/app.js?v=9"></script>
 </body>
 </html>
