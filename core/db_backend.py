@@ -66,14 +66,21 @@ def render_schema(schema: str, dialect: str) -> str:
 
 
 def split_statements(sql: str) -> list[str]:
-    """Split a DDL script into individual statements, dropping comments."""
+    """Split a DDL script into individual statements, dropping comments.
+
+    Comment lines (-- ...) are stripped *before* splitting on ';' so that
+    a semicolon inside a comment (e.g. "not per-run; tracking it in the")
+    doesn't split a statement in half.
+    """
+    # Drop comment lines first, then split on ';'.
+    lines = [
+        line for line in sql.splitlines()
+        if line.strip() and not line.strip().startswith("--")
+    ]
+    cleaned = "\n".join(lines)
     statements = []
-    for raw in sql.split(";"):
-        lines = [
-            line for line in raw.splitlines()
-            if line.strip() and not line.strip().startswith("--")
-        ]
-        stmt = "\n".join(lines).strip()
+    for raw in cleaned.split(";"):
+        stmt = raw.strip()
         if stmt:
             statements.append(stmt)
     return statements
