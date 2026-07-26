@@ -160,7 +160,12 @@ class ArXivHandler(SourceHandler):
 
     def search(self, query: str, keywords: list[str], limit: int = 10, run_id: str = "") -> list[dict]:
         limiter = get_limiter(run_id)
-        limiter.wait(self.SOURCE_ID)
+        try:
+            ok = limiter.wait(self.SOURCE_ID)
+        except SourceUnavailable:
+            return []
+        if not ok:
+            return []
         try:
             import arxiv as arxiv_lib
             client = arxiv_lib.Client(page_size=min(limit, 100), delay_seconds=3, num_retries=3)
@@ -248,7 +253,12 @@ class SemanticScholarHandler(SourceHandler):
     def search(self, query: str, keywords: list[str], limit: int = 10, run_id: str = "") -> list[dict]:
         from core.keys import semantic_scholar as get_key
         limiter = get_limiter(run_id)
-        limiter.wait(self.SOURCE_ID)
+        try:
+            ok = limiter.wait(self.SOURCE_ID)
+        except SourceUnavailable:
+            return []
+        if not ok:
+            return []
         headers = {"User-Agent": "PipelineResearchBot/1.0"}
         key = get_key()
         if key:
@@ -299,7 +309,12 @@ class COREHandler(SourceHandler):
     def search(self, query: str, keywords: list[str], limit: int = 10, run_id: str = "") -> list[dict]:
         from core.keys import core as get_key
         limiter = get_limiter(run_id)
-        limiter.wait(self.SOURCE_ID)
+        try:
+            ok = limiter.wait(self.SOURCE_ID)
+        except SourceUnavailable:
+            return []
+        if not ok:
+            return []
         key = get_key()
         headers = {"User-Agent": "PipelineResearchBot/1.0"}
         if key:
@@ -389,7 +404,12 @@ class PhilArchiveHandler(SourceHandler):
     def search(self, query: str, keywords: list[str], limit: int = 10, run_id: str = "") -> list[dict]:
         import xml.etree.ElementTree as ET
         limiter = get_limiter(run_id)
-        limiter.wait(self.SOURCE_ID)
+        try:
+            ok = limiter.wait(self.SOURCE_ID)
+        except SourceUnavailable:
+            return []
+        if not ok:
+            return []
         try:
             resp = requests.get(self.OAI_URL, params={
                 "verb": "ListRecords",
@@ -454,7 +474,12 @@ class PhilSciHandler(SourceHandler):
     def search(self, query: str, keywords: list[str], limit: int = 10, run_id: str = "") -> list[dict]:
         import xml.etree.ElementTree as ET
         limiter = get_limiter(run_id)
-        limiter.wait(self.SOURCE_ID)
+        try:
+            ok = limiter.wait(self.SOURCE_ID)
+        except SourceUnavailable:
+            return []
+        if not ok:
+            return []
         try:
             resp = requests.get(self.OAI_URL, params={
                 "verb": "ListRecords",
@@ -585,7 +610,12 @@ class ScopusHandler(SourceHandler):
             return []
 
         limiter = get_limiter(run_id)
-        limiter.wait(self.SOURCE_ID)
+        try:
+            ok = limiter.wait(self.SOURCE_ID)
+        except SourceUnavailable:
+            return []
+        if not ok:
+            return []
 
         scopus_query = self._build_query(query)
 
@@ -990,23 +1020,26 @@ def _collect_for_theme(
                 calls_made=1,
             )
 
-        # Rate relevance for all results in parallel — the LLM router holds
-        # no per-call state, so concurrent calls are safe (review O3). Link
-        # checks and DB inserts stay serial (cheap, touch shared state).
+        # Rate relevance AND check links in parallel — both are independent
+        # per-result operations. The LLM router holds no per-call state
+        # (review O3), and HEAD requests to different publishers are I/O-bound
+        # so they parallelize well (review O4). DB inserts stay serial.
         titled = [r for r in results if r.get("title")]
         ratings: list[tuple[str, str]] = []
+        link_statuses: list[str] = []
         if titled:
             from concurrent.futures import ThreadPoolExecutor
             ctx_problem = problem or theme_label
             def _rate(r):
                 return rate_relevance(r.get("title", ""), r.get("abstract", ""),
                                       ctx_problem, theme_label)
-            with ThreadPoolExecutor(max_workers=min(6, len(titled))) as pool:
+            def _link(r):
+                return handler._check_link(r.get("active_link", ""))
+            with ThreadPoolExecutor(max_workers=min(8, len(titled) * 2)) as pool:
                 ratings = list(pool.map(_rate, titled))
+                link_statuses = list(pool.map(_link, titled))
 
-        for r, (rating, reason) in zip(titled, ratings):
-            # Check link
-            link_status = handler._check_link(r.get("active_link", ""))
+        for r, (rating, reason), link_status in zip(titled, ratings, link_statuses):
 
             source_entry = {
                 "source_id":       generate_id("SRC"),

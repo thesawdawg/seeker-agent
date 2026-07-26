@@ -61,6 +61,11 @@ class AgentProfile:
     temperature: float = 0.7
     model:       Optional[str] = None    # pin an exact model, ignoring model_role
     provider:    Optional[str] = None    # pin a provider, ignoring the chain
+    # Per-agent retry/timeout overrides (review E2). None = inherit from
+    # LLMSettings defaults, so existing configs are unchanged.
+    timeout_seconds: Optional[int] = None
+    max_retries:     Optional[int] = None
+    retry_delay:     Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +152,9 @@ def load_settings(config: Optional[dict] = None) -> LLMSettings:
             temperature=float(spec.get("temperature", default_profile.temperature)),
             model=spec.get("model"),
             provider=spec.get("provider"),
+            timeout_seconds=int(spec["timeout_seconds"]) if spec.get("timeout_seconds") else None,
+            max_retries=int(spec["max_retries"]) if spec.get("max_retries") else None,
+            retry_delay=int(spec["retry_delay_seconds"]) if spec.get("retry_delay_seconds") else None,
         )
 
     return LLMSettings(
@@ -433,14 +441,21 @@ class LLMClient:
             logger.error(f"[{agent_name}] Unknown provider kind '{provider.kind}' for {provider.name}")
             return None
 
-        for attempt in range(1, self.settings.max_retries + 1):
+        # Per-agent retry/timeout overrides, falling back to the global
+        # defaults (review E2). A long-running Scribe call can have a 600s
+        # timeout while Social keeps the 300s default, without touching the
+        # global setting.
+        timeout = profile.timeout_seconds or self.settings.timeout_seconds
+        max_retries = profile.max_retries or self.settings.max_retries
+        retry_delay = profile.retry_delay or self.settings.retry_delay
+
+        for attempt in range(1, max_retries + 1):
             try:
                 logger.info(
                     f"[{agent_name}] {provider.name} ({provider.kind}) — model: {model} "
-                    f"— attempt {attempt}/{self.settings.max_retries}"
+                    f"— attempt {attempt}/{max_retries}"
                 )
-                text = transport(provider, model, prompt, system, profile,
-                                 self.settings.timeout_seconds)
+                text = transport(provider, model, prompt, system, profile, timeout)
                 logger.info(f"[{agent_name}] {provider.name} success — {len(text)} chars returned")
                 return text
 
@@ -451,16 +466,16 @@ class LLMClient:
                 logger.warning(f"[{agent_name}] {provider.name} HTTP {status}: {body}")
                 if not retryable:
                     return None
-                if attempt < self.settings.max_retries:
-                    time.sleep(self.settings.retry_delay * attempt)
+                if attempt < max_retries:
+                    time.sleep(retry_delay * attempt)
 
             except requests.Timeout:
                 logger.warning(
                     f"[{agent_name}] {provider.name} timed out after "
-                    f"{self.settings.timeout_seconds}s"
+                    f"{timeout}s"
                 )
-                if attempt < self.settings.max_retries:
-                    time.sleep(self.settings.retry_delay)
+                if attempt < max_retries:
+                    time.sleep(retry_delay)
 
             except requests.ConnectionError as e:
                 # A connection blip (DNS hiccup, model container restarting,
@@ -470,8 +485,8 @@ class LLMClient:
                     f"[{agent_name}] {provider.name} unreachable at "
                     f"{provider.base_url} (attempt {attempt+1}): {e}"
                 )
-                if attempt < self.settings.max_retries:
-                    time.sleep(self.settings.retry_delay)
+                if attempt < max_retries:
+                    time.sleep(retry_delay)
 
             except Exception as e:
                 logger.error(f"[{agent_name}] {provider.name} error: {e}")
@@ -525,7 +540,11 @@ class LLMClient:
             logger.info(f"[{agent_name}] Falling back past {prov.name}")
 
         tried = ", ".join(f"{p.name}:{m}" for p, m, _ in attempts)
-        raise LLMError(f"[{agent_name}] All LLM providers failed. Tried: {tried}")
+        raise LLMError(
+            f"[{agent_name}] All LLM providers failed. Tried: {tried}. "
+            f"You can change the model routing at the next break or in "
+            f"Settings, then resume — the step will retry with the new provider."
+        )
 
     def _plan_single(self, provider_name, agent_name, run_id):
         run_id = run_id or current_run()
