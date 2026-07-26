@@ -617,3 +617,16 @@ input:focus, select:focus, textarea:focus {
   font-size: .68rem; text-transform: uppercase; color: var(--text-dim);
   background: var(--border); padding: 0 .25rem; border-radius: 3px;
 }
+
+/* ── Token usage table (F10) ─────────────────────────────────────────── */
+.usage-table { width: 100%; border-collapse: collapse; margin: .4rem 0; font-size: .82rem; }
+.usage-table th {
+  text-align: right; padding: .25rem .5rem; font-size: .75rem;
+  color: var(--text-dim); border-bottom: 1px solid var(--border);
+}
+.usage-table th:first-child { text-align: left; }
+.usage-table td {
+  text-align: right; padding: .2rem .5rem;
+  border-bottom: 1px solid var(--border);
+}
+.usage-table td:first-child { text-align: left; font-weight: 500; }

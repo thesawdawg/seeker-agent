@@ -1206,6 +1206,55 @@ function renderOverview(status) {
             ].filter(Boolean).join('\n') }),
         ));
       }
+
+      // LLM token usage (F10) — fetched in parallel, non-essential.
+      api(`/api/runs/${state.runId}/usage`).then(usage => {
+        if (state.runId !== detail.run_id) return;
+        if (!usage.total_calls) return;
+        const usageBox = el('div', { class: 'review-group' },
+          el('h3', {}, 'Token usage',
+            el('span', { class: 'muted small',
+              text: ` — ${usage.total_calls} calls, ${usage.total_tokens.toLocaleString()} tokens` })),
+        );
+        // By agent table
+        const byAgent = usage.by_agent || {};
+        const agentRows = Object.entries(byAgent)
+          .sort((a, b) => b[1].total - a[1].total);
+        if (agentRows.length) {
+          const tbl = el('table', { class: 'usage-table' },
+            el('thead', {}, el('tr', {},
+              el('th', { text: 'Agent' }),
+              el('th', { text: 'Calls' }),
+              el('th', { text: 'Prompt' }),
+              el('th', { text: 'Completion' }),
+              el('th', { text: 'Total' }),
+            )),
+          );
+          const tbody = el('tbody');
+          for (const [agent, u] of agentRows) {
+            tbody.append(el('tr', {},
+              el('td', { text: agent }),
+              el('td', { text: String(u.calls) }),
+              el('td', { text: u.prompt.toLocaleString() }),
+              el('td', { text: u.completion.toLocaleString() }),
+              el('td', { text: u.total.toLocaleString() }),
+            ));
+          }
+          tbl.append(tbody);
+          usageBox.append(tbl);
+        }
+        // By model summary
+        const byModel = usage.by_model || {};
+        const modelRows = Object.entries(byModel)
+          .sort((a, b) => b[1].total - a[1].total);
+        if (modelRows.length) {
+          usageBox.append(el('p', { class: 'muted small',
+            text: 'By model: ' + modelRows
+              .map(([m, u]) => `${m} (${u.total.toLocaleString()})`)
+              .join(', ') }));
+        }
+        note.append(usageBox);
+      }).catch(() => { /* usage is non-essential */ });
     }
   }).catch(() => { /* overview stats are non-essential */ });
 }

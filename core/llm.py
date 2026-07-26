@@ -217,7 +217,7 @@ def _headers(provider: ProviderConfig) -> dict:
     }
 
 
-def _post_openai(provider, model, prompt, system, profile, timeout) -> str:
+def _post_openai(provider, model, prompt, system, profile, timeout) -> tuple[str, dict]:
     """OpenAI-compatible chat completions — Open-WebUI, OpenAI, Ollama /v1, vLLM, ..."""
     url = f"{provider.base_url}/chat/completions"
     payload = {
@@ -240,10 +240,14 @@ def _post_openai(provider, model, prompt, system, profile, timeout) -> str:
     text = (choices[0].get("message") or {}).get("content")
     if not text:
         raise LLMError(f"{provider.name} returned an empty message")
-    return text
+    usage = data.get("usage") or {}
+    return text, {
+        "prompt_tokens": usage.get("prompt_tokens", 0) or 0,
+        "completion_tokens": usage.get("completion_tokens", 0) or 0,
+    }
 
 
-def _post_anthropic(provider, model, prompt, system, profile, timeout) -> str:
+def _post_anthropic(provider, model, prompt, system, profile, timeout) -> tuple[str, dict]:
     """Anthropic Messages API — a different wire format, same router."""
     url = f"{provider.base_url}/v1/messages"
     payload = {
@@ -261,10 +265,41 @@ def _post_anthropic(provider, model, prompt, system, profile, timeout) -> str:
     text = "".join(blocks)
     if not text:
         raise LLMError(f"{provider.name} returned no text content")
-    return text
+    usage = data.get("usage") or {}
+    return text, {
+        "prompt_tokens": usage.get("input_tokens", 0) or 0,
+        "completion_tokens": usage.get("output_tokens", 0) or 0,
+    }
 
 
 _TRANSPORTS = {"openai": _post_openai, "anthropic": _post_anthropic}
+
+
+def _record_usage(agent_name: str, provider, model: str, usage: dict) -> None:
+    """
+    Record one LLM call's token usage to the database (F10).
+
+    Uses current_run() to associate the call with a run. Silently skips
+    if there's no run context or the database is unavailable — usage
+    tracking is observability, not correctness.
+    """
+    if not usage:
+        return
+    run_id = current_run()
+    if not run_id:
+        return
+    try:
+        from core import database as db
+        db.record_llm_usage(
+            run_id=run_id,
+            agent_name=agent_name,
+            provider=provider.name,
+            model=model,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+        )
+    except Exception as e:
+        logger.debug(f"[LLM] Could not record usage: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +509,13 @@ class LLMClient:
                     f"— attempt {attempt}/{max_retries}"
                 )
                 text = transport(provider, model, prompt, system, profile, timeout)
+                # Transports return (text, usage_dict) — F10 token tracking.
+                if isinstance(text, tuple):
+                    text, usage = text
+                else:
+                    usage = {}
                 logger.info(f"[{agent_name}] {provider.name} success — {len(text)} chars returned")
+                _record_usage(agent_name, provider, model, usage)
                 return text
 
             except requests.HTTPError as e:
