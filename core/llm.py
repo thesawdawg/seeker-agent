@@ -353,14 +353,21 @@ def _apply_overrides(profile: AgentProfile, agent_name: str, run_id: Optional[st
     spec = get_run_overrides(run_id).get((agent_name or "").lower())
     if not spec:
         return profile
-    return replace(
-        profile,
+    kwargs = dict(
         model=spec.get("model", profile.model),
         provider=spec.get("provider", profile.provider),
         model_role=spec.get("model_role", profile.model_role),
         max_tokens=int(spec.get("max_tokens", profile.max_tokens)),
         temperature=float(spec.get("temperature", profile.temperature)),
     )
+    # Per-agent retry/timeout overrides (review E2)
+    if spec.get("timeout_seconds") is not None:
+        kwargs["timeout_seconds"] = int(spec["timeout_seconds"])
+    if spec.get("max_retries") is not None:
+        kwargs["max_retries"] = int(spec["max_retries"])
+    if spec.get("retry_delay_seconds") is not None:
+        kwargs["retry_delay"] = int(spec["retry_delay_seconds"])
+    return replace(profile, **kwargs)
 
 
 # ---------------------------------------------------------------------------

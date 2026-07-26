@@ -258,6 +258,18 @@ input:focus, select:focus, textarea:focus {
 .model-row label { font-size: .8rem; font-weight: 500; }
 .model-row select { font-size: .85rem; padding: .35rem .5rem; }
 .model-row.is-done { opacity: .45; }
+.model-row input[type="number"] {
+  font-size: .8rem; padding: .3rem .4rem; width: 5rem;
+}
+.model-row input[data-field="temperature"] { width: 3.5rem; }
+.model-row {
+  grid-template-columns: 1fr auto auto;
+  align-items: center; gap: .4rem;
+}
+.model-row label { grid-column: 1; }
+.model-row select { grid-column: 1; }
+.model-row input[data-field="max_tokens"] { grid-column: 2; }
+.model-row input[data-field="temperature"] { grid-column: 3; }
 
 .directive-preview {
   background: var(--bg); border: 1px dashed var(--border); border-radius: 8px;
@@ -369,6 +381,13 @@ input:focus, select:focus, textarea:focus {
 }
 .source-row:hover { background: var(--surface); }
 .source-name { font-weight: 600; min-width: 9rem; }
+.source-limit-row {
+  display: flex; align-items: center; gap: .5rem;
+  margin-top: .6rem; padding-top: .6rem; border-top: 1px solid var(--border);
+}
+.source-limit-row input[type="number"] {
+  width: 4rem; font-size: .85rem; padding: .3rem .4rem;
+}
 .source-indicator {
   display: inline-flex; align-items: center; justify-content: center;
   width: 1.2rem; height: 1.2rem; border-radius: 50%;
@@ -397,3 +416,10 @@ input:focus, select:focus, textarea:focus {
 .src-status.is-degraded { color: var(--warning, #d97706); }
 .src-status.is-failed   { color: var(--danger); }
 .src-status.is-skipped  { color: var(--muted); }
+
+/* ── Step warnings (review E7) ──────────────────────────────────────── */
+.rail-warn-badge {
+  margin-left: auto; color: var(--warning, #d97706); font-size: .85rem;
+  cursor: help;
+}
+.rail-step.has-warnings { border-left: 2px solid var(--warning, #d97706); }

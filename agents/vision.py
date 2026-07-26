@@ -90,8 +90,12 @@ def run(context: str, run_id: str, **kwargs):
                 f"[Vision] JSON truncated — salvaged {len(data['implications'])} implications. "
                 f"Consider raising vision token limit in llm.py."
             )
+            from core import progress
+            progress.warn(f"Vision JSON was truncated — salvaged {len(data['implications'])} implications. Consider raising the vision token limit in config.json.")
         else:
             logger.warning("[Vision] JSON parse failed — no implications salvaged")
+            from core import progress
+            progress.warn("Vision JSON parse failed — no implications could be salvaged. The implications map will be empty.")
             data = {"implications": [], "implications_map_summary": response[:2000]}
 
     saved = 0

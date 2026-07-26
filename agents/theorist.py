@@ -83,6 +83,8 @@ def _parse_json(text: str, label: str) -> dict:
         except json.JSONDecodeError:
             pass
     logger.warning(f"[{label}] JSON parse failed")
+    from core import progress
+    progress.warn(f"Theorist {label} JSON parse failed — output may be incomplete.")
     return {}
 
 

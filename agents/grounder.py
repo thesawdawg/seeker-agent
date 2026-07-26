@@ -266,6 +266,11 @@ def run(context: str, run_id: str, **kwargs):
     _allowed = set(_config.get("agent_sources", {}).get("grounder",
         ["openalex", "semantic_scholar", "consensus",
          "google_books", "open_library", "web"]))
+    # Per-source result limits — configurable so a researcher can choose
+    # shallow vs deep scans without editing code (review U5).
+    _limits = _config.get("agent_sources", {}).get("grounder_limits", {})
+    def _lim(name: str, default: int) -> int:
+        return int(_limits.get(name, default))
     def _src_on(name: str) -> bool:
         return name in _allowed
 
@@ -432,15 +437,15 @@ def run(context: str, run_id: str, **kwargs):
             _process_results(results, label, evidence_type)
 
         if paper_query and _src_on("openalex"):
-            _run_shared_source("openalex", "OpenAlex", paper_query, 4, "paper")
+            _run_shared_source("openalex", "OpenAlex", paper_query, _lim("openalex", 4), "paper")
         if paper_query and _src_on("semantic_scholar"):
-            _run_shared_source("semantic_scholar", "S2", paper_query, 3, "paper")
+            _run_shared_source("semantic_scholar", "S2", paper_query, _lim("semantic_scholar", 3), "paper")
         if paper_query and _src_on("consensus"):
-            _run_shared_source("consensus", "Consensus", paper_query, 10, "paper")
+            _run_shared_source("consensus", "Consensus", paper_query, _lim("consensus", 10), "paper")
         if book_query and _src_on("google_books"):
-            _run_shared_source("google_books", "GoogleBooks", book_query, 3, "book")
+            _run_shared_source("google_books", "GoogleBooks", book_query, _lim("google_books", 3), "book")
         if book_query and _src_on("open_library"):
-            _run_shared_source("open_library", "OpenLibrary", book_query, 3, "book")
+            _run_shared_source("open_library", "OpenLibrary", book_query, _lim("open_library", 3), "book")
 
         # Web search — broader coverage. Anthropic server-side web_search tool,
         # no OpenAI-compatible equivalent, so it stays Anthropic-specific. It
@@ -527,6 +532,8 @@ For each seminal work, use the exact title and author from the sources above whe
             data = {}
         if not data:
             logger.warning("[Grounder] Synthesis JSON parse failed — partial result")
+            from core import progress
+            progress.warn("Synthesis JSON parse failed — seminal works and themes may be incomplete. The raw LLM response was kept in intellectual_genealogy.")
             data = {
                 "themes_extracted": [], "seminal_works": [],
                 "intellectual_genealogy": response[:3000],

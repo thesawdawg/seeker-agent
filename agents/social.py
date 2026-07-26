@@ -393,6 +393,112 @@ class PhilPapersHandler(SourceHandler):
 
 
 # ---------------------------------------------------------------------------
+# OAI-PMH shared search helper (review O7).
+#
+# PhilArchive and PhilSci both expose OAI-PMH, which has no text-search verb —
+# only ListRecords (full metadata harvest). The previous implementation fetched
+# a single batch (100-500 records) and filtered client-side, which was both
+# slow and incomplete: a 50k-record archive with 500-record batches covers 1%
+# of the collection. This helper follows resumptionToken to paginate through
+# more records (up to MAX_SCAN), and records a step warning if the cap was hit
+# so the researcher knows coverage is partial.
+# ---------------------------------------------------------------------------
+
+_OAI_NS = {
+    "oai":    "http://www.openarchives.org/OAI/2.0/",
+    "dc":     "http://purl.org/dc/elements/1.1/",
+    "oai_dc": "http://www.openarchives.org/OAI/2.0/oai_dc/",
+}
+OAI_MAX_SCAN = 5000  # cap records scanned per source per query
+
+
+def _oai_pmh_search(oai_url: str, source_id: str, query: str, limit: int,
+                    limiter, forbidden_code: int = 403,
+                    forbidden_codes: tuple = ()) -> list[dict]:
+    """Paginate OAI-PMH ListRecords, filter client-side, cap at OAI_MAX_SCAN."""
+    import xml.etree.ElementTree as ET
+    from core import progress
+    forbidden = forbidden_codes or (forbidden_code,)
+    query_terms = query.lower().replace('"', '').split()
+    results: list[dict] = []
+    scanned = 0
+    params = {"verb": "ListRecords", "metadataPrefix": "oai_dc"}
+    capped = False
+
+    while scanned < OAI_MAX_SCAN:
+        try:
+            resp = requests.get(oai_url, params=params, timeout=25,
+                                headers={"User-Agent": "PipelineResearchBot/1.0"})
+            if resp.status_code in forbidden:
+                logger.warning(f"[{source_id}] {resp.status_code} — skipping")
+                break
+            resp.raise_for_status()
+        except Exception as e:
+            logger.warning(f"[{source_id}] OAI request failed: {e}")
+            break
+
+        try:
+            root = ET.fromstring(resp.text)
+        except ET.ParseError as e:
+            logger.warning(f"[{source_id}] XML parse error: {e}")
+            break
+
+        for record in root.findall(".//oai:record", _OAI_NS):
+            scanned += 1
+            if scanned > OAI_MAX_SCAN:
+                capped = True
+                break
+            metadata = record.find(".//oai_dc:dc", _OAI_NS)
+            if metadata is None:
+                continue
+            title_el    = metadata.find("dc:title", _OAI_NS)
+            desc_el     = metadata.find("dc:description", _OAI_NS)
+            creator_els = metadata.findall("dc:creator", _OAI_NS)
+            id_el       = metadata.find("dc:identifier", _OAI_NS)
+            date_el     = metadata.find("dc:date", _OAI_NS)
+            title    = (title_el.text or "") if title_el is not None else ""
+            abstract = (desc_el.text  or "") if desc_el  is not None else ""
+            searchable = (title + " " + abstract).lower()
+            if not any(t in searchable for t in query_terms):
+                continue
+            link = (id_el.text or "") if id_el is not None else ""
+            year = None
+            if date_el is not None and date_el.text:
+                year = int(date_el.text[:4]) if date_el.text[:4].isdigit() else None
+            results.append({
+                "title":       title,
+                "authors":     [e.text for e in creator_els[:5] if e.text],
+                "year":        year,
+                "source_name": source_id,
+                "doi":         "",
+                "abstract":    abstract[:1000],
+                "active_link": link,
+            })
+            if len(results) >= limit:
+                return results
+
+        # Follow resumptionToken for pagination (review O7)
+        token_el = root.find(".//oai:resumptionToken", _OAI_NS)
+        token = (token_el.text or "").strip() if token_el is not None else ""
+        if not token:
+            break
+        params = {"verb": "ListRecords", "resumptionToken": token}
+        # Be polite between page fetches
+        try:
+            limiter.wait(source_id)
+        except SourceUnavailable:
+            break
+
+    if capped:
+        progress.warn(
+            f"{source_id}: scanned {OAI_MAX_SCAN} records (cap) — coverage is "
+            f"partial, found {len(results)} matches. Consider a more specific query."
+        )
+    logger.info(f"[{source_id}] scanned {scanned} records, {len(results)} matches")
+    return results
+
+
+# ---------------------------------------------------------------------------
 # PhilArchive — PhilPapers' own open access archive, no account needed
 # 115k+ philosophy papers, OAI-PMH interface
 # ---------------------------------------------------------------------------
@@ -402,7 +508,6 @@ class PhilArchiveHandler(SourceHandler):
     OAI_URL   = "https://philarchive.org/oai.pl"
 
     def search(self, query: str, keywords: list[str], limit: int = 10, run_id: str = "") -> list[dict]:
-        import xml.etree.ElementTree as ET
         limiter = get_limiter(run_id)
         try:
             ok = limiter.wait(self.SOURCE_ID)
@@ -410,56 +515,8 @@ class PhilArchiveHandler(SourceHandler):
             return []
         if not ok:
             return []
-        try:
-            resp = requests.get(self.OAI_URL, params={
-                "verb": "ListRecords",
-                "metadataPrefix": "oai_dc"
-            }, timeout=25, headers={"User-Agent": "PipelineResearchBot/1.0"})
-            if resp.status_code == 403:
-                logger.warning("[PhilArchive] 403 Forbidden — endpoint may require browser session")
-                return []
-            resp.raise_for_status()
-            ns = {
-                "oai":    "http://www.openarchives.org/OAI/2.0/",
-                "dc":     "http://purl.org/dc/elements/1.1/",
-                "oai_dc": "http://www.openarchives.org/OAI/2.0/oai_dc/"
-            }
-            root = ET.fromstring(resp.text)
-            query_terms = query.lower().replace('"', '').split()
-            results = []
-            for record in root.findall(".//oai:record", ns):
-                metadata = record.find(".//oai_dc:dc", ns)
-                if metadata is None:
-                    continue
-                title_el    = metadata.find("dc:title", ns)
-                desc_el     = metadata.find("dc:description", ns)
-                creator_els = metadata.findall("dc:creator", ns)
-                id_el       = metadata.find("dc:identifier", ns)
-                date_el     = metadata.find("dc:date", ns)
-                title    = (title_el.text or "") if title_el is not None else ""
-                abstract = (desc_el.text  or "") if desc_el  is not None else ""
-                searchable = (title + " " + abstract).lower()
-                if not any(t in searchable for t in query_terms):
-                    continue
-                link = (id_el.text or "") if id_el is not None else ""
-                year = None
-                if date_el is not None and date_el.text:
-                    year = int(date_el.text[:4]) if date_el.text[:4].isdigit() else None
-                results.append({
-                    "title":       title,
-                    "authors":     [e.text for e in creator_els[:5] if e.text],
-                    "year":        year,
-                    "source_name": self.SOURCE_ID,
-                    "doi":         "",
-                    "abstract":    abstract[:1000],
-                    "active_link": link,
-                })
-                if len(results) >= limit:
-                    break
-            return results
-        except Exception as e:
-            logger.warning(f"[PhilArchive] Error: {e}")
-            return []
+        return _oai_pmh_search(self.OAI_URL, self.SOURCE_ID, query, limit,
+                               limiter, forbidden_code=403)
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +529,6 @@ class PhilSciHandler(SourceHandler):
     OAI_URL   = "https://philsci-archive.pitt.edu/cgi/oai2"
 
     def search(self, query: str, keywords: list[str], limit: int = 10, run_id: str = "") -> list[dict]:
-        import xml.etree.ElementTree as ET
         limiter = get_limiter(run_id)
         try:
             ok = limiter.wait(self.SOURCE_ID)
@@ -480,56 +536,8 @@ class PhilSciHandler(SourceHandler):
             return []
         if not ok:
             return []
-        try:
-            resp = requests.get(self.OAI_URL, params={
-                "verb": "ListRecords",
-                "metadataPrefix": "oai_dc"
-            }, timeout=25, headers={"User-Agent": "PipelineResearchBot/1.0"})
-            if resp.status_code in (403, 503):
-                logger.warning(f"[PhilSci] {resp.status_code} — skipping")
-                return []
-            resp.raise_for_status()
-            ns = {
-                "oai":    "http://www.openarchives.org/OAI/2.0/",
-                "dc":     "http://purl.org/dc/elements/1.1/",
-                "oai_dc": "http://www.openarchives.org/OAI/2.0/oai_dc/"
-            }
-            root = ET.fromstring(resp.text)
-            query_terms = query.lower().replace('"', '').split()
-            results = []
-            for record in root.findall(".//oai:record", ns):
-                metadata = record.find(".//oai_dc:dc", ns)
-                if metadata is None:
-                    continue
-                title_el    = metadata.find("dc:title", ns)
-                desc_el     = metadata.find("dc:description", ns)
-                creator_els = metadata.findall("dc:creator", ns)
-                id_el       = metadata.find("dc:identifier", ns)
-                date_el     = metadata.find("dc:date", ns)
-                title    = (title_el.text or "") if title_el is not None else ""
-                abstract = (desc_el.text  or "") if desc_el  is not None else ""
-                searchable = (title + " " + abstract).lower()
-                if not any(t in searchable for t in query_terms):
-                    continue
-                link = (id_el.text or "") if id_el is not None else ""
-                year = None
-                if date_el is not None and date_el.text:
-                    year = int(date_el.text[:4]) if date_el.text[:4].isdigit() else None
-                results.append({
-                    "title":       title,
-                    "authors":     [e.text for e in creator_els[:5] if e.text],
-                    "year":        year,
-                    "source_name": self.SOURCE_ID,
-                    "doi":         "",
-                    "abstract":    abstract[:1000],
-                    "active_link": link,
-                })
-                if len(results) >= limit:
-                    break
-            return results
-        except Exception as e:
-            logger.warning(f"[PhilSci] Error: {e}")
-            return []
+        return _oai_pmh_search(self.OAI_URL, self.SOURCE_ID, query, limit,
+                               limiter, forbidden_codes=(403, 503))
 
 
 # ---------------------------------------------------------------------------
@@ -768,8 +776,17 @@ class ConsensusHandler(SourceHandler):
             )
             return results
         except Exception as e:
-            logger.warning(f"[Consensus] Search failed: {e}")
-            limiter.record_failure(self.SOURCE_ID)
+            # ConsensusRateLimited is re-raised by search_consensus so the
+            # limiter hears about the 429 (review R9). Other exceptions are
+            # recorded as generic failures.
+            from core.consensus_mcp import ConsensusRateLimited
+            if isinstance(e, ConsensusRateLimited):
+                logger.warning(f"[Consensus] Rate limited by MCP: {e}")
+                limiter.backoff(self.SOURCE_ID, attempt=0, status_code=429)
+                limiter.record_failure(self.SOURCE_ID)
+            else:
+                logger.warning(f"[Consensus] Search failed: {e}")
+                limiter.record_failure(self.SOURCE_ID)
             return []
 
 
@@ -1232,6 +1249,8 @@ def feed(problem: str, run_id: str, config: dict = None,
 
     # Respect agent_sources.social — filter each theme's source list
     agent_allowed = config.get("agent_sources", {}).get("social", None)
+    # Per-source result limit — configurable for shallow vs deep scans (review U5)
+    social_limit = int(config.get("agent_sources", {}).get("social_limit", 8))
 
     for idx, theme in enumerate(selected):
         sources_for_theme = theme.get("sources", [])
@@ -1239,7 +1258,7 @@ def feed(problem: str, run_id: str, config: dict = None,
             sources_for_theme = [s for s in sources_for_theme if s in agent_allowed]
         collected = _collect_for_theme(
             theme, sources_for_theme, config,
-            problem=problem, limit_per_source=8,
+            problem=problem, limit_per_source=social_limit,
             run_id=run_id,
             theme_index=idx,
             theme_total=len(selected)
