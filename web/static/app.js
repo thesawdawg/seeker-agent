@@ -496,6 +496,7 @@ async function openRun(runId) {
   state.breakDraft = null;
   state.activityLog = [];
   state.activitySeen = new Set();
+  state._lastDetailSig = null;  // force a fresh detail fetch for the new run
   showView('run');
 
   const detail = await api(`/api/runs/${runId}`);
@@ -672,12 +673,23 @@ function renderLiveCard(status) {
 
   if (status.failed_steps.length) {
     const failed = status.steps.find(s => s.status === 'failed');
+    const errText = (failed && failed.error) || '';
+    const isLLMError = /all llm providers|no usable llm provider/i.test(errText);
     card.append(el('div', { class: 'live-card is-failed' },
       el('div', { class: 'live-head' },
         el('h2', { text: `Stopped at ${failed ? failed.label : status.failed_steps[0]}` })),
-      el('p', { class: 'live-activity', text: (failed && failed.error) || '' }),
-      el('button', { class: 'btn btn-small', type: 'button',
-                     onClick: () => retryRun() }, 'Retry this step'),
+      el('p', { class: 'live-activity', text: errText }),
+      el('div', { class: 'live-actions' },
+        el('button', { class: 'btn btn-small', type: 'button',
+                       onClick: () => retryRun() }, 'Retry this step'),
+        isLLMError
+          ? el('button', { class: 'btn btn-ghost btn-small', type: 'button',
+              onClick: () => {
+                toast('Change model routing in Settings, then click Retry.', 'ok');
+                document.querySelector('[data-nav="runs"]')?.click();
+              } }, 'Change models')
+          : null,
+      ),
     ));
     return;
   }
@@ -958,6 +970,16 @@ function renderOverview(status) {
 
   if (status.running || status.queued) startElapsedTicker();
   else stopElapsedTicker();
+
+  // Only re-fetch the heavy /api/runs/{id} endpoint (7 count queries) when
+  // the step state has actually changed — not on every 2s poll (review O5).
+  // The signature is built from each step's status+ordinal, so a step
+  // transitioning pending→running→done triggers a re-fetch, but idle polls
+  // during a long step do not.
+  const sig = (status.steps || [])
+    .map(s => `${s.name}:${s.status}:${s.attempt || 0}`).join('|');
+  if (state._lastDetailSig === sig) return;
+  state._lastDetailSig = sig;
 
   api(`/api/runs/${state.runId}`).then(detail => {
     if (state.runId !== detail.run_id) return;
