@@ -1384,17 +1384,7 @@ function renderOverview(status) {
     const note = $('#routing-note');
     if (note) {
       clear(note);
-      const overrides = detail.model_overrides || {};
       const srcOverrides = detail.source_overrides || {};
-      if (Object.keys(overrides).length) {
-        note.append(el('div', { class: 'review-group' },
-          el('h3', {}, 'Model routing for this run'),
-          el('div', { class: 'directive-preview',
-            text: Object.entries(overrides)
-              .map(([agent, spec]) => `${agent}: ${spec.model || spec.provider || ''}`)
-              .join('\n') }),
-        ));
-      }
       const offSources = Object.entries(srcOverrides)
         .filter(([, v]) => v === false).map(([k]) => k);
       const onSources = Object.entries(srcOverrides)
