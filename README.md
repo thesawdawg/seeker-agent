@@ -42,6 +42,8 @@ Concept Mapper → Break 0 (you confirm themes)
 
 **The Argument Tree** is the backbone. Every agent reads and extends it. Claims without evidence are flagged. Temporal gaps are detected and bridge papers are searched automatically. The Historian audits the tree for solidity before downstream agents use it.
 
+📖 **User documentation:** [docs/RESEARCH_WORKFLOW.md](docs/RESEARCH_WORKFLOW.md) — what each agent does and how to use the breaks to steer a run.
+
 ## Quick Start
 
 ### 1. Clone and install
