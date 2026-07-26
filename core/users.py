@@ -66,6 +66,17 @@ CREATE TABLE IF NOT EXISTS user_source_credentials (
 
 CREATE INDEX IF NOT EXISTS idx_user_creds_user ON user_credentials(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_source_creds ON user_source_credentials(user_id);
+
+-- Saved config templates (review U10): model + source overrides a researcher
+-- wants to reuse across runs.
+CREATE TABLE IF NOT EXISTS user_templates (
+    template_id   {ID} PRIMARY KEY,
+    user_id       {ID} NOT NULL,
+    name          {KEY} NOT NULL,
+    config_json   {LONGTEXT} NOT NULL,             -- {model_overrides, source_overrides, ...}
+    created_at    {TEXT} NOT NULL,
+    UNIQUE (user_id, name)
+);
 """
 
 _schema_ready = False
@@ -365,4 +376,46 @@ def delete_source_credentials(user_id: str, source_id: str) -> bool:
     return db.execute(
         "DELETE FROM user_source_credentials WHERE user_id = ? AND source_id = ?",
         (user_id, source_id),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Config templates (review U10)
+# ---------------------------------------------------------------------------
+
+def list_templates(user_id: str) -> list[dict]:
+    init_users_tables()
+    import json
+    rows = db.fetch("user_templates", {"user_id": user_id})
+    out = []
+    for r in rows:
+        try:
+            cfg = json.loads(r.get("config_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            cfg = {}
+        out.append({"name": r.get("name"), "config": cfg,
+                     "created_at": r.get("created_at")})
+    return out
+
+
+def save_template(user_id: str, name: str, config: dict) -> None:
+    init_users_tables()
+    import json
+    from core.utils import generate_id
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    db.insert("user_templates", {
+        "template_id":  generate_id("TPL"),
+        "user_id":      user_id,
+        "name":         name,
+        "config_json":  json.dumps(config),
+        "created_at":   now,
+    })
+
+
+def delete_template(user_id: str, name: str) -> bool:
+    init_users_tables()
+    return db.execute(
+        "DELETE FROM user_templates WHERE user_id = ? AND name = ?",
+        (user_id, name),
     )

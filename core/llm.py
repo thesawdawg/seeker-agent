@@ -177,8 +177,19 @@ class LLMError(RuntimeError):
 
 
 # Providers already reported as missing a model, so the warning is not repeated
-# for every agent that routes past them.
+# for every agent that routes past them. Reset per run (review O10) so a
+# config fix mid-pipeline is noticed on the next attempt rather than silenced
+# by a stale entry from a previous run.
 _warned_missing_model: set = set()
+
+
+def reset_model_warnings() -> None:
+    """Clear the 'missing model' warning cache (review O10).
+
+    Called by the worker at the start of each run so warnings are re-emitted
+    if a provider's models were fixed since the last attempt.
+    """
+    _warned_missing_model.clear()
 
 
 def _note_progress(provider: ProviderConfig, model: str) -> None:

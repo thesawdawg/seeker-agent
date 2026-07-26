@@ -250,6 +250,33 @@ def next_step(run_id: str) -> Optional[dict]:
 # Run state — what the CLI prints and the API serves
 # ---------------------------------------------------------------------------
 
+def get_run_summary(run_id: str) -> dict:
+    """Lightweight run status for list views (review O6).
+
+    Returns only progress.done, progress.total, and awaiting_break —
+    the three fields /api/runs needs — without building the full step-state
+    objects that get_state() assembles. Avoids N+1 full-state lookups when
+    listing runs.
+    """
+    init_steps_table()
+    steps = db.fetch("run_steps", {"run_id": run_id})
+    done = sum(1 for s in steps if s.get("status") in ("done", "skipped"))
+    # Find the current step (first non-terminal) to check for awaiting_input
+    awaiting = None
+    for s in sorted(steps, key=lambda x: x.get("ordinal", 0)):
+        if s.get("status") == "awaiting_input":
+            step_def = STEP_BY_NAME.get(s.get("step_name", ""))
+            if step_def and step_def.break_num is not None:
+                awaiting = step_def.break_num
+            break
+        if s.get("status") not in ("done", "skipped", "failed"):
+            break
+    return {
+        "progress": {"done": done, "total": len(steps)},
+        "awaiting_break": awaiting,
+    }
+
+
 def get_state(run_id: str) -> dict:
     """A complete picture of a run: status, per-step progress, current break."""
     run = db.get_run(run_id)

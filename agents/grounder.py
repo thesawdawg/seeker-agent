@@ -240,14 +240,9 @@ def _search_web(query: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _verify_link(url: str) -> str:
-    if not url:
-        return "dead"
-    try:
-        resp = requests.head(url, timeout=8, allow_redirects=True,
-                             headers={"User-Agent": "PipelineResearchBot/1.0"})
-        return "active" if resp.status_code < 400 else "dead"
-    except Exception:
-        return "dead"
+    """Delegate to the shared SourceHandler._check_link (review O8)."""
+    from agents.social import SourceHandler
+    return SourceHandler()._check_link(url)
 
 
 # ---------------------------------------------------------------------------

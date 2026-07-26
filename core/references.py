@@ -503,7 +503,13 @@ def verify_online(manifest: list[CitableSource],
     """
     Verify each source exists online. Mutates manifest in place.
     Order: Crossref (if DOI) → OpenAlex by title → URL HEAD.
+
+    Crossref and OpenAlex calls route through the shared rate limiter
+    (review O9) so they coordinate with concurrent Social/Grounder steps
+    that hit the same sources.
     """
+    from core.rate_limiter import get_limiter
+    limiter = get_limiter("")  # no run_id — CLI/standalone use
     headers = {"User-Agent": "SEEKER/10.5 (mailto:research@example.org)"}
     with httpx.Client(headers=headers) as client:
         for src in manifest:
@@ -521,18 +527,28 @@ def verify_online(manifest: list[CitableSource],
             note = ""
 
             if doi:
-                ok, note = _check_crossref(doi, client)
-                if ok:
-                    verified, via = True, "crossref"
-                time.sleep(rate_limit_delay)
+                try:
+                    limiter.wait("crossref")
+                except Exception:
+                    time.sleep(rate_limit_delay)  # limiter unavailable
+                else:
+                    ok, note = _check_crossref(doi, client)
+                    if ok:
+                        verified, via = True, "crossref"
+                    limiter.record_success("crossref")
 
             if not verified and src.title:
-                ok, note2 = _check_openalex(src.title, client)
-                if ok:
-                    verified, via, note = True, "openalex", note2
+                try:
+                    limiter.wait("openalex")
+                except Exception:
+                    time.sleep(rate_limit_delay)
                 else:
-                    note = note + " | " + note2 if note else note2
-                time.sleep(rate_limit_delay)
+                    ok, note2 = _check_openalex(src.title, client)
+                    if ok:
+                        verified, via, note = True, "openalex", note2
+                    else:
+                        note = note + " | " + note2 if note else note2
+                    limiter.record_success("openalex")
 
             if not verified and src.url:
                 ok, note3 = _check_url_head(src.url, client)
