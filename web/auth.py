@@ -236,3 +236,15 @@ def require_run_access(user: dict, run_id: str) -> None:
     if not users.owns_run(user["user_id"], run_id):
         # 404, not 403: existence of another user's run is not disclosed
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
+
+
+def require_admin(user: dict) -> None:
+    """
+    Confirm this user is an operator (F12).
+
+    Admin-gated routes (config editing) return 403, not 404 — the config
+    endpoint's existence is not secret, but only operators may use it.
+    """
+    if not users.is_admin(user["user_id"]):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Admin access required")

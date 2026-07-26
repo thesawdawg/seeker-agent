@@ -655,3 +655,45 @@ input:focus, select:focus, textarea:focus {
 }
 .blacklist-value { flex: 1; word-break: break-all; }
 .blacklist-add { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+
+/* ── Admin / config editor (F12) ─────────────────────────────────────── */
+.admin-source-grid { display: flex; flex-direction: column; gap: .4rem; margin-top: .6rem; }
+.admin-source-row {
+  display: flex; align-items: center; gap: .6rem;
+  padding: .3rem .4rem; border: 1px solid var(--border); border-radius: 4px;
+}
+.admin-source-name { font-weight: 500; min-width: 140px; }
+
+.admin-matrix { border-collapse: collapse; margin-top: .6rem; font-size: .82rem; }
+.admin-matrix th, .admin-matrix td {
+  border: 1px solid var(--border); padding: .25rem .35rem; text-align: center;
+}
+.admin-matrix th { background: var(--surface-2); font-weight: 500; }
+.admin-matrix-agent { text-align: left; font-weight: 500; white-space: nowrap; }
+.admin-matrix-col {
+  writing-mode: vertical-lr; transform: rotate(180deg);
+  max-width: 2rem; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.admin-matrix-cell input { margin: 0; }
+
+.admin-themes-list { display: flex; flex-direction: column; gap: .4rem; margin-top: .6rem; }
+.admin-theme-row {
+  padding: .4rem; border: 1px solid var(--border); border-radius: 4px;
+}
+.admin-theme-head {
+  display: flex; align-items: center; gap: .5rem; margin-bottom: .2rem;
+}
+.admin-theme-head strong { flex: 1; }
+.admin-theme-add {
+  display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .6rem;
+}
+
+.admin-template-row {
+  padding: .5rem; border: 1px solid var(--border); border-radius: 4px;
+  margin-bottom: .5rem;
+}
+.admin-template-head {
+  display: flex; align-items: center; gap: .5rem; margin-bottom: .3rem;
+}
+.admin-template-head strong { flex: 1; }

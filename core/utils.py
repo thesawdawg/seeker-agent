@@ -54,6 +54,38 @@ def load_config() -> dict:
         return json.load(f)
 
 
+def save_config(config: dict) -> None:
+    """
+    Atomically write config.json (F12).
+
+    Writes to a temp file first, then renames — so a crash mid-write
+    never leaves a half-written config. The write is also validated as
+    JSON before the rename, so a malformed config never reaches disk.
+    """
+    import os
+    import tempfile
+    # Validate: must be JSON-serializable
+    serialized = json.dumps(config, indent=2, ensure_ascii=False)
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Write to a temp file in the same directory (so rename is atomic)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(CONFIG_PATH.parent), suffix=".json.tmp",
+        prefix="config_",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(serialized)
+            f.write("\n")
+        os.replace(tmp_path, str(CONFIG_PATH))
+    except Exception:
+        # Clean up the temp file on any failure
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def get_themes(config: dict) -> list[dict]:
     return config.get("themes", [])
 

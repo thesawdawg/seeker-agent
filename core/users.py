@@ -88,7 +88,47 @@ def init_users_tables():
         return
     from core import db_backend
     db_backend.get_backend().init_schema(USERS_SCHEMA)
+    # is_admin column (F12) — added after first ship. The first user to
+    # register automatically becomes admin (a single-researcher install
+    # means the first user is the operator). A specific admin can also be
+    # pinned via the SEEKER_ADMIN_USER_ID env var.
+    db_backend.ensure_columns("users", {"is_admin": "{INT} DEFAULT 0"})
+    _maybe_auto_promote_first_user()
+    _maybe_promote_env_admin()
     _schema_ready = True
+
+
+def _maybe_auto_promote_first_user():
+    """If no admin exists yet, promote the first registered user."""
+    rows = db.fetch("users", {}, limit=1)
+    if not rows:
+        return
+    # Check if any user is already an admin
+    all_users = db.fetch("users", {})
+    if any(u.get("is_admin") for u in all_users):
+        return
+    first = all_users[0]
+    db.update("users", {"is_admin": 1}, {"user_id": first["user_id"]})
+    logger.info(f"[F12] Auto-promoted first user {first['user_id']} to admin")
+
+
+def _maybe_promote_env_admin():
+    """Promote the user named in SEEKER_ADMIN_USER_ID, if set."""
+    import os
+    admin_id = os.environ.get("SEEKER_ADMIN_USER_ID", "").strip()
+    if not admin_id:
+        return
+    user = get_user(admin_id)
+    if user and not user.get("is_admin"):
+        db.update("users", {"is_admin": 1}, {"user_id": admin_id})
+        logger.info(f"[F12] Promoted {admin_id} to admin (env var)")
+
+
+def is_admin(user_id: str) -> bool:
+    """Whether this user is an operator (F12)."""
+    init_users_tables()
+    user = get_user(user_id)
+    return bool(user and user.get("is_admin"))
 
 
 def _now() -> str:
@@ -134,6 +174,9 @@ def get_or_create(auth_ref: str, display_name: str = "",
         "last_seen_at": _now(),
     })
     logger.info(f"New user registered: {user_id} ({auth_kind})")
+    # F12: if this is the first user and no admin exists yet, promote them.
+    _maybe_auto_promote_first_user()
+    _maybe_promote_env_admin()
     return get_user(user_id)
 
 
