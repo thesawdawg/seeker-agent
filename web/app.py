@@ -866,6 +866,29 @@ def get_argument_tree(run_id: str, user: dict = Depends(auth.resolve_user)):
 
 
 # ---------------------------------------------------------------------------
+# LLM usage tracking (F10)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/runs/{run_id}/usage")
+def get_llm_usage(run_id: str, user: dict = Depends(auth.resolve_user)):
+    """
+    Per-agent and per-model token usage for a run.
+
+    Returns:
+      {
+        "total_tokens": int,
+        "total_prompt": int,
+        "total_completion": int,
+        "total_calls": int,
+        "by_agent": { "<agent>": {calls, prompt, completion, total} },
+        "by_model":  { "<provider:model>": {calls, prompt, completion, total} },
+      }
+    """
+    auth.require_run_access(user, run_id)
+    return db.get_llm_usage_summary(run_id)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

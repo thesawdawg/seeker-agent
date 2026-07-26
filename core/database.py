@@ -344,6 +344,21 @@ CREATE INDEX IF NOT EXISTS idx_directions_run   ON directions(run_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run    ON artifacts(run_id);
 CREATE INDEX IF NOT EXISTS idx_source_health_run ON source_health(run_id);
 CREATE INDEX IF NOT EXISTS idx_source_call_log  ON source_call_log(log_date, source_id, user_id);
+
+-- Per-LLM-call token usage tracking (F10). One row per successful call.
+CREATE TABLE IF NOT EXISTS llm_usage (
+    usage_id         {ID} PRIMARY KEY,
+    run_id           {ID},
+    agent_name       {KEY} NOT NULL,
+    provider         {KEY} NOT NULL,
+    model            {TEXT} NOT NULL,
+    prompt_tokens    {INT} DEFAULT 0,
+    completion_tokens {INT} DEFAULT 0,
+    total_tokens     {INT} DEFAULT 0,
+    timestamp        {TEXT} NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_run   ON llm_usage(run_id);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_agent ON llm_usage(agent_name);
 """
 
 
@@ -722,6 +737,92 @@ def insert_artifact(artifact: dict) -> bool:
 
 def get_artifacts(run_id: str) -> list[dict]:
     return fetch("artifacts", {"run_id": run_id})
+
+
+# ---------------------------------------------------------------------------
+# LLM usage tracking (F10)
+# ---------------------------------------------------------------------------
+
+def record_llm_usage(run_id: str, agent_name: str, provider: str,
+                     model: str, prompt_tokens: int = 0,
+                     completion_tokens: int = 0) -> bool:
+    """Record one LLM call's token usage."""
+    from core.utils import generate_id
+    total = (prompt_tokens or 0) + (completion_tokens or 0)
+    return insert("llm_usage", {
+        "usage_id":          generate_id("USE"),
+        "run_id":            run_id,
+        "agent_name":        agent_name,
+        "provider":          provider,
+        "model":             model,
+        "prompt_tokens":     prompt_tokens or 0,
+        "completion_tokens": completion_tokens or 0,
+        "total_tokens":      total,
+        "timestamp":         _now(),
+    })
+
+
+def get_llm_usage(run_id: str) -> list[dict]:
+    """All usage rows for a run, ordered by time."""
+    return fetch("llm_usage", {"run_id": run_id})
+
+
+def get_llm_usage_summary(run_id: str) -> dict:
+    """
+    Aggregated usage by agent and by model.
+
+    Returns:
+      {
+        "total_tokens": int,
+        "total_prompt": int,
+        "total_completion": int,
+        "total_calls": int,
+        "by_agent": { "<agent>": {calls, prompt, completion, total} },
+        "by_model":  { "<provider:model>": {calls, prompt, completion, total} },
+      }
+    """
+    rows = fetch("llm_usage", {"run_id": run_id})
+    by_agent: dict[str, dict] = {}
+    by_model: dict[str, dict] = {}
+    total_prompt = 0
+    total_completion = 0
+    total_calls = 0
+
+    for r in rows:
+        get = (lambda k, _r=r: _r[k] if k in _r.keys() else None) \
+              if not isinstance(r, dict) else (lambda k, _r=r: _r.get(k))
+        agent = get("agent_name") or "unknown"
+        prov = get("provider") or "unknown"
+        model = get("model") or "unknown"
+        pt = get("prompt_tokens") or 0
+        ct = get("completion_tokens") or 0
+        tt = get("total_tokens") or (pt + ct)
+
+        total_prompt += pt
+        total_completion += ct
+        total_calls += 1
+
+        a = by_agent.setdefault(agent, {"calls": 0, "prompt": 0, "completion": 0, "total": 0})
+        a["calls"] += 1
+        a["prompt"] += pt
+        a["completion"] += ct
+        a["total"] += tt
+
+        key = f"{prov}:{model}"
+        m = by_model.setdefault(key, {"calls": 0, "prompt": 0, "completion": 0, "total": 0})
+        m["calls"] += 1
+        m["prompt"] += pt
+        m["completion"] += ct
+        m["total"] += tt
+
+    return {
+        "total_tokens": total_prompt + total_completion,
+        "total_prompt": total_prompt,
+        "total_completion": total_completion,
+        "total_calls": total_calls,
+        "by_agent": by_agent,
+        "by_model": by_model,
+    }
 
 
 # ---------------------------------------------------------------------------

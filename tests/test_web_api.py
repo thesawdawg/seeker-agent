@@ -560,6 +560,53 @@ def test_argument_tree_empty_run(client, provider, stub_agents):
     assert body["stats"]["total_nodes"] == 0
 
 
+def test_llm_usage_endpoint(client, provider, stub_agents):
+    """F10: GET /api/runs/{id}/usage returns aggregated token usage."""
+    from core import database as core_db
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()
+
+    # Record some usage directly
+    core_db.record_llm_usage(run_id, "grounder", "open-webui", "qwen3:32b",
+                             prompt_tokens=500, completion_tokens=200)
+    core_db.record_llm_usage(run_id, "grounder", "open-webui", "qwen3:32b",
+                             prompt_tokens=300, completion_tokens=150)
+    core_db.record_llm_usage(run_id, "scribe", "open-webui", "qwen3:32b",
+                             prompt_tokens=1000, completion_tokens=800)
+
+    resp = client.get(f"/api/runs/{run_id}/usage")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["total_calls"] == 3
+    assert body["total_prompt"] == 1800
+    assert body["total_completion"] == 1150
+    assert body["total_tokens"] == 2950
+
+    by_agent = body["by_agent"]
+    assert by_agent["grounder"]["calls"] == 2
+    assert by_agent["grounder"]["total"] == 1150
+    assert by_agent["scribe"]["calls"] == 1
+    assert by_agent["scribe"]["total"] == 1800
+
+    by_model = body["by_model"]
+    assert "open-webui:qwen3:32b" in by_model
+    assert by_model["open-webui:qwen3:32b"]["calls"] == 3
+
+
+def test_llm_usage_empty_run(client, provider, stub_agents):
+    """F10: usage endpoint returns zeros for a run with no LLM calls."""
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()
+
+    resp = client.get(f"/api/runs/{run_id}/usage")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total_calls"] == 0
+    assert body["total_tokens"] == 0
+
+
 # ---------------------------------------------------------------------------
 # Mid-run model changes
 # ---------------------------------------------------------------------------
