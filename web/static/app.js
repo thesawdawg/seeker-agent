@@ -2497,7 +2497,7 @@ function renderAdminSources(panel) {
     const cb = el('input', { type: 'checkbox', checked: !!spec.enabled });
     cb.addEventListener('change', () => { spec.enabled = cb.checked; });
     const urlInput = el('input', { type: 'text', value: spec.api_url || '',
-      placeholder: 'https://...', style: 'width: 280px;' });
+      placeholder: 'https://...' });
     urlInput.addEventListener('change', () => { spec.api_url = urlInput.value; });
     grid.append(el('div', { class: 'admin-source-row' },
       el('label', {},
@@ -2566,7 +2566,7 @@ function renderAdminAgentSources(panel) {
   panel.append(table);
 }
 
-// ── Themes tab: list of themes with add/remove ──
+// ── Themes tab: list of themes with add/edit/remove ──
 function renderAdminThemes(panel) {
   const themes = _adminConfig.themes || [];
   const saveBtn = el('button', { class: 'btn btn-primary', type: 'button',
@@ -2582,49 +2582,75 @@ function renderAdminThemes(panel) {
 
   panel.append(el('p', { class: 'muted small' },
     'The theme bank the Concept Mapper selects from. Each theme has an ID, ' +
-    'a label, and keyword seeds with expansion depth.'), saveBtn);
+    'a label, and keyword seeds. Edit the fields below and click Save to ' +
+    'persist changes to config.json.'), saveBtn);
 
   const list = el('div', { class: 'admin-themes-list' });
   for (let i = 0; i < themes.length; i++) {
     const t = themes[i];
+    const kwText = (t.keywords || []).map(k => k.seed || k).join(', ');
+
+    const labelInput = el('input', { type: 'text',
+      class: 'admin-theme-label', value: t.label || t.theme_id || '',
+      placeholder: 'Display label' });
+    labelInput.addEventListener('change', () => {
+      t.label = labelInput.value;
+    });
+
+    const kwInput = el('input', { type: 'text',
+      class: 'admin-theme-keywords', value: kwText,
+      placeholder: 'keyword seeds (comma-separated)' });
+    kwInput.addEventListener('change', () => {
+      const seeds = kwInput.value.split(',').map(s => s.trim()).filter(Boolean);
+      t.keywords = seeds.map(s => ({ seed: s, expansion_depth: 1 }));
+    });
+
     const row = el('div', { class: 'admin-theme-row' },
       el('div', { class: 'admin-theme-head' },
-        el('strong', { text: t.label || t.theme_id || '(unnamed)' }),
         el('span', { class: 'muted small',
-          text: `${(t.keywords || []).length} keywords` }),
+          text: `ID: ${t.theme_id}` }),
         el('button', { class: 'btn btn-small btn-danger', type: 'button',
-          onClick: () => {
+          onClick: async () => {
             themes.splice(i, 1);
+            await saveConfigSection('themes', themes);
             renderAdminThemes(panel);
           },
         }, 'Remove'),
       ),
-      el('div', { class: 'muted small',
-        text: `ID: ${t.theme_id}` }),
+      el('div', { class: 'admin-theme-body' },
+        labelInput, kwInput),
     );
     list.append(row);
   }
   panel.append(list);
 
-  // Add theme form
+  // Add theme form — saves immediately on add
   const idInput = el('input', { type: 'text', placeholder: 'theme_id (snake_case)' });
   const labelInput = el('input', { type: 'text', placeholder: 'Display label' });
   const kwInput = el('input', { type: 'text',
     placeholder: 'keyword seeds (comma-separated)' });
-  const addBtn = el('button', { class: 'btn btn-small', type: 'button',
-    onClick: () => {
+  const addBtn = el('button', { class: 'btn btn-small btn-primary', type: 'button',
+    onClick: async () => {
       const id = idInput.value.trim();
-      if (!id) return;
+      if (!id) { toast('Theme ID is required', 'error'); return; }
+      // Check for duplicate ID
+      if (themes.some(t => t.theme_id === id)) {
+        toast(`Theme '${id}' already exists`, 'error');
+        return;
+      }
       const seeds = kwInput.value.split(',').map(s => s.trim()).filter(Boolean);
       themes.push({
         theme_id: id,
         label: labelInput.value.trim() || id,
         keywords: seeds.map(s => ({ seed: s, expansion_depth: 1 })),
       });
-      idInput.value = ''; labelInput.value = ''; kwInput.value = '';
-      renderAdminThemes(panel);
+      try {
+        await saveConfigSection('themes', themes);
+        idInput.value = ''; labelInput.value = ''; kwInput.value = '';
+        renderAdminThemes(panel);
+      } catch (e) { toast(e.message, 'error'); }
     },
-  }, 'Add theme');
+  }, 'Add & save theme');
   panel.append(el('div', { class: 'admin-theme-add' },
     idInput, labelInput, kwInput, addBtn));
 }
