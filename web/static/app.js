@@ -15,7 +15,7 @@
 
 'use strict';
 
-const POLL_ACTIVE_MS = 2000;   // work is moving
+const POLL_ACTIVE_MS = 2000;   // work is moving — SSE fallback
 const POLL_IDLE_MS   = 15000;  // parked at a break — nothing changes unaided
 
 const state = {
@@ -29,6 +29,7 @@ const state = {
   tab: 'overview',
   breakDraft: null,   // in-progress break edits
   pollTimer: null,
+  eventSource: null,  // SSE connection (F3)
   activityLog: [],    // accumulated service notes for this run
   activitySeen: null, // dedupe key set, reset per run
   elapsedTimer: null,
@@ -734,8 +735,66 @@ async function openRun(runId) {
   startPolling();
 }
 
+// F3: SSE event stream — replaces the 2s polling loop. Falls back to
+// polling if EventSource is unavailable or the connection fails.
 function startPolling() {
   stopPolling();
+  if (typeof EventSource !== 'undefined' && state.runId) {
+    startSSE();
+  } else {
+    startPollingLoop();
+  }
+}
+
+function startSSE() {
+  const url = `/api/runs/${state.runId}/events`;
+  let es;
+  try {
+    es = new EventSource(url);
+  } catch (e) {
+    // EventSource not supported — fall back to polling
+    startPollingLoop();
+    return;
+  }
+  state.eventSource = es;
+
+  es.addEventListener('status', async (ev) => {
+    try {
+      const status = JSON.parse(ev.data);
+      const previous = state.status;
+      state.status = status;
+      if (!state.activitySeen) state.activitySeen = new Set();
+      recordActivity(status);
+      renderRail(status);
+      renderTabs(status);
+      if (state.tab === 'overview') renderOverview(status);
+      await handleStatusTransitions(status, previous);
+      const live = status.running || status.queued || status.status === 'cancelling';
+      $('#live-dot').classList.toggle('is-live', live);
+    } catch (e) { /* ignore parse errors */ }
+  });
+
+  es.addEventListener('done', (ev) => {
+    // Run is complete — close the stream. The client won't reconnect
+    // because we set readyState to CLOSED.
+    es.close();
+    state.eventSource = null;
+  });
+
+  es.addEventListener('error', (ev) => {
+    // EventSource auto-reconnects, but if the connection keeps failing
+    // (e.g. behind a proxy that doesn't support SSE), fall back to
+    // polling after the first error.
+    if (es.readyState === EventSource.CLOSED) {
+      state.eventSource = null;
+      startPollingLoop();
+    }
+    // If readyState is CONNECTING, the browser is retrying — let it.
+  });
+}
+
+function startPollingLoop() {
+  // The original polling loop — kept as SSE fallback (F3).
   const tick = async () => {
     if (!state.runId) return;
     try {
@@ -752,6 +811,10 @@ function startPolling() {
 function stopPolling() {
   if (state.pollTimer) clearTimeout(state.pollTimer);
   state.pollTimer = null;
+  if (state.eventSource) {
+    state.eventSource.close();
+    state.eventSource = null;
+  }
   stopElapsedTicker();
 }
 
@@ -766,6 +829,18 @@ async function refreshStatus() {
   renderRail(status);
   renderTabs(status);
   if (state.tab === 'overview') renderOverview(status);
+
+  await handleStatusTransitions(status, previous);
+
+  const live = status.running || status.queued || status.status === 'cancelling';
+  $('#live-dot').classList.toggle('is-live', live);
+  return live;
+}
+
+// F3: Shared transition handling — called by both refreshStatus (polling
+// fallback) and the SSE status event handler.
+async function handleStatusTransitions(status, previous) {
+  if (previous === undefined) previous = state.status;
 
   // Announce arrival at a break, and open it once
   const arrived = status.awaiting_break !== null &&
@@ -782,10 +857,6 @@ async function refreshStatus() {
       (!previous || !previous.failed_steps.length)) {
     toast(`Step failed: ${status.failed_steps.join(', ')}`, 'error');
   }
-
-  const live = status.running || status.queued || status.status === 'cancelling';
-  $('#live-dot').classList.toggle('is-live', live);
-  return live;
 }
 
 const STEP_ICON = {
