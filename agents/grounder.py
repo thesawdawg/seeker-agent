@@ -600,6 +600,17 @@ For each seminal work, use the exact title and author from the sources above whe
     tree.close()
     logger.info("[Grounder] Complete")
 
+    # F5: Flag sources that also appeared in a previous run (if set).
+    try:
+        prev_keys = db.get_previous_run_source_keys(run_id)
+        if prev_keys:
+            marked = db.mark_previously_seen(run_id, prev_keys)
+            if marked:
+                print(f"  [Grounder] {marked} sources flagged as previously seen")
+                logger.info(f"[Grounder] {marked} sources marked as previously seen")
+    except Exception as e:
+        logger.debug(f"[Grounder] Could not check previous run: {e}")
+
 
 # ---------------------------------------------------------------------------
 # Document writer — fixed to actually populate all sections

@@ -608,6 +608,107 @@ def test_llm_usage_empty_run(client, provider, stub_agents):
 
 
 # ---------------------------------------------------------------------------
+# Cross-run source deduplication (F5)
+# ---------------------------------------------------------------------------
+
+def test_cross_run_source_dedup(client, provider, stub_agents):
+    """F5: sources in a new run that match a previous run are flagged."""
+    from core import database as core_db
+    sign_in(client, provider)
+
+    # First run — insert a source
+    run1 = client.post("/api/runs", json={"problem": "First problem"}).json()["run_id"]
+    drain()
+    core_db.upsert_source({
+        "source_id": "SRC-R1-1", "run_id": run1, "title": "Identity Theory",
+        "doi": "10.1234/abc", "source_name": "openalex", "type": "current",
+    })
+
+    # Second run — references the first
+    run2 = client.post("/api/runs", json={
+        "problem": "Second problem", "previous_run_id": run1,
+    }).json()["run_id"]
+    drain()
+
+    # Insert one matching + one new source in run2
+    core_db.upsert_source({
+        "source_id": "SRC-R2-1", "run_id": run2, "title": "Identity Theory",
+        "doi": "10.1234/ABC",  # normalized: same as 10.1234/abc
+        "source_name": "openalex", "type": "current",
+    })
+    core_db.upsert_source({
+        "source_id": "SRC-R2-2", "run_id": run2, "title": "A Brand New Paper",
+        "doi": "10.5678/xyz", "source_name": "semantic_scholar", "type": "current",
+    })
+
+    # Mark previously-seen
+    prev_keys = core_db.get_previous_run_source_keys(run2)
+    assert ("10.1234/abc", "identity theory") in prev_keys
+    marked = core_db.mark_previously_seen(run2, prev_keys)
+    assert marked == 1  # only SRC-R2-1 matches
+
+    # Verify the flag was set
+    run2_sources = core_db.fetch("sources", {"run_id": run2})
+    src1 = next(s for s in run2_sources if s["source_id"] == "SRC-R2-1")
+    assert int(src1["previously_seen"]) == 1
+    src2 = next(s for s in run2_sources if s["source_id"] == "SRC-R2-2")
+    assert int(src2["previously_seen"]) == 0
+
+    # The /sources endpoint surfaces the count
+    resp = client.get(f"/api/runs/{run2}/sources")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["previously_seen"] == 1
+    assert body["previous_run_id"] == run1
+
+
+def test_cross_run_no_previous_run(client, provider, stub_agents):
+    """F5: a run with no previous_run_id has empty dedup keys."""
+    from core import database as core_db
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()
+
+    assert core_db.get_previous_run_id(run_id) is None
+    assert core_db.get_previous_run_source_keys(run_id) == set()
+
+    resp = client.get(f"/api/runs/{run_id}/sources")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["previously_seen"] == 0
+    assert body["previous_run_id"] is None
+
+
+def test_cross_run_title_only_match(client, provider, stub_agents):
+    """F5: sources match on title when DOI is absent."""
+    from core import database as core_db
+    sign_in(client, provider)
+
+    run1 = client.post("/api/runs", json={"problem": "First problem"}).json()["run_id"]
+    drain()
+    core_db.upsert_source({
+        "source_id": "SRC-R1-2", "run_id": run1, "title": "The Politics of Identity!",
+        "doi": "", "source_name": "openalex", "type": "current",
+    })
+
+    run2 = client.post("/api/runs", json={
+        "problem": "Second problem", "previous_run_id": run1,
+    }).json()["run_id"]
+    drain()
+
+    # Same title, different punctuation/case, no DOI
+    core_db.upsert_source({
+        "source_id": "SRC-R2-3", "run_id": run2, "title": "the politics of identity",
+        "doi": "", "source_name": "semantic_scholar", "type": "current",
+    })
+
+    prev_keys = core_db.get_previous_run_source_keys(run2)
+    assert ("", "the politics of identity") in prev_keys
+    marked = core_db.mark_previously_seen(run2, prev_keys)
+    assert marked == 1
+
+
+# ---------------------------------------------------------------------------
 # Mid-run model changes
 # ---------------------------------------------------------------------------
 

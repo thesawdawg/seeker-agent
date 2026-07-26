@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS runs (
     break0_done     {INT} DEFAULT 0,
     break1_done     {INT} DEFAULT 0,
     break2_done     {INT} DEFAULT 0,
-    completed_at    {TEXT}
+    completed_at    {TEXT},
+    previous_run_id {ID}
 );
 
 -- Sources: current (Social), seminal (Grounder), historical (Historian)
@@ -116,7 +117,8 @@ CREATE TABLE IF NOT EXISTS sources (
     date_collected  {TEXT},
     last_checked    {TEXT},
     link_status     {KEY} DEFAULT 'active', -- active / redirected / dead / flagged
-    run_id          {ID}
+    run_id          {ID},
+    previously_seen {INT} DEFAULT 0         -- F5: 1 if this source also appeared in a previous run
 );
 
 -- Dead links archive
@@ -501,18 +503,95 @@ def execute(sql: str, params: tuple = ()) -> bool:
 # Run management
 # ---------------------------------------------------------------------------
 
-def create_run(run_id: str, problem: str) -> bool:
-    return insert("runs", {
+def create_run(run_id: str, problem: str, previous_run_id: str = None) -> bool:
+    data = {
         "run_id":     run_id,
         "problem":    problem,
         "created_at": _now(),
-        "status":     "active"
-    })
+        "status":     "active",
+    }
+    if previous_run_id:
+        data["previous_run_id"] = previous_run_id
+    return insert("runs", data)
 
 
 def get_run(run_id: str) -> Optional[dict]:
     rows = fetch("runs", {"run_id": run_id})
     return rows[0] if rows else None
+
+
+def get_previous_run_id(run_id: str) -> Optional[str]:
+    """Get the previous_run_id for a run, if set (F5)."""
+    run = get_run(run_id)
+    if not run:
+        return None
+    get = (lambda k, _r=run: _r[k] if k in _r.keys() else None) \
+          if not isinstance(run, dict) else (lambda k, _r=run: _r.get(k))
+    return get("previous_run_id") or None
+
+
+def get_previous_run_source_keys(run_id: str) -> set[tuple[str, str]]:
+    """
+    Return a set of (doi, normalized_title) tuples for all sources in the
+    previous run (F5). Used to flag sources that were already seen.
+
+    DOI is normalized (lowercased, stripped of URL prefix). Title is
+    lowercased and stripped of whitespace/punctuation.
+    """
+    prev_id = get_previous_run_id(run_id)
+    if not prev_id:
+        return set()
+
+    rows = fetch("sources", {"run_id": prev_id})
+    keys = set()
+    for r in rows:
+        get = (lambda k, _r=r: _r[k] if k in _r.keys() else None) \
+              if not isinstance(r, dict) else (lambda k, _r=r: _r.get(k))
+        doi = (get("doi") or "").strip().lower()
+        if doi.startswith("https://doi.org/"):
+            doi = doi[len("https://doi.org/"):]
+        if doi.startswith("http://doi.org/"):
+            doi = doi[len("http://doi.org/"):]
+        title = _normalize_title(get("title") or "")
+        if doi or title:
+            keys.add((doi, title))
+    return keys
+
+
+def _normalize_title(title: str) -> str:
+    """Normalize a title for dedup comparison: lowercase, strip punctuation."""
+    import re
+    t = title.lower().strip()
+    t = re.sub(r"[^\w\s]", "", t)
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
+def mark_previously_seen(run_id: str, source_keys: set[tuple[str, str]]) -> int:
+    """
+    Mark sources in this run that also appear in the previous run's key set.
+    Returns the count of sources marked.
+
+    Called after Social/Grounder insert their sources for the run.
+    """
+    if not source_keys:
+        return 0
+    rows = fetch("sources", {"run_id": run_id})
+    count = 0
+    for r in rows:
+        get = (lambda k, _r=r: _r[k] if k in _r.keys() else None) \
+              if not isinstance(r, dict) else (lambda k, _r=r: _r.get(k))
+        sid = get("source_id")
+        doi = (get("doi") or "").strip().lower()
+        if doi.startswith("https://doi.org/"):
+            doi = doi[len("https://doi.org/"):]
+        if doi.startswith("http://doi.org/"):
+            doi = doi[len("http://doi.org/"):]
+        title = _normalize_title(get("title") or "")
+        if (doi, title) in source_keys and (doi or title):
+            update("sources", {"previously_seen": 1}, {"source_id": sid})
+            count += 1
+    return count
 
 
 def update_run_status(run_id: str, status: str) -> bool:

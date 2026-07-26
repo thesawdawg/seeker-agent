@@ -1509,3 +1509,14 @@ def run(context: str, run_id: str, **kwargs):
     tree.close()
     print(f"  [Social] {bridges_added} bridge papers added to tree")
     logger.info(f"[Social] Complete — {bridges_added} bridges added")
+
+    # F5: Flag sources that also appeared in a previous run (if set).
+    try:
+        prev_keys = db.get_previous_run_source_keys(run_id)
+        if prev_keys:
+            marked = db.mark_previously_seen(run_id, prev_keys)
+            if marked:
+                print(f"  [Social] {marked} sources flagged as previously seen")
+                logger.info(f"[Social] {marked} sources marked as previously seen")
+    except Exception as e:
+        logger.debug(f"[Social] Could not check previous run: {e}")

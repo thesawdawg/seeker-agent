@@ -96,6 +96,10 @@ class CreateRunRequest(BaseModel):
         default_factory=dict,
         description='Per-run source enable/disable, e.g. {"scopus": true, "arxiv": false} (review U1)',
     )
+    previous_run_id: str = Field(
+        default="",
+        description='Optional: a previous run to compare against. Sources already in that run are flagged as "previously seen" (F5).',
+    )
 
 
 class BreakSubmission(BaseModel):
@@ -324,7 +328,8 @@ def create_run(body: CreateRunRequest, user: dict = Depends(auth.resolve_user)):
             f"PUT /api/credentials first.",
         )
 
-    run_id = pipeline.create_run(body.problem)
+    run_id = pipeline.create_run(body.problem,
+                                 previous_run_id=body.previous_run_id or None)
     users.claim_run(run_id, user["user_id"], body.provider)
     if body.model_overrides:
         _store_model_overrides(run_id, body.model_overrides)
@@ -419,10 +424,19 @@ def run_sources(run_id: str, user: dict = Depends(auth.resolve_user)):
         (run_id,),
     )
     inserted = {r["source_name"]: int(r["n"]) for r in rows}
+    # F5: previously-seen count from cross-run dedup
+    prev_rows = db.query(
+        "SELECT COUNT(*) AS n FROM sources WHERE run_id = ? AND previously_seen = 1",
+        (run_id,),
+    )
+    previously_seen = int(prev_rows[0]["n"]) if prev_rows else 0
+    previous_run_id = db.get_previous_run_id(run_id)
     return {
         "run_id": run_id,
         "health": health,
         "inserted": inserted,
+        "previously_seen": previously_seen,
+        "previous_run_id": previous_run_id,
     }
 
 
