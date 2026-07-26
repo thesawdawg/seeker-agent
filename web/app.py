@@ -24,7 +24,7 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -400,6 +400,171 @@ def run_status(run_id: str, user: dict = Depends(auth.resolve_user)):
             for s in state["steps"]
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# SSE event stream (F3) — replaces the 2s polling loop with server-pushed
+# events. The endpoint polls the DB at 1s intervals internally and emits an
+# event whenever step status, activity, or run-level state changes. It
+# terminates when the run completes or the client disconnects.
+# ---------------------------------------------------------------------------
+
+import asyncio
+from typing import AsyncGenerator
+
+
+def _run_status_snapshot(run_id: str) -> Optional[dict]:
+    """Build the same status dict as the GET /status endpoint, or None
+    if the run no longer exists."""
+    state = pipeline.get_state(run_id)
+    if not state.get("exists"):
+        return None
+    queued = [j for j in jobs.jobs_for_run(run_id)
+              if j.get("status") in ("queued", "running")]
+    return {
+        "run_id":         run_id,
+        "status":         state["status"],
+        "progress":       state["progress"],
+        "current_step":   state["current_step"],
+        "running":        state["running"] or bool(queued),
+        "awaiting_break": state["awaiting_break"],
+        "complete":       state["complete"],
+        "stop_grace_seconds": pipeline.STOP_GRACE_SECONDS,
+        "failed_steps":   state["failed_steps"],
+        "queued":         bool(queued),
+        "steps": [
+            {"name": s["step_name"], "label": s["label"], "status": s["status"],
+             "error": s.get("error"), "started_at": s.get("started_at"),
+             "finished_at": s.get("finished_at"),
+             "activity": s.get("activity"), "activity_at": s.get("activity_at")}
+            for s in state["steps"]
+        ],
+    }
+
+
+def _status_signature(snap: dict) -> str:
+    """A compact hash of the parts of the status that the UI renders.
+
+    Two snapshots with the same signature produce identical UI, so the
+    SSE stream only emits when this string changes. This avoids spamming
+    the client with a full status payload every second when nothing moved.
+    """
+    parts = [
+        snap["status"],
+        snap["current_step"] or "",
+        str(snap["running"]),
+        str(snap["awaiting_break"]),
+        str(snap["complete"]),
+        str(snap["queued"]),
+        ",".join(snap["failed_steps"]),
+        "|".join(
+            f"{s['name']}:{s['status']}:{s.get('activity') or ''}"
+            for s in snap["steps"]
+        ),
+    ]
+    return "\x1f".join(parts)
+
+
+# SSE poll interval — the internal DB poll frequency. 1s is fast enough
+# that activity notes appear promptly, while being far cheaper than the
+# old 2s HTTP polling (one persistent connection vs. a new request every
+# 2s, and no HTTP overhead per tick).
+_SSE_POLL_SECONDS = 1.0
+# Maximum stream lifetime — prevents a forgotten browser tab from holding
+# a connection open forever. The client reconnects automatically.
+_SSE_MAX_LIFETIME_SECONDS = 300  # 5 minutes
+
+
+@app.get("/api/runs/{run_id}/events")
+async def run_events(run_id: str, request: Request,
+                     user: dict = Depends(auth.resolve_user)):
+    """
+    Server-Sent Events stream for a run (F3).
+
+    Emits `status` events whenever the run's step state, activity, or
+    completion changes. The client uses EventSource and falls back to
+    polling if SSE is unavailable.
+
+    The stream closes after _SSE_MAX_LIFETIME_SECONDS or when the run
+    completes; the client reconnects automatically.
+    """
+    auth.require_run_access(user, run_id)
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        import time
+        start = time.monotonic()
+        last_sig = None
+        last_activity_keys: set[str] = set()
+
+        # Send an initial event immediately so the client doesn't wait 1s
+        # for its first status.
+        snap = _run_status_snapshot(run_id)
+        if snap is None:
+            yield _sse_event("error", {"message": "Run not found"})
+            return
+        yield _sse_event("status", snap)
+        last_sig = _status_signature(snap)
+        last_activity_keys = _activity_keys(snap)
+
+        # If the run is already complete, emit done and close
+        if snap["complete"] and not snap["running"]:
+            yield _sse_event("done", {"run_id": run_id})
+            return
+
+        while True:
+            # Check for client disconnect
+            if await request.is_disconnected():
+                logger.debug(f"[SSE] Client disconnected from {run_id}")
+                return
+
+            # Check max lifetime
+            if time.monotonic() - start > _SSE_MAX_LIFETIME_SECONDS:
+                logger.debug(f"[SSE] Max lifetime reached for {run_id}")
+                return
+
+            # Sleep before next poll — yield control to the event loop
+            # so other requests can be served.
+            await asyncio.sleep(_SSE_POLL_SECONDS)
+
+            snap = _run_status_snapshot(run_id)
+            if snap is None:
+                yield _sse_event("error", {"message": "Run not found"})
+                return
+
+            sig = _status_signature(snap)
+            activity_keys = _activity_keys(snap)
+
+            # Emit a status event if step state or activity changed
+            if sig != last_sig or activity_keys != last_activity_keys:
+                yield _sse_event("status", snap)
+                last_sig = sig
+                last_activity_keys = activity_keys
+
+            # Emit a done event and close when the run is complete
+            if snap["complete"] and not snap["running"]:
+                yield _sse_event("done", {"run_id": run_id})
+                return
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable nginx buffering
+            "Connection": "keep-alive",
+        },
+    )
+
+
+def _sse_event(event_type: str, data: dict) -> str:
+    """Format a Server-Sent Event string."""
+    payload = json.dumps(data)
+    return f"event: {event_type}\ndata: {payload}\n\n"
+
+
+def _activity_keys(snap: dict) -> set[str]:
+    """A set of '{step}|{activity}' strings for dedup."""
+    return {f"{s['name']}|{s.get('activity') or ''}" for s in snap["steps"]}
 
 
 @app.post("/api/runs/{run_id}/advance")

@@ -1186,6 +1186,88 @@ def test_config_rejects_non_admin(client, provider, stub_agents):
 
 
 # ---------------------------------------------------------------------------
+# SSE event stream (F3)
+# ---------------------------------------------------------------------------
+
+def test_sse_events_stream_status(client, provider, stub_agents):
+    """F3: GET /api/runs/{id}/events returns an SSE stream with status events.
+
+    We test against a completed run so the stream terminates after the
+    done event — an open-ended stream would hang the TestClient.
+    """
+    from core import pipeline
+    import core.database as cdb
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()  # advances to break0
+
+    # Mark all steps done so the stream emits done and closes
+    all_steps = [s.name for s in pipeline.STEP_DEFS]
+    pipeline._mark_cloned_steps_done(run_id, all_steps)
+    cdb.update_run_status(run_id, "completed")
+
+    resp = client.get(f"/api/runs/{run_id}/events")
+    assert resp.status_code == 200
+    assert "text/event-stream" in resp.headers.get("content-type", "")
+    text = resp.text
+    assert "event: status" in text
+    assert run_id in text
+    assert "event: done" in text
+
+
+def test_sse_events_requires_auth(client, provider, stub_agents):
+    """F3: SSE endpoint requires authentication."""
+    run_id = "RUN-FAKE-1234"
+    resp = client.get(f"/api/runs/{run_id}/events")
+    assert resp.status_code == 401
+
+
+def test_sse_events_rejects_other_users_run(client, provider, stub_agents):
+    """F3: SSE endpoint respects run ownership."""
+    sign_in(client, provider, name="Owner")
+    run_id = client.post("/api/runs", json={"problem": "My problem"}).json()["run_id"]
+    drain()
+
+    # Create a second user and try to access the run's events
+    from core import users
+    from web import auth
+    second = users.get_or_create("other-auth-ref", display_name="Other")
+    token = "test-sse-other-session"
+    auth.sessions().set(token, {"user_id": second["user_id"]}, ttl=3600)
+    client.cookies.set("seeker_session", token)
+
+    resp = client.get(f"/api/runs/{run_id}/events")
+    assert resp.status_code == 404  # 404, not 403 — existence is hidden
+
+
+def test_sse_status_signature_dedupes():
+    """F3: _status_signature produces the same hash for identical states."""
+    from web.app import _status_signature
+    snap = {
+        "status": "active", "current_step": "grounder", "running": True,
+        "awaiting_break": None, "complete": False, "queued": False,
+        "failed_steps": [],
+        "steps": [
+            {"name": "concept_mapper", "status": "done", "activity": None},
+            {"name": "grounder", "status": "running", "activity": "OpenAlex — searching"},
+        ],
+    }
+    assert _status_signature(snap) == _status_signature({**snap})
+    # Different activity → different signature
+    snap2 = {**snap, "steps": [
+        {"name": "concept_mapper", "status": "done", "activity": None},
+        {"name": "grounder", "status": "running", "activity": "arXiv — searching"},
+    ]}
+    assert _status_signature(snap) != _status_signature(snap2)
+    # Different step status → different signature
+    snap3 = {**snap, "steps": [
+        {"name": "concept_mapper", "status": "done", "activity": None},
+        {"name": "grounder", "status": "done", "activity": None},
+    ]}
+    assert _status_signature(snap) != _status_signature(snap3)
+
+
+# ---------------------------------------------------------------------------
 # Mid-run model changes
 # ---------------------------------------------------------------------------
 
