@@ -14,6 +14,7 @@ Run:
   uvicorn web.app:app --host 0.0.0.0 --port 8000
 """
 
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -588,6 +589,106 @@ def remove_blacklist_entry(body: BlacklistEntry,
     """Remove a source from the blacklist (F8)."""
     db.remove_from_blacklist(user["user_id"], body.match_type, body.match_value)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Config editor (F12) — admin-gated structured editing of config.json
+# ---------------------------------------------------------------------------
+
+# Sections an operator can edit. Each is validated before writing.
+_EDITABLE_SECTIONS = ("themes", "sources", "agent_sources", "run_templates")
+
+
+@app.get("/api/config")
+def get_config(user: dict = Depends(auth.resolve_user)):
+    """
+    Full config.json, admin-only (F12).
+
+    Returns the editable sections plus metadata. The LLM routing section
+    is included read-only — editing it at runtime is risky and out of
+    scope for the web editor.
+    """
+    auth.require_admin(user)
+    from core.utils import load_config
+    try:
+        cfg = load_config()
+    except FileNotFoundError:
+        cfg = {}
+    # Strip _description / _notes keys from the response — they're operator
+    # hints in the file, not data the UI needs to render.
+    clean = {}
+    for section in _EDITABLE_SECTIONS:
+        val = cfg.get(section)
+        if isinstance(val, dict):
+            clean[section] = {k: v for k, v in val.items()
+                              if not k.startswith("_")}
+        elif isinstance(val, list):
+            clean[section] = val
+        else:
+            clean[section] = val
+    # LLM routing — read-only
+    llm = cfg.get("llm", {})
+    clean["llm"] = {k: v for k, v in llm.items() if not k.startswith("_")}
+    clean["is_admin"] = True
+    return clean
+
+
+@app.put("/api/config/sections/{section}")
+def update_config_section(section: str, body: dict,
+                          user: dict = Depends(auth.resolve_user)):
+    """
+    Update one editable section of config.json (F12).
+
+    The body is the new value for that section. The write is atomic
+    (temp file + rename) and validated as JSON before reaching disk.
+    Sections not in _EDITABLE_SECTIONS are rejected.
+    """
+    auth.require_admin(user)
+    if section not in _EDITABLE_SECTIONS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"Section '{section}' is not editable. "
+                            f"Editable: {', '.join(_EDITABLE_SECTIONS)}")
+
+    from core.utils import load_config, save_config
+    try:
+        cfg = load_config()
+    except FileNotFoundError:
+        cfg = {}
+
+    # Preserve _description / _notes keys in dict sections
+    old = cfg.get(section, {})
+    new_val = body.get("value", body)
+    if isinstance(old, dict) and isinstance(new_val, dict):
+        # Merge: keep _-prefixed keys from the old, take everything else
+        # from the new
+        merged = {k: v for k, v in old.items() if k.startswith("_")}
+        merged.update(new_val)
+        cfg[section] = merged
+    else:
+        cfg[section] = new_val
+
+    # Validate the new section value is JSON-serializable
+    try:
+        json.dumps(cfg[section])
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"Section value is not valid JSON: {e}")
+
+    try:
+        save_config(cfg)
+    except Exception as e:
+        logger.error(f"[F12] Failed to save config: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            f"Could not save config: {e}")
+    logger.info(f"[F12] Admin {user['user_id']} updated section '{section}'")
+    return {"ok": True, "section": section}
+
+
+@app.get("/api/config/whoami")
+def config_whoami(user: dict = Depends(auth.resolve_user)):
+    """Whether the current user is an admin (F12). Used by the UI to
+    show or hide the Admin tab."""
+    return {"is_admin": users.is_admin(user["user_id"])}
 
 
 @app.post("/api/templates")

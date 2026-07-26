@@ -86,13 +86,22 @@ def provider():
 def client(tmp_path, monkeypatch):
     """The real app, against a throwaway database and in-memory sessions."""
     import core.database as db
-    from core import db_backend, jobs, pipeline, users
+    from core import db_backend, jobs, pipeline, users, utils
     from web import auth
 
     monkeypatch.setenv("SEEKER_DB_BACKEND", "sqlite")
     monkeypatch.setenv("SEEKER_SECRET_KEY", TEST_SECRET)
     monkeypatch.delenv("REDIS_URL", raising=False)
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "pipeline.db")
+
+    # F12: copy config.json to a temp path so config-editing tests don't
+    # clobber the real file.
+    import shutil
+    real_config = utils.CONFIG_PATH
+    tmp_config = tmp_path / "config.json"
+    if real_config.exists():
+        shutil.copy2(real_config, tmp_config)
+    monkeypatch.setattr(utils, "CONFIG_PATH", tmp_config)
 
     db_backend.reset_backend()
     for module in (pipeline, users, jobs):
@@ -1064,6 +1073,116 @@ def test_branch_run_preserves_tree_source_references(client, provider, stub_agen
     # The source_ids should reference the new source IDs
     for sid in ev["source_ids"]:
         assert sid in new_source_ids
+
+
+# ---------------------------------------------------------------------------
+# Config editor (F12)
+# ---------------------------------------------------------------------------
+
+def test_first_user_auto_promoted_to_admin(client, provider, stub_agents):
+    """F12: the first user to sign in is automatically promoted to admin."""
+    from core import users
+    sign_in(client, provider)
+    me = client.get("/api/auth/me").json()
+    assert users.is_admin(me["user_id"])
+    # The whoami endpoint should agree
+    resp = client.get("/api/config/whoami")
+    assert resp.status_code == 200
+    assert resp.json()["is_admin"] is True
+
+
+def test_config_get_returns_sections(client, provider, stub_agents):
+    """F12: GET /api/config returns the editable sections."""
+    sign_in(client, provider)
+    resp = client.get("/api/config")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "sources" in body
+    assert "themes" in body
+    assert "agent_sources" in body
+    assert "run_templates" in body
+    assert body["is_admin"] is True
+    # The sources section should have openalex
+    assert "openalex" in body["sources"]
+
+
+def test_config_update_sources(client, provider, stub_agents):
+    """F12: PUT /api/config/sections/sources updates the sources section."""
+    sign_in(client, provider)
+    # Get current config
+    cfg = client.get("/api/config").json()
+    sources = cfg["sources"]
+    # Disable arxiv
+    if "arxiv" in sources:
+        sources["arxiv"]["enabled"] = False
+
+    resp = client.put("/api/config/sections/sources", json={"value": sources})
+    assert resp.status_code == 200, resp.text
+
+    # Verify it was saved — re-read
+    cfg2 = client.get("/api/config").json()
+    assert cfg2["sources"]["arxiv"]["enabled"] is False
+
+    # Restore it
+    sources["arxiv"]["enabled"] = True
+    client.put("/api/config/sections/sources", json={"value": sources})
+
+
+def test_config_update_themes(client, provider, stub_agents):
+    """F12: PUT /api/config/sections/themes updates the themes section."""
+    sign_in(client, provider)
+    cfg = client.get("/api/config").json()
+    original_themes = cfg["themes"]
+    # Add a test theme
+    new_themes = original_themes + [{
+        "theme_id": "test_theme_f12",
+        "label": "Test Theme",
+        "keywords": [{"seed": "test_keyword", "expansion_depth": 1}],
+    }]
+    resp = client.put("/api/config/sections/themes", json={"value": new_themes})
+    assert resp.status_code == 200, resp.text
+
+    # Verify
+    cfg2 = client.get("/api/config").json()
+    theme_ids = {t["theme_id"] for t in cfg2["themes"]}
+    assert "test_theme_f12" in theme_ids
+
+    # Restore
+    client.put("/api/config/sections/themes", json={"value": original_themes})
+
+
+def test_config_rejects_non_editable_section(client, provider, stub_agents):
+    """F12: PUT to a non-editable section is rejected."""
+    sign_in(client, provider)
+    resp = client.put("/api/config/sections/llm", json={"value": {}})
+    assert resp.status_code == 400
+
+
+def test_config_rejects_non_admin(client, provider, stub_agents):
+    """F12: a non-admin user cannot access the config endpoints."""
+    from core import users
+    # Sign in as the first user (auto-admin)
+    sign_in(client, provider, name="Admin")
+    me = client.get("/api/auth/me").json()
+    assert users.is_admin(me["user_id"])
+
+    # Create a second user directly — they should NOT be admin
+    second = users.get_or_create("non-admin-auth-ref", display_name="NonAdmin")
+    assert not users.is_admin(second["user_id"])
+
+    # Manually set the session to the second user
+    from web import auth
+    token = "test-non-admin-session"
+    auth.sessions().set(token, {"user_id": second["user_id"]}, ttl=3600)
+    client.cookies.set("seeker_session", token)
+
+    resp = client.get("/api/config")
+    assert resp.status_code == 403
+    resp = client.put("/api/config/sections/sources", json={"value": {}})
+    assert resp.status_code == 403
+    resp = client.get("/api/config/whoami")
+    assert resp.status_code == 200
+    assert resp.json()["is_admin"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -188,6 +188,16 @@ async function afterSignIn() {
   state.steps = shape.steps;
   state.agents = agents.agents;
 
+  // F12: check admin status to show/hide the Admin button
+  try {
+    const who = await api('/api/config/whoami');
+    state.isAdmin = who.is_admin;
+    $('#btn-admin').hidden = !who.is_admin;
+  } catch {
+    state.isAdmin = false;
+    $('#btn-admin').hidden = true;
+  }
+
   await loadModels();
   await showRuns();
 }
@@ -2356,6 +2366,248 @@ async function renderSources() {
   );
 }
 
+/* ── admin / config editor (F12) ─────────────────────────────────────── */
+
+let _adminConfig = null;  // cached config from GET /api/config
+
+// Save one config section (F12). Used by all the admin tab save buttons.
+async function saveConfigSection(section, value) {
+  await api(`/api/config/sections/${section}`, {
+    method: 'PUT', body: { value },
+  });
+  toast(`${section} saved`, 'ok');
+}
+
+async function showAdmin() {
+  if (!state.isAdmin) { toast('Admin access required', 'error'); return; }
+  showView('admin');
+  _adminConfig = await api('/api/config');
+  switchAdminTab('sources');
+}
+
+function switchAdminTab(tab) {
+  $$('#admin-tabs .tab').forEach(t => {
+    t.classList.toggle('is-active', t.dataset.adminTab === tab);
+  });
+  $$('#view-admin .tab-panel').forEach(p => { p.hidden = true; });
+  const panel = $(`#panel-admin-${tab}`);
+  if (panel) { panel.hidden = false; renderAdminTab(tab, panel); }
+}
+
+async function renderAdminTab(tab, panel) {
+  clear(panel);
+  if (tab === 'sources')         renderAdminSources(panel);
+  else if (tab === 'agent_sources') renderAdminAgentSources(panel);
+  else if (tab === 'themes')     renderAdminThemes(panel);
+  else if (tab === 'run_templates') renderAdminTemplates(panel);
+}
+
+// ── Sources tab: toggle enabled/disabled, edit api_url ──
+function renderAdminSources(panel) {
+  const sources = _adminConfig.sources || {};
+  const saveBtn = el('button', { class: 'btn btn-primary', type: 'button',
+    onClick: async () => {
+      saveBtn.disabled = true;
+      try {
+        await saveConfigSection('sources', sources);
+        toast('Sources saved', 'ok');
+      } catch (e) { toast(e.message, 'error'); }
+      finally { saveBtn.disabled = false; }
+    },
+  }, 'Save sources');
+
+  panel.append(el('p', { class: 'muted small' },
+    'Toggle which academic sources are available. Disabled sources are ' +
+    'hidden from the New Run screen and from agent routing.'), saveBtn);
+
+  const grid = el('div', { class: 'admin-source-grid' });
+  for (const [id, spec] of Object.entries(sources).sort()) {
+    if (!spec || typeof spec !== 'object') continue;
+    const cb = el('input', { type: 'checkbox', checked: !!spec.enabled });
+    cb.addEventListener('change', () => { spec.enabled = cb.checked; });
+    const urlInput = el('input', { type: 'text', value: spec.api_url || '',
+      placeholder: 'https://...', style: 'width: 280px;' });
+    urlInput.addEventListener('change', () => { spec.api_url = urlInput.value; });
+    grid.append(el('div', { class: 'admin-source-row' },
+      el('label', {},
+        cb, el('span', { class: 'admin-source-name', text: id })),
+      urlInput,
+    ));
+  }
+  panel.append(grid);
+}
+
+// ── Agent routing tab: which sources each agent uses ──
+function renderAdminAgentSources(panel) {
+  const agentSources = _adminConfig.agent_sources || {};
+  // Get the full source list from the sources section
+  const allSourceIds = Object.keys(_adminConfig.sources || {}).sort();
+  const agents = Object.keys(agentSources).filter(k => !k.startsWith('_')).sort();
+
+  const saveBtn = el('button', { class: 'btn btn-primary', type: 'button',
+    onClick: async () => {
+      saveBtn.disabled = true;
+      try {
+        await saveConfigSection('agent_sources', agentSources);
+        toast('Agent routing saved', 'ok');
+      } catch (e) { toast(e.message, 'error'); }
+      finally { saveBtn.disabled = false; }
+    },
+  }, 'Save routing');
+
+  panel.append(el('p', { class: 'muted small' },
+    'Which sources each agent searches. Check a box to include a source ' +
+    'in that agent's search; uncheck to exclude it.'), saveBtn);
+
+  // Build a matrix: rows = agents, columns = sources
+  const table = el('table', { class: 'admin-matrix' });
+  // Header row
+  const head = el('tr');
+  head.append(el('th', { text: 'Agent' }));
+  for (const sid of allSourceIds) {
+    head.append(el('th', { class: 'admin-matrix-col', text: sid,
+      title: sid }));
+  }
+  table.append(el('thead', {}, head));
+
+  const tbody = el('tbody');
+  for (const agent of agents) {
+    const row = el('tr');
+    row.append(el('td', { class: 'admin-matrix-agent', text: agent }));
+    const enabled = new Set(agentSources[agent] || []);
+    for (const sid of allSourceIds) {
+      const cb = el('input', { type: 'checkbox', checked: enabled.has(sid) });
+      cb.addEventListener('change', () => {
+        const list = agentSources[agent] || [];
+        if (cb.checked) {
+          if (!list.includes(sid)) list.push(sid);
+        } else {
+          agentSources[agent] = list.filter(s => s !== sid);
+          return;  // already updated
+        }
+        agentSources[agent] = list;
+      });
+      row.append(el('td', { class: 'admin-matrix-cell' }, cb));
+    }
+    tbody.append(row);
+  }
+  table.append(tbody);
+  panel.append(table);
+}
+
+// ── Themes tab: list of themes with add/remove ──
+function renderAdminThemes(panel) {
+  const themes = _adminConfig.themes || [];
+  const saveBtn = el('button', { class: 'btn btn-primary', type: 'button',
+    onClick: async () => {
+      saveBtn.disabled = true;
+      try {
+        await saveConfigSection('themes', themes);
+        toast('Themes saved', 'ok');
+      } catch (e) { toast(e.message, 'error'); }
+      finally { saveBtn.disabled = false; }
+    },
+  }, 'Save themes');
+
+  panel.append(el('p', { class: 'muted small' },
+    'The theme bank the Concept Mapper selects from. Each theme has an ID, ' +
+    'a label, and keyword seeds with expansion depth.'), saveBtn);
+
+  const list = el('div', { class: 'admin-themes-list' });
+  for (let i = 0; i < themes.length; i++) {
+    const t = themes[i];
+    const row = el('div', { class: 'admin-theme-row' },
+      el('div', { class: 'admin-theme-head' },
+        el('strong', { text: t.label || t.theme_id || '(unnamed)' }),
+        el('span', { class: 'muted small',
+          text: `${(t.keywords || []).length} keywords` }),
+        el('button', { class: 'btn btn-small btn-danger', type: 'button',
+          onClick: () => {
+            themes.splice(i, 1);
+            renderAdminThemes(panel);
+          },
+        }, 'Remove'),
+      ),
+      el('div', { class: 'muted small',
+        text: `ID: ${t.theme_id}` }),
+    );
+    list.append(row);
+  }
+  panel.append(list);
+
+  // Add theme form
+  const idInput = el('input', { type: 'text', placeholder: 'theme_id (snake_case)' });
+  const labelInput = el('input', { type: 'text', placeholder: 'Display label' });
+  const kwInput = el('input', { type: 'text',
+    placeholder: 'keyword seeds (comma-separated)' });
+  const addBtn = el('button', { class: 'btn btn-small', type: 'button',
+    onClick: () => {
+      const id = idInput.value.trim();
+      if (!id) return;
+      const seeds = kwInput.value.split(',').map(s => s.trim()).filter(Boolean);
+      themes.push({
+        theme_id: id,
+        label: labelInput.value.trim() || id,
+        keywords: seeds.map(s => ({ seed: s, expansion_depth: 1 })),
+      });
+      idInput.value = ''; labelInput.value = ''; kwInput.value = '';
+      renderAdminThemes(panel);
+    },
+  }, 'Add theme');
+  panel.append(el('div', { class: 'admin-theme-add' },
+    idInput, labelInput, kwInput, addBtn));
+}
+
+// ── Templates tab: built-in run templates ──
+function renderAdminTemplates(panel) {
+  const templates = _adminConfig.run_templates || {};
+  const saveBtn = el('button', { class: 'btn btn-primary', type: 'button',
+    onClick: async () => {
+      saveBtn.disabled = true;
+      try {
+        await saveConfigSection('run_templates', templates);
+        toast('Templates saved', 'ok');
+      } catch (e) { toast(e.message, 'error'); }
+      finally { saveBtn.disabled = false; }
+    },
+  }, 'Save templates');
+
+  panel.append(el('p', { class: 'muted small' },
+    'Built-in run templates that appear in the New Run template picker. ' +
+    'Each template sets default source overrides and a per-source limit.'), saveBtn);
+
+  for (const [name, spec] of Object.entries(templates).sort()) {
+    if (!spec || typeof spec !== 'object') continue;
+    const descInput = el('input', { type: 'text', value: spec.description || '',
+      style: 'width: 100%;' });
+    descInput.addEventListener('change', () => { spec.description = descInput.value; });
+    const limInput = el('input', { type: 'number', value: spec.limit_per_source || '',
+      style: 'width: 80px;' });
+    limInput.addEventListener('change', () => {
+      spec.limit_per_source = limInput.value ? parseInt(limInput.value) : undefined;
+    });
+    panel.append(el('div', { class: 'admin-template-row' },
+      el('div', { class: 'admin-template-head' },
+        el('strong', { text: name }),
+        el('button', { class: 'btn btn-small btn-danger', type: 'button',
+          onClick: () => {
+            delete templates[name];
+            renderAdminTemplates(panel);
+          },
+        }, 'Remove'),
+      ),
+      el('label', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Description'),
+        descInput),
+      el('label', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Limit per source'),
+        limInput),
+      el('div', { class: 'muted small',
+        text: `${Object.keys(spec.source_overrides || {}).length} source overrides` }),
+    ));
+  }
+}
+
 function wireChrome() {
   $('#run-tabs').addEventListener('click', ev => {
     const tab = ev.target.closest('.tab');
@@ -2363,6 +2615,12 @@ function wireChrome() {
   });
   $$('[data-nav="runs"]').forEach(node => {
     node.addEventListener('click', () => showRuns().catch(err => toast(err.message, 'error')));
+  });
+  // F12: admin button + admin tab switching
+  $('#btn-admin')?.addEventListener('click', () => showAdmin().catch(err => toast(err.message, 'error')));
+  $('#admin-tabs')?.addEventListener('click', ev => {
+    const tab = ev.target.closest('[data-admin-tab]');
+    if (tab) switchAdminTab(tab.dataset.adminTab);
   });
   $('#modal-cancel').addEventListener('click', () => { $('#modal').hidden = true; });
   $('#modal').addEventListener('click', ev => {

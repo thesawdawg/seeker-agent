@@ -16,6 +16,7 @@
   <div class="topbar-right">
     <span class="storage-badge" id="storage-badge"></span>
     <span class="user-chip" id="user-chip"></span>
+    <button class="btn btn-ghost" id="btn-admin" type="button" hidden>Admin</button>
     <button class="btn btn-ghost" id="btn-theme" type="button" title="Toggle dark/light theme">◐</button>
     <button class="btn btn-ghost" id="btn-logout" type="button">Sign out</button>
   </div>
@@ -226,6 +227,32 @@
         <div class="tab-panel" id="panel-artifacts" hidden></div>
       </div>
     </div>
+  </section>
+
+  <!-- ── Admin / config editor (F12) ─────────────────────────────────── -->
+  <section class="view" id="view-admin" hidden>
+    <div class="view-head">
+      <div>
+        <button class="btn btn-ghost btn-small" data-nav="runs" type="button">← All runs</button>
+        <h1>Operator configuration</h1>
+        <p class="muted small">
+          Edit the theme bank, source stack, and agent source routing.
+          Changes write to <code>config.json</code> and apply to the next run.
+        </p>
+      </div>
+    </div>
+
+    <nav class="tabs" id="admin-tabs">
+      <button class="tab is-active" data-admin-tab="sources" type="button">Sources</button>
+      <button class="tab" data-admin-tab="agent_sources" type="button">Agent routing</button>
+      <button class="tab" data-admin-tab="themes" type="button">Themes</button>
+      <button class="tab" data-admin-tab="run_templates" type="button">Templates</button>
+    </nav>
+
+    <div class="tab-panel" id="panel-admin-sources"></div>
+    <div class="tab-panel" id="panel-admin-agent_sources" hidden></div>
+    <div class="tab-panel" id="panel-admin-themes" hidden></div>
+    <div class="tab-panel" id="panel-admin-run_templates" hidden></div>
   </section>
 
 </main>
