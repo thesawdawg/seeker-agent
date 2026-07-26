@@ -207,6 +207,14 @@ Rules:
 
 STRUCTURE (follow this exactly):
 
+## 0. Coverage and Confidence
+A short preamble (80-120 words) that tells the researcher what the map is built on, so they can calibrate their trust. Use the COVERAGE MATRIX block provided in the context. State:
+  - The total number of sources the map is built from, and how they break down by source (e.g. OpenAlex, Semantic Scholar) and by type (current / seminal / historical).
+  - How many distinct themes the sources cover.
+  - Any themes flagged as THIN-COVERAGE (fewer than 3 sources). Explicitly warn the researcher that claims about those themes rest on limited evidence and should be treated as provisional.
+  - One sentence on what this means for how to read the rest of the map (e.g. "The foundations are well-supported; the current frontier is thinner and several of its claims are best read as hypotheses to test").
+Do NOT cite individual sources in this section — it is a meta-statement about coverage, not a claim about content.
+
 ## 1. The Territory at a Glance
 A single dense paragraph (150-200 words) that frames the intellectual landscape. Not a summary — a map legend. What are the 2-3 central tensions that organise this entire field? What is the one question that, if answered, would unlock everything else? What kind of field is this — one with empirical consensus but conceptual confusion, or one with competing frameworks and no shared method?
 
@@ -394,8 +402,13 @@ def _run_understanding_map(context: str, run_id: str, problem: str,
     # --- Stage 2: generate ---------------------------------------------------
     system_prompt = SYSTEM_PROMPTS["understanding_map"].format(audience=audience)
     manifest_text = references.format_manifest_for_prompt(manifest)
+    coverage_matrix = references.build_coverage_matrix(manifest)
+    coverage_text = references.format_coverage_for_prompt(coverage_matrix)
     enriched_context = (
         f"{context}\n\n"
+        f"---\n"
+        f"COVERAGE MATRIX (meta-information about the sources retrieved):\n"
+        f"{coverage_text}\n\n"
         f"---\n"
         f"CITABLE SOURCES MANIFEST ({len(manifest)} entries):\n"
         f"Format: [CiteKey] Authors (Year). Title  Abstract: ...\n"
