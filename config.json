@@ -1213,6 +1213,40 @@
       "consensus_standalone": "Consensus is still available via: python3 core/consensus_mcp.py \"query\""
     }
   },
+  "run_templates": {
+    "_description": "Built-in run templates (F4). Selected from the 'Template' dropdown on the New Run screen. Each template sets default source_overrides and (optionally) limit_per_source and model_role hints. User-saved templates (U10) coexist with these.",
+    "Humanities": {
+      "description": "Books, philosophy archives, humanities indexes. Favors JSTOR, PhilPapers, BASE, Persee.",
+      "source_overrides": {
+        "jstor": true, "philpapers": true, "philarchive": true,
+        "philsci": true, "base": true, "persee": true,
+        "openalex": true, "semantic_scholar": true, "core": true, "consensus": true,
+        "arxiv": false, "pubmed": false, "eric": false, "nber": false, "ssrn": false
+      },
+      "limit_per_source": 15
+    },
+    "CS / Quantitative": {
+      "description": "Preprints, technical reports, quantitative social science. Favors arXiv, NBER, SSRN.",
+      "source_overrides": {
+        "arxiv": true, "nber": true, "ssrn": true,
+        "openalex": true, "semantic_scholar": true, "core": true, "consensus": true, "scopus": true,
+        "philpapers": false, "philarchive": false, "philsci": false,
+        "base": false, "persee": false, "jstor": false, "eric": false
+      },
+      "limit_per_source": 20
+    },
+    "Quick scan": {
+      "description": "Low limits, fast. Use to get a rough map in minutes before committing to a deep run.",
+      "source_overrides": {
+        "openalex": true, "semantic_scholar": true, "consensus": true,
+        "arxiv": false, "pubmed": false, "scopus": false, "jstor": false,
+        "philpapers": false, "philarchive": false, "philsci": false,
+        "base": false, "persee": false, "eric": false, "nber": false,
+        "ssrn": false, "core": false
+      },
+      "limit_per_source": 5
+    }
+  },
   "llm": {
     "_description": "LLM routing. Any OpenAI-compatible endpoint works: set base_url and an api_key_env. 'kind' selects the wire format, not the vendor.",
     "default_provider": "open-webui",

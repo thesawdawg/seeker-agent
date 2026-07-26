@@ -361,6 +361,19 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_llm_usage_run   ON llm_usage(run_id);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_agent ON llm_usage(agent_name);
+
+-- Source blacklist (F8): user-marked DOIs / URLs / title substrings that
+-- should never enter a run. Checked at insert time by is_source_blacklisted.
+CREATE TABLE IF NOT EXISTS source_blacklist (
+    blacklist_id   {ID} PRIMARY KEY,
+    user_id        {ID} NOT NULL DEFAULT 'anon',
+    match_type     {KEY} NOT NULL,            -- doi | url | title_substring
+    match_value    {TEXT} NOT NULL,
+    reason         {TEXT},
+    created_at     {TEXT} NOT NULL,
+    UNIQUE (user_id, match_type, match_value)
+);
+CREATE INDEX IF NOT EXISTS idx_source_blacklist_user ON source_blacklist(user_id);
 """
 
 
@@ -645,7 +658,33 @@ def get_break_instructions(run_id: str, break_num: int) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def upsert_source(source: dict) -> bool:
-    """Insert or update a source entry."""
+    """Insert or update a source entry.
+
+    Checks the source blacklist (F8) first — if the source's DOI, URL, or
+    title matches a blacklist entry for the run's owner, it is silently
+    dropped. Returns False when dropped.
+    """
+    # F8: blacklist check. Look up the run's owner to scope the blacklist.
+    run_id = source.get("run_id")
+    if run_id:
+        try:
+            from core import users
+            owner = users.run_owner(run_id)
+            user_id = owner.get("user_id") if owner else "anon"
+        except Exception:
+            user_id = "anon"
+        matched, reason = is_source_blacklisted(
+            user_id,
+            doi=source.get("doi") or "",
+            url=source.get("active_link") or "",
+            title=source.get("title") or "",
+        )
+        if matched:
+            logger.info(
+                f"[F8] Dropping blacklisted source '{(source.get('title') or '')[:60]}' "
+                f"for run {run_id} ({reason or 'no reason given'})"
+            )
+            return False
     for field in ["authors", "theme_tags", "intersection_tags"]:
         if field in source:
             source[field] = _json(source[field])
@@ -902,6 +941,98 @@ def get_llm_usage_summary(run_id: str) -> dict:
         "by_agent": by_agent,
         "by_model": by_model,
     }
+
+
+# ---------------------------------------------------------------------------
+# Source blacklist (F8)
+# ---------------------------------------------------------------------------
+
+def add_to_blacklist(user_id: str, match_type: str, match_value: str,
+                     reason: str = "") -> bool:
+    """
+    Add an entry to the source blacklist.
+
+    match_type: 'doi' | 'url' | 'title_substring'
+    match_value: the DOI / URL / title substring to match (case-insensitive)
+    """
+    from core.utils import generate_id
+    if match_type not in ("doi", "url", "title_substring"):
+        raise ValueError(f"Invalid match_type: {match_type}")
+    if not match_value or not match_value.strip():
+        return False
+    # Normalize: DOIs and URLs lowercased; title substrings lowercased + stripped
+    value = match_value.strip().lower()
+    if match_type == "doi":
+        value = _normalize_doi(value)
+    return insert("source_blacklist", {
+        "blacklist_id": generate_id("BLK"),
+        "user_id":      user_id or "anon",
+        "match_type":   match_type,
+        "match_value":  value,
+        "reason":       reason or "",
+        "created_at":   _now(),
+    })
+
+
+def remove_from_blacklist(user_id: str, match_type: str, match_value: str) -> bool:
+    """Remove an entry from the source blacklist."""
+    value = (match_value or "").strip().lower()
+    if match_type == "doi":
+        value = _normalize_doi(value)
+    return execute(
+        "DELETE FROM source_blacklist WHERE user_id = ? AND match_type = ? AND match_value = ?",
+        (user_id or "anon", match_type, value),
+    )
+
+
+def list_blacklist(user_id: str) -> list[dict]:
+    """List a user's blacklist entries."""
+    return fetch("source_blacklist", {"user_id": user_id or "anon"})
+
+
+def _normalize_doi(doi: str) -> str:
+    """Lowercase and strip URL prefix from a DOI."""
+    d = (doi or "").strip().lower()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi.org/", "doi:"):
+        if d.startswith(prefix):
+            d = d[len(prefix):]
+            break
+    return d
+
+
+def is_source_blacklisted(user_id: str, doi: str = "", url: str = "",
+                          title: str = "") -> tuple[bool, Optional[str]]:
+    """
+    Check whether a source matches any blacklist entry for the given user.
+
+    Returns (matched, reason). 'anon' user_id is shared across all runs
+    when no specific user is bound.
+    """
+    rows = fetch("source_blacklist", {"user_id": user_id or "anon"})
+    if not rows:
+        # Fall back to the shared 'anon' blacklist if a specific user was given
+        if user_id and user_id != "anon":
+            rows = fetch("source_blacklist", {"user_id": "anon"})
+    if not rows:
+        return False, None
+
+    norm_doi = _normalize_doi(doi or "")
+    norm_url = (url or "").strip().lower()
+    norm_title = (title or "").strip().lower()
+
+    for r in rows:
+        get = (lambda k, _r=r: _r[k] if k in _r.keys() else None) \
+              if not isinstance(r, dict) else (lambda k, _r=r: _r.get(k))
+        mt = get("match_type") or ""
+        mv = get("match_value") or ""
+        reason = get("reason") or ""
+        if mt == "doi" and norm_doi and mv == norm_doi:
+            return True, reason
+        if mt == "url" and norm_url and mv in norm_url:
+            return True, reason
+        if mt == "title_substring" and norm_title and mv in norm_title:
+            return True, reason
+    return False, None
 
 
 # ---------------------------------------------------------------------------
