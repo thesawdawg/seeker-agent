@@ -161,164 +161,19 @@ Output ONLY valid JSON:
 
 # ---------------------------------------------------------------------------
 # Source handlers — books + papers + web
+#
+# The academic and book source handlers (OpenAlex, Semantic Scholar, Consensus,
+# Google Books, Open Library) were consolidated onto the shared
+# agents.social.SOURCE_HANDLERS registry in review O1, so this module no
+# longer keeps its own copies. Routing through the shared registry gives
+# Grounder's calls the rate limiter, retry/backoff, circuit breaker, and
+# global daily-limit tracking that the Social agent already had.
+#
+# _search_web is kept here because it uses Anthropic's server-side web_search
+# tool, which has no OpenAI-compatible equivalent and so does not fit the
+# shared SourceHandler base class. It still routes through the rate limiter
+# for the "web_search" source so its calls are coordinated and visible.
 # ---------------------------------------------------------------------------
-
-def _search_openalex(query: str, limit: int = 5) -> list[dict]:
-    """Search OpenAlex with contextual query."""
-    from core.keys import openalex as get_key
-    try:
-        params = {
-            "search":   query,
-            "per-page": limit,
-            "sort":     "relevance_score:desc",
-            "filter":   "has_abstract:true",
-        }
-        key = get_key()
-        if key:
-            params["api_key"] = key
-        else:
-            params["mailto"] = "pipeline@research.local"
-        resp = requests.get("https://api.openalex.org/works", params=params,
-                            timeout=15, headers={"User-Agent": "PipelineResearchBot/1.0"})
-        resp.raise_for_status()
-        data = resp.json()
-        results = []
-        for w in data.get("results", []):
-            # Reconstruct abstract from inverted index
-            abstract = ""
-            if w.get("abstract_inverted_index"):
-                words = {}
-                for word, positions in w["abstract_inverted_index"].items():
-                    for pos in positions:
-                        words[pos] = word
-                abstract = " ".join(words[i] for i in sorted(words))[:800]
-            doi = w.get("doi", "")
-            results.append({
-                "title":         w.get("display_name", ""),
-                "authors":       [a.get("author",{}).get("display_name","") for a in w.get("authorships",[])[:3]],
-                "year":          w.get("publication_year"),
-                "material_type": "paper",
-                "source":        "openalex",
-                "doi":           doi,
-                "abstract":      abstract,
-                "active_link":   doi or w.get("id",""),
-            })
-        return results
-    except Exception as e:
-        logger.warning(f"[Grounder/OpenAlex] {e}")
-        return []
-
-
-def _search_semantic_scholar(query: str, limit: int = 5) -> list[dict]:
-    """Search Semantic Scholar with contextual query."""
-    from core.keys import semantic_scholar as get_key
-    try:
-        headers = {"User-Agent": "PipelineResearchBot/1.0"}
-        key = get_key()
-        if key:
-            headers["x-api-key"] = key
-        time.sleep(3.5)  # rate limit
-        resp = requests.get(
-            "https://api.semanticscholar.org/graph/v1/paper/search",
-            params={"query": query, "limit": limit,
-                    "fields": "title,authors,year,abstract,externalIds,url"},
-            headers=headers, timeout=20
-        )
-        resp.raise_for_status()
-        results = []
-        for p in resp.json().get("data", []):
-            doi = p.get("externalIds", {}).get("DOI", "")
-            results.append({
-                "title":         p.get("title", ""),
-                "authors":       [a.get("name","") for a in p.get("authors",[])[:3]],
-                "year":          p.get("year"),
-                "material_type": "paper",
-                "source":        "semantic_scholar",
-                "doi":           doi,
-                "abstract":      (p.get("abstract") or "")[:800],
-                "active_link":   p.get("url","") or (f"https://doi.org/{doi}" if doi else ""),
-            })
-        return results
-    except Exception as e:
-        logger.warning(f"[Grounder/SemanticScholar] {e}")
-        return []
-
-
-def _search_google_books(query: str, limit: int = 5) -> list[dict]:
-    """Search Google Books API for foundational books."""
-    from core.keys import get as get_key
-    try:
-        api_key = get_key("GOOGLE_BOOKS_API_KEY")
-        params = {"q": query, "maxResults": limit, "orderBy": "relevance",
-                  "printType": "books", "langRestrict": "en"}
-        if api_key:
-            params["key"] = api_key
-        resp = requests.get("https://www.googleapis.com/books/v1/volumes",
-                            params=params, timeout=15,
-                            headers={"User-Agent": "PipelineResearchBot/1.0"})
-        resp.raise_for_status()
-        results = []
-        for item in resp.json().get("items", [])[:limit]:
-            info = item.get("volumeInfo", {})
-            isbn = ""
-            for id_obj in info.get("industryIdentifiers", []):
-                if id_obj.get("type") in ("ISBN_13", "ISBN_10"):
-                    isbn = id_obj.get("identifier", "")
-                    break
-            year = None
-            pub_date = info.get("publishedDate", "")
-            if pub_date and len(pub_date) >= 4:
-                year = int(pub_date[:4]) if pub_date[:4].isdigit() else None
-            results.append({
-                "title":         info.get("title", ""),
-                "authors":       info.get("authors", [])[:3],
-                "year":          year,
-                "material_type": "book",
-                "source":        "google_books",
-                "doi":           "",
-                "isbn":          isbn,
-                "abstract":      (info.get("description") or "")[:800],
-                "active_link":   info.get("canonicalVolumeLink", "")
-                                 or f"https://books.google.com/books?id={item.get('id','')}",
-            })
-        return results
-    except Exception as e:
-        logger.warning(f"[Grounder/GoogleBooks] {e}")
-        return []
-
-
-def _search_open_library(query: str, limit: int = 5) -> list[dict]:
-    """Search Open Library for foundational books — no key needed."""
-    try:
-        time.sleep(1.0)  # polite
-        resp = requests.get("https://openlibrary.org/search.json",
-                            params={"q": query, "limit": limit,
-                                    "fields": "title,author_name,first_publish_year,isbn,key,subject"},
-                            timeout=15,
-                            headers={"User-Agent": "PipelineResearchBot/1.0 (pipeline@research.local)"})
-        resp.raise_for_status()
-        results = []
-        for doc in resp.json().get("docs", [])[:limit]:
-            key  = doc.get("key", "")
-            link = f"https://openlibrary.org{key}" if key else ""
-            isbn_list = doc.get("isbn", [])
-            isbn = isbn_list[0] if isbn_list else ""
-            results.append({
-                "title":         doc.get("title", ""),
-                "authors":       doc.get("author_name", [])[:3],
-                "year":          doc.get("first_publish_year"),
-                "material_type": "book",
-                "source":        "open_library",
-                "doi":           "",
-                "isbn":          isbn,
-                "abstract":      "",
-                "active_link":   link,
-            })
-        return results
-    except Exception as e:
-        logger.warning(f"[Grounder/OpenLibrary] {e}")
-        return []
-
 
 def _search_web(query: str) -> list[dict]:
     """
@@ -377,36 +232,6 @@ def _search_web(query: str) -> list[dict]:
                  "authors": [], "year": None, "doi": "", "active_link": ""}]
     except Exception as e:
         logger.warning(f"[Grounder/WebSearch] {e}")
-        return []
-
-
-def _search_consensus(query: str) -> list[dict]:
-    """
-    Semantic search via Consensus MCP — 200M+ peer-reviewed papers.
-    Particularly valuable for Grounder because Consensus finds conceptually
-    relevant seminal works even when exact keyword terms don't match.
-    Falls back silently if not authenticated or unavailable.
-    """
-    try:
-        from core.consensus_mcp import search_consensus
-        results = search_consensus(query)
-        out = []
-        for r in results:
-            out.append({
-                "title":         r.get("title", ""),
-                "authors":       r.get("authors", []),
-                "year":          r.get("year"),
-                "source_name":   "consensus",
-                "doi":           r.get("doi", ""),
-                "abstract":      r.get("abstract", ""),
-                "active_link":   r.get("active_link", ""),
-                "cited_by":      r.get("cited_by", 0),
-                "material_type": "paper",
-                "link_status":   "active",
-            })
-        return out
-    except Exception as e:
-        logger.warning(f"[Grounder/Consensus] {e}")
         return []
 
 
@@ -569,42 +394,88 @@ def run(context: str, run_id: str, **kwargs):
                     },
                 )
 
-        # Academic papers — OpenAlex
+        # Academic papers + books — routed through the shared SOURCE_HANDLERS
+        # registry in social.py so every source gets the rate limiter, the
+        # retry/backoff machinery, the circuit breaker, and the global daily
+        # limit (review O1 / R1 / E6). Web search stays Anthropic-specific
+        # (no OpenAI-compatible equivalent) but still goes through the limiter.
+        from agents.social import SOURCE_HANDLERS
+        from core.rate_limiter import get_limiter, SourceUnavailable
+
+        def _run_shared_source(source_id: str, label: str, query: str,
+                               limit: int, evidence_type: str):
+            """Call a shared SourceHandler and record health + tree nodes."""
+            handler = SOURCE_HANDLERS.get(source_id)
+            if not handler:
+                return
+            progress.note(source_id, "searching", query)
+            try:
+                results = handler.search(query, [], limit, run_id=run_id)
+                db.record_source_health(
+                    run_id, source_id, "grounder",
+                    status="ok" if results else "degraded",
+                    results_returned=len(results), calls_made=1,
+                )
+            except SourceUnavailable:
+                results = []
+                db.record_source_health(
+                    run_id, source_id, "grounder",
+                    status="skipped", last_error="circuit breaker tripped",
+                )
+            except Exception as e:
+                logger.warning(f"[Grounder/{source_id}] {e}")
+                results = []
+                db.record_source_health(
+                    run_id, source_id, "grounder",
+                    status="failed", last_error=str(e)[:200],
+                )
+            _process_results(results, label, evidence_type)
+
         if paper_query and _src_on("openalex"):
-            progress.note("openalex", "searching", paper_query)
-            results = _search_openalex(paper_query, limit=4)
-            time.sleep(0.2)
-            _process_results(results, "OpenAlex", "paper")
-
-        # Academic papers — Semantic Scholar
+            _run_shared_source("openalex", "OpenAlex", paper_query, 4, "paper")
         if paper_query and _src_on("semantic_scholar"):
-            progress.note("semantic_scholar", "searching", paper_query)
-            results = _search_semantic_scholar(paper_query, limit=3)
-            _process_results(results, "S2", "paper")
-
-        # Academic papers — Consensus
+            _run_shared_source("semantic_scholar", "S2", paper_query, 3, "paper")
         if paper_query and _src_on("consensus"):
-            progress.note("consensus", "searching", paper_query)
-            results = _search_consensus(paper_query)
-            _process_results(results, "Consensus", "paper")
-
-        # Books — Google Books
+            _run_shared_source("consensus", "Consensus", paper_query, 10, "paper")
         if book_query and _src_on("google_books"):
-            progress.note("google_books", "searching", book_query)
-            results = _search_google_books(book_query, limit=3)
-            time.sleep(0.5)
-            _process_results(results, "GoogleBooks", "book")
-
-        # Books — Open Library
+            _run_shared_source("google_books", "GoogleBooks", book_query, 3, "book")
         if book_query and _src_on("open_library"):
-            progress.note("openlibrary", "searching", book_query)
-            results = _search_open_library(book_query, limit=3)
-            _process_results(results, "OpenLibrary", "book")
+            _run_shared_source("open_library", "OpenLibrary", book_query, 3, "book")
 
-        # Web search — broader coverage
+        # Web search — broader coverage. Anthropic server-side web_search tool,
+        # no OpenAI-compatible equivalent, so it stays Anthropic-specific. It
+        # still routes through the rate limiter so its calls are visible in
+        # the run summary and coordinated with other sources.
         if web_query and _src_on("web"):
             progress.note("web_search", "searching", web_query)
-            results = _search_web(web_query)
+            limiter = get_limiter(run_id)
+            try:
+                ok = limiter.wait("web_search")
+            except SourceUnavailable:
+                ok = False
+            if ok:
+                try:
+                    results = _search_web(web_query)
+                    limiter.record_success("web_search")
+                    db.record_source_health(
+                        run_id, "web_search", "grounder",
+                        status="ok" if results else "degraded",
+                        results_returned=len(results), calls_made=1,
+                    )
+                except Exception as e:
+                    logger.warning(f"[Grounder/WebSearch] {e}")
+                    limiter.record_failure("web_search")
+                    results = []
+                    db.record_source_health(
+                        run_id, "web_search", "grounder",
+                        status="failed", last_error=str(e)[:200],
+                    )
+            else:
+                results = []
+                db.record_source_health(
+                    run_id, "web_search", "grounder",
+                    status="skipped", last_error="rate-limited",
+                )
             _process_results(results, "WebSearch", "other")
 
     print(f"  [Grounder] {len(all_sources)} total sources gathered across {len(sub_questions)} sub-questions")

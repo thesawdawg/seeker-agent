@@ -4,8 +4,15 @@ API Key Manager
 Loads API keys from .env file and environment variables.
 Provides keys to all source handlers.
 Warns clearly when a required key is missing.
+
+In a multi-user (web) deployment, a worker binds the run's owner with
+set_current_user() before advancing; the accessors below then check that
+user's stored source credentials first, falling back to env vars. The CLI
+and tools never bind a user, so they keep using env vars exactly as before
+(review U2).
 """
 
+import contextvars
 import os
 import logging
 from pathlib import Path
@@ -13,6 +20,11 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 ENV_PATH = Path(__file__).parent.parent / ".env"
+
+# Per-run owner, set by the worker so source handlers pick up the user's
+# stored academic-source keys before falling back to env vars (review U2).
+_current_user: contextvars.ContextVar = contextvars.ContextVar(
+    "seeker_keys_user", default="")
 
 
 def _load_env():
@@ -38,12 +50,36 @@ def _load_env():
 _load_env()
 
 
-def get(key: str, required: bool = False, source_name: str = "") -> str:
+def set_current_user(user_id: str) -> None:
+    """Bind subsequent key lookups to a user (worker-side, per run)."""
+    _current_user.set(user_id or "")
+
+
+def clear_current_user() -> None:
+    _current_user.set("")
+
+
+def get(key: str, required: bool = False, source_name: str = "",
+        source_id: str = "") -> str:
     """
     Get an API key by environment variable name.
     If required=True and key is missing, logs a clear warning.
     Returns empty string if not set.
+
+    When a user is bound (web worker), checks that user's stored source
+    credentials for ``source_id`` first, then falls back to env (review U2).
     """
+    # Per-user stored key takes precedence over env in a multi-user deployment.
+    user_id = _current_user.get()
+    if user_id and source_id:
+        try:
+            from core import users
+            stored = users.get_source_api_key(user_id, source_id)
+            if stored:
+                return stored
+        except Exception:
+            pass  # DB/crypto unavailable (tests) — fall through to env
+
     value = os.environ.get(key, "").strip()
     if not value and required:
         logger.warning(
@@ -56,41 +92,56 @@ def get(key: str, required: bool = False, source_name: str = "") -> str:
 
 # ---------------------------------------------------------------------------
 # Convenience accessors
+#
+# OpenAlex and NCBI email are NOT required in practice (review R6/R7): the
+# OpenAlex handler falls back to a mailto parameter, and PubMed works at the
+# lower 3 req/s tier without an email. The previous required=True warnings
+# were misleading on first run.
 # ---------------------------------------------------------------------------
 
 def openalex() -> str:
-    return get("OPENALEX_API_KEY", required=True, source_name="OpenAlex (required since Feb 2026)")
+    return get("OPENALEX_API_KEY", required=False, source_id="openalex",
+               source_name="OpenAlex (optional — mailto used if absent)")
 
 def ncbi_api_key() -> str:
-    return get("NCBI_API_KEY", required=False, source_name="PubMed/NCBI (optional — 3x rate limit boost)")
+    return get("NCBI_API_KEY", required=False, source_id="pubmed",
+               source_name="PubMed/NCBI (optional — 3x rate limit boost)")
 
 def ncbi_email() -> str:
-    return get("NCBI_EMAIL", required=True, source_name="PubMed/NCBI (email required by ToS)")
+    return get("NCBI_EMAIL", required=False, source_id="pubmed",
+               source_name="PubMed/NCBI (email requested by ToS, not strictly required)")
 
 def semantic_scholar() -> str:
-    return get("SEMANTIC_SCHOLAR_API_KEY", required=False, source_name="Semantic Scholar (optional)")
+    return get("SEMANTIC_SCHOLAR_API_KEY", required=False, source_id="semantic_scholar",
+               source_name="Semantic Scholar (optional)")
 
 def core() -> str:
-    return get("CORE_API_KEY", required=False, source_name="CORE (optional — higher rate limits)")
+    return get("CORE_API_KEY", required=False, source_id="core",
+               source_name="CORE (optional — higher rate limits)")
 
 def philpapers_id() -> str:
-    return get("PHILPAPERS_API_ID", required=False, source_name="PhilPapers (optional — OAI-PMH used as fallback)")
+    return get("PHILPAPERS_API_ID", required=False, source_id="philpapers",
+               source_name="PhilPapers (optional — OAI-PMH used as fallback)")
 
 def philpapers_key() -> str:
-    return get("PHILPAPERS_API_KEY", required=False, source_name="PhilPapers (optional — OAI-PMH used as fallback)")
+    return get("PHILPAPERS_API_KEY", required=False, source_id="philpapers",
+               source_name="PhilPapers (optional — OAI-PMH used as fallback)")
 
 def anthropic() -> str:
     # No longer required — Anthropic is one optional provider among many.
     return get("ANTHROPIC_API_KEY", required=False, source_name="Anthropic Claude API")
 
 def google_books() -> str:
-    return get("GOOGLE_BOOKS_API_KEY", required=False, source_name="Google Books (optional — higher quota)")
+    return get("GOOGLE_BOOKS_API_KEY", required=False, source_id="google_books",
+               source_name="Google Books (optional — higher quota)")
 
 def scopus_api_key() -> str:
-    return get("SCOPUS_API_KEY", required=False, source_name="Scopus (optional — needs institutional IP/VPN)")
+    return get("SCOPUS_API_KEY", required=False, source_id="scopus",
+               source_name="Scopus (optional — needs institutional IP/VPN)")
 
 def scopus_inst_token() -> str:
-    return get("SCOPUS_INST_TOKEN", required=False, source_name="Scopus institutional token (optional — email datasupport@elsevier.com)")
+    return get("SCOPUS_INST_TOKEN", required=False, source_id="scopus",
+               source_name="Scopus institutional token (optional — email datasupport@elsevier.com)")
 
 def consensus_mcp_status() -> str:
     """Consensus uses MCP OAuth — check db/consensus_tokens.json for token status."""
@@ -102,9 +153,9 @@ def consensus_mcp_status() -> str:
 def print_key_status():
     """Print a clear table of which keys are set and which are missing."""
     checks = [
-        ("OPENALEX_API_KEY",        "OpenAlex",         True,  "openalex.org/settings/api"),
+        ("OPENALEX_API_KEY",        "OpenAlex",         False, "openalex.org/settings/api (mailto used if absent)"),
         ("NCBI_API_KEY",            "PubMed (NCBI)",    False, "ncbi.nlm.nih.gov/account"),
-        ("NCBI_EMAIL",              "PubMed email",     True,  "any valid email"),
+        ("NCBI_EMAIL",              "PubMed email",     False, "any valid email (requested by ToS, not required)"),
         ("SEMANTIC_SCHOLAR_API_KEY","Semantic Scholar", False, "semanticscholar.org/product/api"),
         ("CORE_API_KEY",            "CORE",             False, "core.ac.uk/services/api"),
         ("PHILPAPERS_API_ID",       "PhilPapers ID",    False, "philpapers.org/utils/create_api_user.html"),

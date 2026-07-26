@@ -89,10 +89,11 @@ def test_unavailable_warning_is_logged_once(monkeypatch, caplog):
 
 
 def test_grounder_consensus_search_degrades(monkeypatch):
-    """Grounder's wrapper must pass the empty result through, not raise."""
-    import agents.grounder as grounder
+    """Grounder now routes through the shared ConsensusHandler (review O1);
+    it must pass the empty result through, not raise."""
+    from agents.social import SOURCE_HANDLERS
     monkeypatch.setattr("core.consensus_mcp.search_consensus", lambda *a, **k: [])
-    assert grounder._search_consensus("a query") == []
+    assert SOURCE_HANDLERS["consensus"].search("a query", [], 10) == []
 
 
 # ---------------------------------------------------------------------------
