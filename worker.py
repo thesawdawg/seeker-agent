@@ -25,6 +25,7 @@ import argparse
 import logging
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -79,16 +80,97 @@ def _register_user_providers(run_id: str) -> None:
                        f"provider credentials — falling back to config.json")
 
 
+HEARTBEAT_SECONDS = 30
+
+
+def _start_heartbeat(job_id: str) -> threading.Event:
+    """
+    Beat while this job is held, so a killed worker is detected quickly.
+
+    A step can run for many minutes without returning, so the beat lives on
+    its own thread rather than being folded into the pipeline loop.
+    """
+    stop = threading.Event()
+
+    def beat():
+        while not stop.wait(HEARTBEAT_SECONDS):
+            try:
+                jobs.heartbeat(job_id)
+            except Exception as e:
+                logger.debug(f"[{job_id}] heartbeat failed: {e}")
+
+    threading.Thread(target=beat, daemon=True).start()
+    return stop
+
+
+def _advance_with_stop_deadline(run_id: str, config: dict):
+    """
+    Advance the run, but never stay wedged past a stop deadline.
+
+    Cooperative checkpoints handle a stop in the normal case. They cannot help
+    when the step is blocked inside a socket read — an unresponsive model
+    endpoint or a slow academic API — because no Python runs to notice the
+    request. So the step runs on its own thread, and once the grace period
+    expires the worker stops waiting for it.
+
+    The abandoned thread is a daemon: it dies when its HTTP call finally times
+    out. It cannot corrupt the run, because the step it was working on has
+    already been reset and its output discarded.
+
+    Returns the run state, or None if the step was abandoned.
+    """
+    outcome = {}
+
+    def run_it():
+        try:
+            outcome["state"] = pipeline.advance(run_id, config=config)
+        except BaseException as e:            # reported to the caller below
+            outcome["error"] = e
+
+    thread = threading.Thread(target=run_it, daemon=True,
+                              name=f"advance-{run_id}")
+    thread.start()
+
+    while True:
+        thread.join(timeout=2.0)
+        if not thread.is_alive():
+            break
+        if pipeline.enforce_stop_deadline(run_id):
+            logger.warning(
+                f"[{run_id}] Step did not stop within "
+                f"{pipeline.STOP_GRACE_SECONDS}s — abandoning it. The worker is "
+                f"free again; the abandoned call ends when it times out.")
+            return None
+
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("state")
+
+
 def process_job(job: dict, config: dict) -> None:
     run_id = job["run_id"]
     job_id = job["job_id"]
     logger.info(f"[{job_id}] claimed — advancing {run_id}")
 
+    jobs.heartbeat(job_id)
+    stop_beat = _start_heartbeat(job_id)
+
     try:
         _register_user_providers(run_id)
         # Model choices were made in the web process — load them here
         pipeline.apply_model_overrides(run_id)
-        state = pipeline.advance(run_id, config=config)
+        state = _advance_with_stop_deadline(run_id, config)
+        if state is None:
+            # Abandoned past the stop deadline; the run is already at rest
+            jobs.finish(job_id, "done", error="stopped by request (forced)")
+            return
+
+        if state["status"] in ("cancelling", "cancelled"):
+            # A researcher stopping a run is a normal outcome, not a failure.
+            # Requeuing it would immediately restart the work they just stopped.
+            logger.info(f"[{job_id}] {run_id} stopped on request")
+            jobs.finish(job_id, "done")
+            return
 
         if state["failed_steps"]:
             # Let the queue decide whether this is worth another attempt
@@ -110,6 +192,7 @@ def process_job(job: dict, config: dict) -> None:
         logger.error(f"[{job_id}] crashed: {e}", exc_info=True)
         jobs.release(job_id, error=str(e))
     finally:
+        stop_beat.set()
         # Credentials are per-run and must not outlive the job in memory
         llm.clear_run_providers(run_id)
         llm.clear_run_overrides(run_id)

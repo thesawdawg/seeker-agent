@@ -289,6 +289,11 @@ input:focus, select:focus, textarea:focus {
   background: color-mix(in srgb, var(--ok) 8%, var(--surface)); }
 .live-card.is-failed { border-left-color: var(--danger);
   background: color-mix(in srgb, var(--danger) 8%, var(--surface)); }
+.live-card.is-stopping,
+.live-card.is-stopped { border-left-color: var(--text-dim); background: var(--surface); }
+
+.live-actions { display: flex; gap: .5rem; margin-top: .8rem; flex-wrap: wrap; }
+.resume-heading { margin: 1rem 0 .2rem; font-size: .9rem; }
 
 .live-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
 .live-head h2 { margin: 0; font-size: 1.15rem; }

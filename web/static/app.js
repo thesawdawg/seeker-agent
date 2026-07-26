@@ -199,6 +199,10 @@ function runPill(run) {
     return el('span', { class: 'pill pill-failed', text: 'Failed' });
   if (run.status === 'completed')
     return el('span', { class: 'pill pill-done', text: 'Complete' });
+  if (run.status === 'cancelled')
+    return el('span', { class: 'pill', text: 'Stopped' });
+  if (run.status === 'cancelling')
+    return el('span', { class: 'pill', text: 'Stopping…' });
   return el('span', { class: 'pill pill-active', text: 'Running' });
 }
 
@@ -445,7 +449,7 @@ async function refreshStatus() {
     toast(`Step failed: ${status.failed_steps.join(', ')}`, 'error');
   }
 
-  const live = status.running || status.queued;
+  const live = status.running || status.queued || status.status === 'cancelling';
   $('#live-dot').classList.toggle('is-live', live);
   return live;
 }
@@ -572,6 +576,29 @@ function renderLiveCard(status) {
     return;
   }
 
+  if (status.status === 'cancelling') {
+    card.append(el('div', { class: 'live-card is-stopping' },
+      el('div', { class: 'live-head' },
+        el('span', { class: 'spinner spinner-lg' }),
+        el('h2', { text: 'Stopping…' })),
+      el('p', { class: 'live-activity',
+                text: 'Waiting for the current call to return. The step being '
+                    + 'run will be discarded so it can restart cleanly.' }),
+      el('p', { class: 'live-meta', text:
+        `If it does not stop within ${status.stop_grace_seconds || 60}s it is `
+        + 'abandoned automatically.' }),
+      el('div', { class: 'live-actions' },
+        el('button', { class: 'btn btn-small', type: 'button', id: 'btn-force-stop',
+                       onClick: forceStopRun }, "Stop now, don't wait")),
+    ));
+    return;
+  }
+
+  if (status.status === 'cancelled') {
+    card.append(renderStoppedCard(status));
+    return;
+  }
+
   if (status.awaiting_break !== null) {
     card.append(el('div', { class: 'live-card is-break' },
       el('div', { class: 'live-head' },
@@ -608,6 +635,10 @@ function renderLiveCard(status) {
       el('p', { class: 'live-meta', text:
         `Step ${position} of ${status.progress.total}` +
         (services.length ? ` · uses ${services.join(', ')}` : '') }),
+      el('div', { class: 'live-actions' },
+        el('button', { class: 'btn btn-small', type: 'button', id: 'btn-stop',
+                       onClick: stopRun },
+          'Stop and change model')),
     ));
     return;
   }
@@ -621,6 +652,119 @@ function renderLiveCard(status) {
                 ? 'Waiting for a worker to pick this run up…'
                 : 'Preparing the next step…' }),
   ));
+}
+
+/*
+ * A stopped run: say what was discarded, let the models be changed, resume.
+ *
+ * This is the whole point of stopping — the usual reason is that the run is
+ * using the wrong model, so the fix must be reachable from here rather than
+ * requiring a new run.
+ */
+function renderStoppedCard(status) {
+  const next = status.steps.find(s => s.status === 'pending');
+  const cred = state.providers.find(c => c.provider === currentProviderName()) || {};
+  const roles = cred.models || {};
+
+  const card = el('div', { class: 'live-card is-stopped' },
+    el('div', { class: 'live-head' }, el('h2', { text: 'Stopped' })),
+    el('p', { class: 'live-activity', text: next
+      ? `${next.label} was discarded and will run again from the beginning.`
+      : 'The run is stopped.' }),
+    el('p', { class: 'live-meta',
+      text: `${status.progress.done} of ${status.progress.total} steps completed — those are kept.` }),
+  );
+
+  if (state.models.length) {
+    const grid = el('div', { class: 'model-grid', id: 'resume-roles' });
+    for (const [role, help] of [
+      ['primary', 'heavy reasoning agents'],
+      ['light',   'Social and Scribe'],
+    ]) {
+      grid.append(el('div', { class: 'model-row' },
+        el('label', { for: `resume-${role}`, text: role }),
+        el('select', { id: `resume-${role}`, 'data-role': role },
+          state.models.map(name => el('option', {
+            value: name, selected: roles[role] === name, text: name }))),
+        el('span', { class: 'field-hint', text: help }),
+      ));
+    }
+    card.append(
+      el('h3', { class: 'resume-heading' }, 'Models for the remaining steps'),
+      grid,
+    );
+  } else {
+    card.append(el('p', { class: 'muted small',
+      text: 'Could not list models from your provider — resuming will reuse the current selection.' }));
+  }
+
+  card.append(el('div', { class: 'live-actions' },
+    el('button', { class: 'btn btn-primary btn-small', type: 'button',
+                   id: 'btn-resume', onClick: resumeRun },
+      'Resume with these models'),
+  ));
+  return card;
+}
+
+function currentProviderName() {
+  return (state.providers[0] || {}).provider || 'open-webui';
+}
+
+async function stopRun() {
+  const button = $('#btn-stop');
+  if (button) { button.disabled = true; button.textContent = 'Stopping…'; }
+  try {
+    const result = await api(`/api/runs/${state.runId}/stop`, { method: 'POST' });
+    toast(result.immediate
+      ? 'Run stopped.'
+      : 'Stopping — waiting for the current model call to return.', 'ok');
+    await refreshStatus();
+    startPolling();
+  } catch (err) {
+    toast(err.message, 'error');
+    if (button) { button.disabled = false; button.textContent = 'Stop and change model'; }
+  }
+}
+
+async function forceStopRun() {
+  const button = $('#btn-force-stop');
+  if (button) { button.disabled = true; button.textContent = 'Stopping…'; }
+  try {
+    await api(`/api/runs/${state.runId}/stop/force`, { method: 'POST' });
+    toast('Stopped. The interrupted step was discarded.', 'ok');
+    await refreshStatus();
+    startPolling();
+  } catch (err) {
+    toast(err.message, 'error');
+    if (button) { button.disabled = false; button.textContent = "Stop now, don't wait"; }
+  }
+}
+
+async function resumeRun() {
+  const button = $('#btn-resume');
+  if (button) { button.disabled = true; button.textContent = 'Resuming…'; }
+
+  const models = {};
+  $$('#resume-roles select[data-role]').forEach(sel => {
+    if (sel.value) models[sel.dataset.role] = sel.value;
+  });
+
+  try {
+    await api(`/api/runs/${state.runId}/resume`, {
+      method: 'POST',
+      body: { provider: currentProviderName(), models },
+    });
+    // Keep the local copy in step with what the server now holds
+    const cred = state.providers.find(c => c.provider === currentProviderName());
+    if (cred && Object.keys(models).length) cred.models = models;
+
+    toast('Resumed.', 'ok');
+    await refreshStatus();
+    startPolling();
+  } catch (err) {
+    toast(err.message, 'error');
+    if (button) { button.disabled = false; button.textContent = 'Resume with these models'; }
+  }
 }
 
 /*

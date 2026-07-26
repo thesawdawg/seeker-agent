@@ -241,6 +241,8 @@ integration replaces it and leaves every route, model and worker untouched.
 | `GET` | `/api/runs/{id}/status` | **Polled** — step-level progress |
 | `GET` | `/api/runs/{id}/break/{n}` | Structured break content |
 | `POST` | `/api/runs/{id}/break/{n}` | Answer a break, release the run |
+| `POST` | `/api/runs/{id}/stop` | Stop a run mid-step |
+| `POST` | `/api/runs/{id}/resume` | Resume, optionally with new models |
 | `GET` | `/api/runs/{id}/steps/{s}/impact` | What a re-run would discard |
 | `POST` | `/api/runs/{id}/steps/{s}/rerun` | Re-run a step and its dependents |
 | `GET` | `/api/runs/{id}/artifacts` | Scribe outputs |
@@ -270,6 +272,22 @@ Hovering a completed step reveals a **↻ re-run** button. It asks
 `/api/runs/{id}/steps/{step}/impact` first and shows exactly which completed
 steps will be discarded before you confirm — re-running Grounder throws away
 the whole run below it.
+
+### Stopping a run
+
+A run using the wrong model does not have to be waited out. **Stop and change
+model** on the live card halts it, and a resume panel offers the model pickers.
+
+Stopping is cooperative: the request is recorded, and the worker unwinds at
+its next checkpoint — normally the next model call, so it takes effect within
+one call rather than at the end of the step. The interrupted step is
+discarded so it restarts cleanly; every step completed before it is kept.
+
+```bash
+curl -X POST .../api/runs/{id}/stop
+curl -X POST .../api/runs/{id}/resume \
+  -d '{"models": {"primary": "qwen3:32b", "light": "llama3.2:3b"}}'
+```
 
 ### Breaks in the browser
 
