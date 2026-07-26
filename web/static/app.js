@@ -1009,7 +1009,7 @@ async function refreshSourceProgress() {
             try {
               await api(`/api/runs/${state.runId}/sources/override`, {
                 method: 'PUT',
-                body: JSON.stringify({ [h.source_id]: false }),
+                body: { [h.source_id]: false },
               });
               toast(`Disabled ${h.source_id} for this run`, 'ok');
               refreshSourceProgress();
