@@ -86,6 +86,8 @@ def init_steps_table():
         "activity":    "{TEXT}",
         "activity_at": "{TEXT}",
     })
+    # When a stop was asked for, so its deadline can be measured
+    db_backend.ensure_columns("runs", {"cancel_requested_at": "{TEXT}"})
     _schema_ready = True
 
 
@@ -306,6 +308,169 @@ def reset_step(run_id: str, step_name: str, cascade: bool = True) -> list[str]:
 # Break submission — the seam the web UI posts to
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Stopping and resuming
+#
+# A run using the wrong model should not have to be waited out. Stopping is
+# cooperative (see core/cancellation.py): the request is recorded here, and
+# the worker unwinds at its next checkpoint.
+# ---------------------------------------------------------------------------
+
+# A stop must complete in bounded time. Cooperative checkpoints handle the
+# common case, but a worker blocked inside a socket read cannot notice
+# anything — so past this deadline the run is stopped without its cooperation.
+STOP_GRACE_SECONDS = 60
+
+
+def cancel_deadline_passed(run_id: str) -> bool:
+    """Whether a stop request has outlived its grace period."""
+    run = db.get_run(run_id)
+    if not run or run.get("status") != "cancelling":
+        return False
+    requested = run.get("cancel_requested_at")
+    if not requested:
+        return True          # no timestamp recorded — do not wait forever
+    try:
+        started = datetime.fromisoformat(requested)
+    except (TypeError, ValueError):
+        return True
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - started).total_seconds() > STOP_GRACE_SECONDS
+
+
+def enforce_stop_deadline(run_id: str) -> bool:
+    """
+    Force a stop that has not landed within the grace period.
+
+    Callable from the web process, so a run still comes to rest even when the
+    worker holding it is wedged or gone. The interrupted step is discarded and
+    its job released; a worker that later wakes up finds the run already
+    stopped and does nothing further.
+    """
+    if not cancel_deadline_passed(run_id):
+        return False
+
+    running = [s for s in get_steps(run_id) if s["status"] == "running"]
+    step_name = running[0]["step_name"] if running else None
+
+    logger.warning(
+        f"[{run_id}] Stop did not complete within {STOP_GRACE_SECONDS}s — "
+        f"forcing it{' and discarding ' + step_name if step_name else ''}")
+    finish_cancel(run_id, step_name)
+
+    # Free the job so a wedged worker cannot keep holding it
+    try:
+        from core import jobs
+        for job in jobs.jobs_for_run(run_id):
+            if job.get("status") in ("queued", "running"):
+                jobs.finish(job["job_id"], "done",
+                            error="stopped by request (forced)")
+    except Exception as e:
+        logger.warning(f"[{run_id}] could not release job after forced stop: {e}")
+    return True
+
+
+def request_cancel(run_id: str) -> dict:
+    """
+    Ask a run to stop.
+
+    If a worker is mid-step it notices at its next checkpoint — typically the
+    next LLM attempt — and unwinds. If nothing is executing, the run is marked
+    stopped immediately.
+    """
+    from core import cancellation
+
+    run = db.get_run(run_id)
+    if not run:
+        raise ValueError(f"Unknown run: {run_id}")
+    if run.get("status") == "completed":
+        return {"run_id": run_id, "status": "completed",
+                "note": "Run already finished"}
+
+    ensure_steps(run_id)
+    running = [s for s in get_steps(run_id) if s["status"] == "running"]
+
+    db.update("runs", {"status": cancellation.CANCELLING,
+                       "cancel_requested_at": _now()}, {"run_id": run_id})
+    cancellation.forget(run_id)
+
+    if not running:
+        # Nothing to interrupt — park it stopped right away
+        finish_cancel(run_id)
+        return {"run_id": run_id, "status": cancellation.CANCELLED,
+                "stopped_step": None, "immediate": True}
+
+    logger.info(f"[{run_id}] Cancellation requested while {running[0]['step_name']} runs")
+    return {"run_id": run_id, "status": cancellation.CANCELLING,
+            "stopped_step": running[0]["step_name"], "immediate": False,
+            "grace_seconds": STOP_GRACE_SECONDS}
+
+
+def finish_cancel(run_id: str, step_name: str = None) -> None:
+    """
+    Record that a run has actually stopped.
+
+    The interrupted step is reset rather than left half-done: it may have
+    written some sources or tree nodes before stopping, and resuming on top of
+    those would duplicate them.
+    """
+    from core import cancellation
+
+    if step_name:
+        # cascade=False — only the interrupted step is discarded, everything
+        # already completed before it is kept.
+        reset_step(run_id, step_name, cascade=False)
+
+    db.update("runs", {"status": cancellation.CANCELLED,
+                       "cancel_requested_at": None}, {"run_id": run_id})
+    cancellation.forget(run_id)
+    logger.info(f"[{run_id}] Stopped"
+                + (f" — {step_name} will restart from the beginning" if step_name else ""))
+
+
+def is_cancelling(run_id: str) -> bool:
+    from core import cancellation
+    return cancellation.is_cancelling(run_id)
+
+
+def resume(run_id: str, model_overrides: dict = None) -> dict:
+    """
+    Restart a stopped run, optionally with different models.
+
+    The step that was interrupted runs again from the beginning, using the new
+    routing. Steps completed before the stop are untouched.
+    """
+    from core import cancellation
+
+    run = db.get_run(run_id)
+    if not run:
+        raise ValueError(f"Unknown run: {run_id}")
+
+    if model_overrides:
+        set_model_overrides(run_id, model_overrides)
+
+    ensure_steps(run_id)
+    # A worker killed mid-step leaves the row 'running'; make it runnable again
+    for step in get_steps(run_id):
+        if step["status"] == "running":
+            db.update("run_steps",
+                      {"status": "pending", "started_at": None, "error": None},
+                      {"run_id": run_id, "step_name": step["step_name"]})
+
+    # A forced stop can leave a wedged worker writing for a little longer, so
+    # clear the step about to restart rather than stacking on its leftovers.
+    upcoming = next_step(run_id)
+    if upcoming and STEP_BY_NAME.get(upcoming["step_name"], StepDef("", "", "")).kind != "break":
+        _purge_outputs(run_id, upcoming["step_name"])
+
+    db.update_run_status(run_id, "active")
+    cancellation.forget(run_id)
+    logger.info(f"[{run_id}] Resumed"
+                + (f" with model changes: {sorted(model_overrides)}" if model_overrides else ""))
+    return get_state(run_id)
+
+
 def submit_break(run_id: str, break_num: int, instructions: str,
                  source: str = "cli") -> dict:
     """
@@ -488,13 +653,15 @@ def advance(run_id: str, problem: str = None, config: dict = None,
     # Bind LLM calls to this run for the duration. Agents call
     # llm.call(prompt, system, agent_name=...) without a run_id, so without
     # this the run's own providers and model overrides would never apply.
-    from core import llm
+    from core import cancellation, llm
     apply_model_overrides(run_id)
     run_token = llm.set_current_run(run_id)
+    cancel_token = cancellation.bind(run_id)
     try:
         return _advance_loop(run_id, problem, config, max_steps)
     finally:
         llm.reset_current_run(run_token)
+        cancellation.release(cancel_token)
 
 
 def _advance_loop(run_id: str, problem: str, config: dict,
@@ -503,6 +670,13 @@ def _advance_loop(run_id: str, problem: str, config: dict,
 
     while True:
         if max_steps is not None and executed >= max_steps:
+            break
+
+        # Stop before starting more work, not only mid-step
+        from core import cancellation
+        if cancellation.is_cancelling(run_id):
+            finish_cancel(run_id)
+            logger.info(f"[{run_id}] Stopped between steps")
             break
 
         step = next_step(run_id)
@@ -542,6 +716,12 @@ def _advance_loop(run_id: str, problem: str, config: dict,
             progress.clear()
             set_step_status(run_id, name, "done")
             logger.info(f"[{run_id}] ✓ {step_def.label}")
+        except cancellation.RunCancelled:
+            # Not a failure — the researcher asked it to stop
+            logger.info(f"[{run_id}] {step_def.label} interrupted by a stop request")
+            finish_cancel(run_id, name)
+            break        # the finally below releases the progress token
+
         except Exception as e:
             logger.error(f"[{run_id}] ✗ {step_def.label} failed: {e}", exc_info=True)
             if name in NON_FATAL:

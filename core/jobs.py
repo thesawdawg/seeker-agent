@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     error        {LONGTEXT},
     created_at   {TEXT} NOT NULL,
     claimed_at   {TEXT},
+    heartbeat_at {TEXT},
     finished_at  {TEXT}
 );
 
@@ -50,8 +51,10 @@ CREATE INDEX IF NOT EXISTS idx_jobs_run ON jobs(run_id);
 
 _schema_ready = False
 
-# A job whose worker died stays 'running' forever without this.
-STALE_AFTER_MINUTES = 30
+# A job whose worker died stays 'running' until it is reaped. Workers beat
+# while they hold a job, so absence of a beat means the worker is gone —
+# which detects a killed container in minutes rather than half an hour.
+STALE_AFTER_MINUTES = 5
 
 
 def init_jobs_table():
@@ -59,6 +62,8 @@ def init_jobs_table():
     if _schema_ready:
         return
     db_backend.get_backend().init_schema(JOBS_SCHEMA)
+    # Added after jobs first shipped — see db_backend.ensure_columns
+    db_backend.ensure_columns("jobs", {"heartbeat_at": "{TEXT}"})
     _schema_ready = True
 
 
@@ -190,6 +195,16 @@ def _claim_sqlite(me: str) -> Optional[dict]:
 # Complete
 # ---------------------------------------------------------------------------
 
+def heartbeat(job_id: str) -> None:
+    """
+    Signal that this job is still being worked on.
+
+    Called periodically by the worker holding it. Without a recent beat the
+    job is considered abandoned and returned to the queue.
+    """
+    db.update("jobs", {"heartbeat_at": _now()}, {"job_id": job_id})
+
+
 def finish(job_id: str, status: str = "done", error: str = None) -> None:
     data = {"status": status, "finished_at": _now()}
     if error:
@@ -227,8 +242,10 @@ def reap_stale(minutes: int = STALE_AFTER_MINUTES) -> int:
     """
     init_jobs_table()
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    # A job is alive if it has beaten recently; fall back to the claim time
+    # for jobs claimed before heartbeats existed.
     stale = [j for j in db.fetch("jobs", {"status": "running"})
-             if (j.get("claimed_at") or "") < cutoff]
+             if (j.get("heartbeat_at") or j.get("claimed_at") or "") < cutoff]
     for job in stale:
         logger.warning(f"[jobs] reaping stale job {job['job_id']} "
                        f"(claimed by {job.get('claimed_by')})")

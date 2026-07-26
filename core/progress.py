@@ -69,9 +69,11 @@ def bind(run_id: Optional[str], step_name: Optional[str]):
 
 
 def release(token) -> None:
+    # RuntimeError covers a token already spent, which is easy to cause with
+    # an early return or break inside a try/finally.
     try:
         _current.reset(token)
-    except (ValueError, LookupError):
+    except (ValueError, LookupError, RuntimeError):
         _current.set(None)
 
 
@@ -81,12 +83,23 @@ def context() -> Optional[dict]:
 
 def note(service: str, action: str = "", detail: str = "") -> None:
     """
-    Record what the current step is doing.
+    Record what the current step is doing, and honour a pending stop.
 
-    Safe to call from anywhere, including outside a run — it becomes a log
-    line and nothing more. Never raises: progress reporting must not be able
-    to break a pipeline.
+    Safe to call from anywhere, including outside a run.
+
+    This doubles as a cancellation checkpoint, and raises RunCancelled if the
+    run has been asked to stop. That is deliberate: note() marks the moment
+    before a slow external call, which is exactly where a stop should take
+    effect. Agents like Social spend most of a step in source searches rather
+    than model calls, so without this a stop would not bite until the step
+    finished — hundreds of queries later.
+
+    Recording is still best-effort and never raises on its own account; only
+    the cancellation check can interrupt.
     """
+    from core import cancellation
+    cancellation.check()
+
     parts = [label_for(service)]
     if action:
         parts.append(action)

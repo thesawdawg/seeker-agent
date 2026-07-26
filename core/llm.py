@@ -505,6 +505,12 @@ class LLMClient:
             )
 
         for prov, model, profile in attempts:
+            # A long step spends its time here, so this is where a stop request
+            # has to be noticed — otherwise cancelling because the model is
+            # wrong would wait for that very model to finish.
+            from core import cancellation
+            cancellation.check()
+
             _note_progress(prov, model)
             result = self._attempt(prov, model, prompt, system, profile, agent_name)
             if result:

@@ -113,6 +113,18 @@ class ModelRolesRequest(BaseModel):
     )
 
 
+class ResumeRequest(BaseModel):
+    provider: str = "open-webui"
+    models: dict = Field(
+        default_factory=dict,
+        description='Provider role models, e.g. {"primary": "...", "light": "..."}',
+    )
+    model_overrides: dict = Field(
+        default_factory=dict,
+        description="Per-agent overrides for the steps still to run",
+    )
+
+
 class RerunRequest(BaseModel):
     cascade: bool = True
 
@@ -304,6 +316,13 @@ def run_status(run_id: str, user: dict = Depends(auth.resolve_user)):
     couple of seconds, so it returns step state and nothing heavy.
     """
     auth.require_run_access(user, run_id)
+
+    # A stop must land within its grace period even if the worker holding the
+    # run is wedged or gone, so the deadline is enforced here rather than
+    # relying on the worker to notice.
+    if pipeline.enforce_stop_deadline(run_id):
+        logger.info(f"[{run_id}] stop deadline enforced from the status endpoint")
+
     state = pipeline.get_state(run_id)
     if not state.get("exists"):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
@@ -318,6 +337,7 @@ def run_status(run_id: str, user: dict = Depends(auth.resolve_user)):
         "running":        state["running"] or bool(queued),
         "awaiting_break": state["awaiting_break"],
         "complete":       state["complete"],
+        "stop_grace_seconds": pipeline.STOP_GRACE_SECONDS,
         "failed_steps":   state["failed_steps"],
         "queued":         bool(queued),
         "steps": [
@@ -336,6 +356,77 @@ def advance_run(run_id: str, user: dict = Depends(auth.resolve_user)):
     """Nudge a run — queue work for it. Safe to call repeatedly."""
     auth.require_run_access(user, run_id)
     return {"job_id": jobs.enqueue(run_id), "state": pipeline.get_state(run_id)}
+
+
+@app.post("/api/runs/{run_id}/stop")
+def stop_run(run_id: str, user: dict = Depends(auth.resolve_user)):
+    """
+    Stop a run mid-flight — typically because it is using the wrong model.
+
+    Returns immediately. If a worker is mid-step it unwinds at its next
+    checkpoint, usually the next model call, and the interrupted step is
+    discarded so a resume restarts it cleanly.
+    """
+    auth.require_run_access(user, run_id)
+    try:
+        result = pipeline.request_cancel(run_id)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
+    return {**result, "state": pipeline.get_state(run_id)}
+
+
+@app.post("/api/runs/{run_id}/stop/force")
+def force_stop_run(run_id: str, user: dict = Depends(auth.resolve_user)):
+    """
+    Stop a run now, without waiting for the worker to agree.
+
+    The polled status enforces the deadline automatically; this is the manual
+    equivalent for someone who does not want to wait it out.
+    """
+    auth.require_run_access(user, run_id)
+    state = pipeline.get_state(run_id)
+    if not state.get("exists"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
+
+    if state["status"] != "cancelling":
+        pipeline.request_cancel(run_id)
+    running = [s for s in pipeline.get_steps(run_id) if s["status"] == "running"]
+    pipeline.finish_cancel(run_id, running[0]["step_name"] if running else None)
+
+    for job in jobs.jobs_for_run(run_id):
+        if job.get("status") in ("queued", "running"):
+            jobs.finish(job["job_id"], "done", error="stopped by request (forced)")
+
+    return {"run_id": run_id, "forced": True, "state": pipeline.get_state(run_id)}
+
+
+@app.post("/api/runs/{run_id}/resume")
+def resume_run(run_id: str, body: ResumeRequest,
+               user: dict = Depends(auth.resolve_user)):
+    """
+    Restart a stopped run, optionally with different models.
+
+    The interrupted step runs again from the beginning with the new routing;
+    steps completed before the stop are kept.
+    """
+    auth.require_run_access(user, run_id)
+
+    state = pipeline.get_state(run_id)
+    if not state.get("exists"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
+    if state["status"] == "cancelling":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This run is still stopping — wait for it to come to rest, "
+            "then resume.")
+
+    if body.models:
+        # Provider-level roles, so every agent picks up the change
+        users.set_models(user["user_id"], body.provider, body.models)
+
+    pipeline.resume(run_id, body.model_overrides)
+    job_id = jobs.enqueue(run_id)
+    return {"job_id": job_id, "state": pipeline.get_state(run_id)}
 
 
 # ---------------------------------------------------------------------------
