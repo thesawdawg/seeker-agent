@@ -926,6 +926,72 @@ def rate_relevance(title: str, abstract: str, problem: str, theme_label: str) ->
 
 
 # ---------------------------------------------------------------------------
+# Break 0 preview — lightweight coverage probe before the full run
+# ---------------------------------------------------------------------------
+
+PREVIEW_SOURCES = ["openalex", "semantic_scholar"]
+PREVIEW_LIMIT_PER_SOURCE = 3
+
+
+def preview_theme(theme: dict, run_id: str = "", problem: str = "") -> dict:
+    """
+    Fire a single OpenAlex + Semantic Scholar query (3 results each) so the
+    researcher can confirm a theme has live coverage before the full Social /
+    Grounder run commits to it.
+
+    Returns:
+      {
+        "theme_id":   str,
+        "query":       str,
+        "results":     [ {source, title, authors, year, doi, url}, ... ],
+        "total":       int,
+        "sources_hit": int,   # how many of the 2 sources returned results
+      }
+
+    Designed to be cheap: 2 API calls, no DB writes, no relevance rating.
+    """
+    from core.rate_limiter import SourceUnavailable
+
+    query = _build_query(theme)
+    keywords = [kw.get("seed", "") for kw in theme.get("keywords", [])]
+    theme_id = theme.get("theme_id", "")
+    results: list[dict] = []
+    sources_hit = 0
+
+    for src_id in PREVIEW_SOURCES:
+        handler = SOURCE_HANDLERS.get(src_id)
+        if not handler:
+            continue
+        try:
+            res = handler.search(query, keywords, PREVIEW_LIMIT_PER_SOURCE,
+                                 run_id=run_id)
+        except SourceUnavailable:
+            res = []
+        except Exception as e:
+            logger.warning(f"[Preview] {src_id} error for theme {theme_id}: {e}")
+            res = []
+        if res:
+            sources_hit += 1
+            for r in res[:PREVIEW_LIMIT_PER_SOURCE]:
+                results.append({
+                    "source":  src_id,
+                    "title":   r.get("title", ""),
+                    "authors": r.get("authors", [])[:3],
+                    "year":    r.get("year"),
+                    "doi":     r.get("doi", ""),
+                    "url":     r.get("active_link", ""),
+                })
+
+    return {
+        "theme_id":   theme_id,
+        "query":      query,
+        "results":    results,
+        "total":      len(results),
+        "sources_hit": sources_hit,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Core collection logic
 # ---------------------------------------------------------------------------
 

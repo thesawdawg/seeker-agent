@@ -1349,7 +1349,10 @@ function renderBreak0(panel, draft) {
       'Themes to search',
       el('span', { class: 'muted small', id: 'theme-count' })),
     el('p', { class: 'muted small' },
-      'The concept mapper activated these from your problem. Add or remove any before searching begins.'),
+      'The concept mapper activated these from your problem. Add or remove any before searching begins.',
+      el('span', { class: 'muted small', style: 'display:block;margin-top:4px;' },
+        'Use Preview to confirm a theme has live coverage before committing to it (2 sources, 3 results each).'),
+    ),
   );
 
   const grid = el('div', { class: 'theme-grid' });
@@ -1365,12 +1368,58 @@ function renderBreak0(panel, draft) {
         updatePreview();
       },
     });
+
+    // Preview button (F1) — fires a lightweight OpenAlex + Semantic Scholar
+    // probe and shows the top titles inline so the researcher can confirm
+    // coverage before the full run commits to the theme.
+    const previewBody = el('div', { class: 'theme-preview-body' });
+    const previewBtn = el('button', {
+      type: 'button', class: 'btn btn-ghost btn-small theme-preview-btn',
+      onClick: async () => {
+        clear(previewBody);
+        previewBody.append(el('span', { class: 'muted small', text: 'Searching…' }));
+        previewBtn.disabled = true;
+        try {
+          const result = await api(
+            `/api/runs/${state.runId}/break/0/preview?theme=${encodeURIComponent(theme.theme_id)}`,
+            { method: 'POST' },
+          );
+          clear(previewBody);
+          if (!result.results || !result.results.length) {
+            previewBody.append(el('span', { class: 'muted small',
+              text: `No results from ${result.sources_hit}/2 sources — this theme may have thin coverage.` }));
+          } else {
+            previewBody.append(el('span', { class: 'muted small',
+              text: `${result.total} results from ${result.sources_hit}/2 sources:` }));
+            const list = el('ul', { class: 'theme-preview-list' });
+            for (const r of result.results) {
+              list.append(el('li', {},
+                el('span', { class: 'theme-preview-source', text: r.source }),
+                el('span', { class: 'theme-preview-title', text: r.title }),
+                el('span', { class: 'muted small',
+                  text: `${(r.authors || []).slice(0, 2).join(', ')}${r.authors && r.authors.length ? ' ' : ''}${r.year ? `(${r.year})` : ''}` }),
+              ));
+            }
+            previewBody.append(list);
+          }
+        } catch (err) {
+          clear(previewBody);
+          previewBody.append(el('span', { class: 'muted small',
+            text: `Preview failed: ${err.message}` }));
+        } finally {
+          previewBtn.disabled = false;
+        }
+      },
+    }, 'Preview');
+
     grid.append(el('label', { class: 'theme-chip' }, checkbox,
       el('span', {},
         el('div', { class: 'theme-chip-name', text: theme.label || theme.theme_id }),
         el('div', { class: 'theme-chip-kw',
                     text: (theme.keywords || []).slice(0, 4).join(', ') }),
       ),
+      el('div', { class: 'theme-chip-actions' }, previewBtn),
+      previewBody,
     ));
   }
   group.append(grid);
@@ -1724,17 +1773,249 @@ async function renderArtifacts() {
 
 /* ── tabs & wiring ───────────────────────────────────────────────────── */
 
+/*
+ * Argument tree visualization (F9).
+ * Renders the run's argument tree as a collapsible nested list. Nodes are
+ * color-coded by type and audit status. Clicking a node shows its metadata
+ * and source.
+ */
+const TREE_NODE_COLORS = {
+  root:       'tree-node-root',
+  question:   'tree-node-question',
+  claim:      'tree-node-claim',
+  evidence:   'tree-node-evidence',
+  bridge:     'tree-node-bridge',
+  counter:    'tree-node-counter',
+  historical: 'tree-node-historical',
+  external:   'tree-node-external',
+  audit_note: 'tree-node-audit',
+};
+const TREE_STATUS_BADGE = {
+  solid:        '✓ solid',
+  supported:    '✓ supported',
+  contested:    '⚠ contested',
+  contradicted: '✗ contradicted',
+  weak:         '⚠ weak',
+  unsupported:  '? unsupported',
+  bridged:      '⇄ bridged',
+};
+const TREE_TYPE_LABEL = {
+  root: 'Root', question: 'Question', claim: 'Claim', evidence: 'Evidence',
+  bridge: 'Bridge', counter: 'Counter', historical: 'Historical',
+  external: 'External', audit_note: 'Audit',
+};
+
+async function renderTree() {
+  const panel = $('#panel-tree');
+  if (!panel) return;
+  clear(panel);
+  panel.append(el('p', { class: 'muted small', text: 'Loading argument tree…' }));
+
+  let data;
+  try {
+    data = await api(`/api/runs/${state.runId}/tree`);
+  } catch (err) {
+    clear(panel);
+    panel.append(el('p', { class: 'empty', text: `Failed to load tree: ${err.message}` }));
+    return;
+  }
+
+  clear(panel);
+  const { tree, stats, sources } = data;
+
+  if (!tree || !tree.node_id) {
+    panel.append(el('p', { class: 'empty',
+      text: 'No argument tree yet. The tree grows as Grounder, Social, and Historian run.' }));
+    return;
+  }
+
+  // Stats summary
+  const statRow = el('div', { class: 'tree-stats' });
+  const byType = stats.by_type || {};
+  for (const t of ['question', 'claim', 'evidence', 'counter', 'bridge', 'historical', 'external', 'audit_note']) {
+    if (byType[t]) {
+      statRow.append(el('span', { class: 'tree-stat-chip',
+        text: `${byType[t]} ${TREE_TYPE_LABEL[t] || t}` }));
+    }
+  }
+  if (stats.unique_sources) {
+    statRow.append(el('span', { class: 'tree-stat-chip',
+      text: `${stats.unique_sources} sources` }));
+  }
+  const claimStatuses = stats.claim_statuses || {};
+  for (const [s, n] of Object.entries(claimStatuses)) {
+    if (TREE_STATUS_BADGE[s]) {
+      statRow.append(el('span', { class: 'tree-stat-chip tree-stat-status',
+        text: `${n} ${TREE_STATUS_BADGE[s]}` }));
+    }
+  }
+
+  panel.append(el('div', { class: 'review-group' },
+    el('h3', {}, 'Argument Tree'),
+    el('p', { class: 'muted small' },
+      'Every claim traces to evidence. Click a node to inspect its source and metadata. ' +
+      'Nodes are color-coded by type; claims carry an audit status badge.'),
+    statRow,
+  ));
+
+  // Legend
+  const legend = el('div', { class: 'tree-legend' });
+  for (const [t, cls] of Object.entries(TREE_NODE_COLORS)) {
+    legend.append(el('span', { class: `tree-legend-item ${cls}`,
+      text: TREE_TYPE_LABEL[t] || t }));
+  }
+  panel.append(legend);
+
+  // Detail panel (shown when a node is clicked)
+  const detail = el('div', { class: 'tree-detail', id: 'tree-detail' });
+  panel.append(detail);
+
+  // Recursive tree renderer
+  const renderNode = (node, depth = 0) => {
+    if (!node) return null;
+    const type = node.node_type || 'unknown';
+    const colorClass = TREE_NODE_COLORS[type] || '';
+    const hasChildren = node.children && node.children.length > 0;
+
+    const childContainer = el('div', { class: 'tree-children', hidden: depth > 1 });
+
+    const toggle = hasChildren
+      ? el('span', {
+          class: 'tree-toggle',
+          onClick: ev => {
+            ev.stopPropagation();
+            childContainer.hidden = !childContainer.hidden;
+            toggle.textContent = childContainer.hidden ? '▸' : '▾';
+          },
+        }, depth > 1 ? '▸' : '▾')
+      : el('span', { class: 'tree-toggle tree-toggle-leaf' }, '·');
+
+    const statusBadge = (type === 'claim' && node.status && TREE_STATUS_BADGE[node.status])
+      ? el('span', { class: `tree-status tree-status-${node.status}`,
+                     text: TREE_STATUS_BADGE[node.status] })
+      : null;
+
+    const confidenceBadge = (type === 'claim' && node.confidence != null && node.confidence > 0)
+      ? el('span', { class: 'tree-confidence',
+                     text: `${Math.round(node.confidence * 100)}%` })
+      : null;
+
+    const typeLabel = el('span', { class: `tree-type-label ${colorClass}`,
+      text: TREE_TYPE_LABEL[type] || type });
+
+    const content = (node.content || '').slice(0, 200);
+
+    const nodeEl = el('div', {
+      class: `tree-node ${colorClass}`,
+      onClick: () => showNodeDetail(node, sources, detail),
+    },
+      toggle,
+      typeLabel,
+      el('span', { class: 'tree-node-content', text: content }),
+      statusBadge,
+      confidenceBadge,
+    );
+
+    const wrapper = el('div', { class: 'tree-node-wrapper' }, nodeEl, childContainer);
+
+    if (hasChildren) {
+      for (const child of node.children) {
+        const childEl = renderNode(child, depth + 1);
+        if (childEl) childContainer.append(childEl);
+      }
+    }
+
+    return wrapper;
+  };
+
+  const treeRoot = renderNode(tree, 0);
+  if (treeRoot) panel.append(treeRoot);
+}
+
+function showNodeDetail(node, sources, container) {
+  clear(container);
+  const type = node.node_type || 'unknown';
+  const meta = node.metadata || {};
+
+  const rows = [
+    ['Type', TREE_TYPE_LABEL[type] || type],
+    ['Status', node.status || '—'],
+    ['Confidence', node.confidence != null ? `${Math.round(node.confidence * 100)}%` : '—'],
+    ['Agent', node.agent_origin || '—'],
+    ['Created', shortTime(node.created_at)],
+  ];
+
+  if (type === 'evidence') {
+    if (meta.evidence_type) rows.push(['Evidence type', meta.evidence_type]);
+    if (meta.relationship) rows.push(['Relationship', meta.relationship]);
+    if (meta.snippet) rows.push(['Snippet', meta.snippet]);
+  }
+  if (type === 'historical' && meta.year) rows.push(['Year', String(meta.year)]);
+  if (type === 'external' && meta.factor_type) rows.push(['Factor type', meta.factor_type]);
+  if (type === 'bridge' && meta.bridge_type) rows.push(['Bridge type', meta.bridge_type]);
+
+  const table = el('table', { class: 'tree-detail-table' });
+  for (const [k, v] of rows) {
+    table.append(el('tr', {},
+      el('th', { text: k }),
+      el('td', { text: v }),
+    ));
+  }
+
+  container.append(
+    el('h4', {}, 'Node detail'),
+    table,
+  );
+
+  // Content (full)
+  if (node.content && node.content.length > 200) {
+    container.append(el('div', { class: 'tree-detail-content' },
+      el('strong', {}, 'Full content:'),
+      el('p', { text: node.content }),
+    ));
+  }
+
+  // Sources
+  const sourceIds = node.source_ids || [];
+  if (sourceIds.length) {
+    const srcList = el('ul', { class: 'tree-detail-sources' });
+    for (const sid of sourceIds) {
+      const src = sources[sid];
+      if (src) {
+        const link = src.active_link
+          ? el('a', { href: src.active_link, target: '_blank', rel: 'noopener',
+                      text: src.title || sid })
+          : el('span', { text: src.title || sid });
+        srcList.append(el('li', {},
+          el('span', { class: 'tree-source-name', text: src.source_name || '' }),
+          ' ',
+          link,
+          src.year ? el('span', { class: 'muted small', text: ` (${src.year})` }) : null,
+        ));
+      } else {
+        srcList.append(el('li', { class: 'muted small', text: `${sid} (source not found)` }));
+      }
+    }
+    container.append(el('div', {},
+      el('strong', {}, 'Sources:'),
+      srcList,
+    ));
+  }
+}
+
 function switchTab(name) {
   state.tab = name;
   $$('.tab').forEach(t => t.classList.toggle('is-active', t.dataset.tab === name));
   $('#panel-overview').hidden  = name !== 'overview';
   $('#panel-break').hidden     = name !== 'break';
   $('#panel-sources').hidden   = name !== 'sources';
+  $('#panel-tree').hidden      = name !== 'tree';
   $('#panel-artifacts').hidden = name !== 'artifacts';
 
   if (name === 'artifacts') renderArtifacts().catch(err => toast(err.message, 'error'));
   if (name === 'overview' && state.status) renderOverview(state.status);
   if (name === 'sources') renderSources().catch(err => toast(err.message, 'error'));
+  if (name === 'tree') renderTree().catch(err => toast(err.message, 'error'));
   if (name === 'break' && !state.breakDraft && state.status &&
       state.status.awaiting_break !== null) {
     openBreak(state.status.awaiting_break).catch(err => toast(err.message, 'error'));

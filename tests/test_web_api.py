@@ -445,6 +445,121 @@ def test_answered_break_can_still_be_read_back(client, provider, stub_agents):
     assert "REMOVE THEME" in payload["instructions"]
 
 
+def test_break0_preview_returns_results(client, provider, stub_agents, monkeypatch):
+    """F1: Break 0 theme preview fires a lightweight OpenAlex + Semantic Scholar probe."""
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()
+
+    # Stub the source handlers so no real network calls happen.
+    from agents import social
+    def _make_stub(source_id):
+        class _StubHandler(social.SourceHandler):
+            SOURCE_ID = source_id
+            def search(self, query, keywords, limit=10, run_id=""):
+                return [{"title": f"Stub paper {i} on {query[:20]}",
+                         "authors": ["A. Researcher"], "year": 2021,
+                         "doi": f"10.1234/stub{i}", "active_link": "https://example.org/stub"}
+                        for i in range(limit)]
+        return _StubHandler()
+    monkeypatch.setattr(social, "SOURCE_HANDLERS", {
+        "openalex": _make_stub("openalex"),
+        "semantic_scholar": _make_stub("semantic_scholar"),
+    })
+
+    resp = client.post(f"/api/runs/{run_id}/break/0/preview?theme=philosophy_of_mind")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["theme_id"] == "philosophy_of_mind"
+    assert body["sources_hit"] == 2
+    assert body["total"] == 6  # 3 per source
+    assert all("title" in r for r in body["results"])
+    assert all("source" in r for r in body["results"])
+
+
+def test_break0_preview_rejects_unknown_theme(client, provider, stub_agents):
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()
+
+    resp = client.post(f"/api/runs/{run_id}/break/0/preview?theme=nonexistent_theme")
+    assert resp.status_code == 404
+
+
+def test_break0_preview_requires_theme_param(client, provider, stub_agents):
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()
+
+    resp = client.post(f"/api/runs/{run_id}/break/0/preview")
+    # FastAPI returns 422 for missing required query params
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Argument tree (F9)
+# ---------------------------------------------------------------------------
+
+def test_argument_tree_endpoint_returns_nested_tree(client, provider, stub_agents):
+    """F9: GET /api/runs/{id}/tree returns the nested argument tree + stats."""
+    from core.argument_tree import TreeBuilder, init_tree_table
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "What is identity?"}).json()["run_id"]
+    drain()
+
+    # Build a small tree directly
+    init_tree_table()
+    tree = TreeBuilder(run_id)
+    root = tree.create_root("What is identity?")
+    q1 = tree.add_question(root, "What is social identity?")
+    c1 = tree.add_claim(q1, "Identity is socially constructed", confidence=0.8)
+    tree.add_evidence(c1, source_id="SRC-001", evidence_type="book",
+                      relationship="establishes", snippet="Mead argues...")
+    tree.close()
+
+    resp = client.get(f"/api/runs/{run_id}/tree")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["run_id"] == run_id
+    assert body["tree"]["node_type"] == "root"
+    assert body["tree"]["content"] == "What is identity?"
+    # Should have nested children
+    assert len(body["tree"]["children"]) >= 1
+    q_node = body["tree"]["children"][0]
+    assert q_node["node_type"] == "question"
+    assert len(q_node["children"]) >= 1
+    c_node = q_node["children"][0]
+    assert c_node["node_type"] == "claim"
+    assert c_node["confidence"] == 0.8
+    assert len(c_node["children"]) >= 1
+    e_node = c_node["children"][0]
+    assert e_node["node_type"] == "evidence"
+    assert "SRC-001" in e_node["source_ids"]
+    assert e_node["metadata"]["evidence_type"] == "book"
+
+    # Stats
+    stats = body["stats"]
+    assert stats["total_nodes"] >= 4
+    assert stats["by_type"]["root"] == 1
+    assert stats["by_type"]["question"] == 1
+    assert stats["by_type"]["claim"] == 1
+    assert stats["by_type"]["evidence"] == 1
+    assert "sources" in body
+
+
+def test_argument_tree_empty_run(client, provider, stub_agents):
+    """F9: tree endpoint returns null tree and empty stats for a run with no tree."""
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()
+
+    resp = client.get(f"/api/runs/{run_id}/tree")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tree"] == {} or body["tree"] is None
+    assert body["stats"]["total_nodes"] == 0
+
+
 # ---------------------------------------------------------------------------
 # Mid-run model changes
 # ---------------------------------------------------------------------------

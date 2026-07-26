@@ -57,6 +57,8 @@ class CitableSource:
     abstract:     Optional[str]
     source_name:  str                # e.g. 'openalex', 'scopus'
     apa:          str = ""           # formatted APA string, computed
+    theme_tags:   list[str] = field(default_factory=list)  # JSON array from sources table
+    source_type:  str = ""           # 'current' | 'seminal' | 'historical'
     # verification outputs
     exists_online:   Optional[bool] = None
     verified_via:    Optional[str]  = None   # 'crossref' | 'openalex' | 'url_head' | None
@@ -226,6 +228,16 @@ def build_manifest(run_id: str) -> list[CitableSource]:
             year = None
         doi_raw = get("doi") or ""
         url     = get("active_link") or ""
+        theme_raw = get("theme_tags") or ""
+        if isinstance(theme_raw, list):
+            theme_tags = [str(t) for t in theme_raw if t]
+        elif isinstance(theme_raw, str) and theme_raw.strip().startswith("["):
+            try:
+                theme_tags = [str(t) for t in json.loads(theme_raw) if t]
+            except json.JSONDecodeError:
+                theme_tags = []
+        else:
+            theme_tags = []
         citables.append(CitableSource(
             source_id   = get("source_id") or "",
             cite_key    = "",  # assigned below
@@ -236,6 +248,8 @@ def build_manifest(run_id: str) -> list[CitableSource]:
             url         = url or None,
             abstract    = get("abstract") or "",
             source_name = get("source_name") or "",
+            theme_tags  = theme_tags,
+            source_type = get("type") or "",
         ))
     _assign_cite_keys(citables)
     for c in citables:
@@ -269,6 +283,129 @@ def format_manifest_for_prompt(manifest: list[CitableSource],
             f"[{s.cite_key}] {authors}{extra} ({year}). {s.title}"
             + (f"  Abstract: {abstract_snippet}" if abstract_snippet else "")
         )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Coverage matrix — per-theme, per-source counts for the Understanding Map
+# ---------------------------------------------------------------------------
+
+def build_coverage_matrix(manifest: list[CitableSource]) -> dict:
+    """
+    Build a per-theme, per-source-name count matrix from the manifest.
+
+    Returns a dict shaped:
+      {
+        "total_sources": int,
+        "themes": {
+          "<theme>": {
+            "total": int,
+            "by_source": {"openalex": int, "semantic_scholar": int, ...},
+            "by_type":  {"current": int, "seminal": int, "historical": int},
+          }, ...
+        },
+        "by_source": {"openalex": int, ...},   # overall per-source totals
+        "by_type":   {"current": int, ...},     # overall per-type totals
+        "thin_themes": ["<theme>", ...],        # themes with < 3 sources
+        "untagged": int,                        # sources with no theme_tags
+      }
+
+    Sources with no theme_tags contribute to "untagged" and to the overall
+    per-source / per-type totals but not to any theme row.
+    """
+    themes: dict[str, dict] = {}
+    by_source: dict[str, int] = {}
+    by_type: dict[str, int] = {}
+    untagged = 0
+
+    for s in manifest:
+        # overall per-source
+        by_source[s.source_name] = by_source.get(s.source_name, 0) + 1
+        # overall per-type
+        if s.source_type:
+            by_type[s.source_type] = by_type.get(s.source_type, 0) + 1
+
+        tags = s.theme_tags or []
+        if not tags:
+            untagged += 1
+            continue
+        for tag in tags:
+            tag = tag.strip()
+            if not tag:
+                continue
+            row = themes.setdefault(tag, {
+                "total": 0,
+                "by_source": {},
+                "by_type": {},
+            })
+            row["total"] += 1
+            row["by_source"][s.source_name] = \
+                row["by_source"].get(s.source_name, 0) + 1
+            if s.source_type:
+                row["by_type"][s.source_type] = \
+                    row["by_type"].get(s.source_type, 0) + 1
+
+    thin_themes = sorted(t for t, r in themes.items() if r["total"] < 3)
+
+    return {
+        "total_sources": len(manifest),
+        "themes": themes,
+        "by_source": by_source,
+        "by_type": by_type,
+        "thin_themes": thin_themes,
+        "untagged": untagged,
+    }
+
+
+def format_coverage_for_prompt(matrix: dict, max_themes: int = 30) -> str:
+    """Render the coverage matrix as a compact text block for the Scribe prompt."""
+    if not matrix or matrix.get("total_sources", 0) == 0:
+        return "(no sources retrieved — coverage unknown)"
+
+    total = matrix["total_sources"]
+    by_source = matrix["by_source"]
+    by_type = matrix["by_type"]
+    themes = matrix["themes"]
+    thin = matrix["thin_themes"]
+    untagged = matrix["untagged"]
+
+    lines = [f"TOTAL SOURCES: {total}"]
+
+    # overall per-source
+    src_parts = [f"{name}={n}" for name, n in
+                 sorted(by_source.items(), key=lambda kv: (-kv[1], kv[0]))]
+    if src_parts:
+        lines.append("BY SOURCE: " + ", ".join(src_parts))
+
+    # overall per-type
+    type_parts = [f"{t}={n}" for t, n in
+                  sorted(by_type.items(), key=lambda kv: (-kv[1], kv[0]))]
+    if type_parts:
+        lines.append("BY TYPE: " + ", ".join(type_parts))
+
+    if untagged:
+        lines.append(f"UNTAGGED (no theme): {untagged}")
+
+    lines.append("")
+    lines.append("PER-THEME COVERAGE:")
+    # sort themes by total desc, then name
+    sorted_themes = sorted(themes.items(), key=lambda kv: (-kv[1]["total"], kv[0]))
+    for theme, row in sorted_themes[:max_themes]:
+        src_parts = [f"{s}={n}" for s, n in
+                     sorted(row["by_source"].items(), key=lambda kv: (-kv[1], kv[0]))]
+        type_parts = [f"{t}={n}" for t, n in
+                      sorted(row["by_type"].items(), key=lambda kv: (-kv[1], kv[0]))]
+        marker = "  [THIN]" if row["total"] < 3 else ""
+        lines.append(f"  {theme}: {row['total']} sources"
+                     + (f"  ({', '.join(src_parts)})" if src_parts else "")
+                     + (f"  [{', '.join(type_parts)}]" if type_parts else "")
+                     + marker)
+
+    if thin:
+        lines.append("")
+        lines.append("THIN-COVERAGE THEMES (treat claims about these with caution): "
+                     + ", ".join(thin))
+
     return "\n".join(lines)
 
 

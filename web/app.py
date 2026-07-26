@@ -619,6 +619,41 @@ def get_break(run_id: str, break_num: int,
     return payload
 
 
+@app.post("/api/runs/{run_id}/break/0/preview")
+def preview_break0_theme(run_id: str, theme: str,
+                         user: dict = Depends(auth.resolve_user)):
+    """
+    Break 0 theme preview (F1).
+
+    Fires a single OpenAlex + Semantic Scholar query (3 results each) for the
+    given theme so the researcher can confirm coverage before the full Social /
+    Grounder run commits to it. Cheap: 2 API calls, no DB writes.
+
+    Query param: ?theme=<theme_id>
+    """
+    auth.require_run_access(user, run_id)
+    if not theme:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Missing required query param: theme")
+
+    config = load_config()
+    all_themes = config.get("themes", [])
+    theme_obj = next((t for t in all_themes
+                      if t.get("theme_id") == theme), None)
+    if not theme_obj:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"Unknown theme_id: {theme}",
+        )
+
+    from agents import social
+    # Use the run_id so the rate limiter coordinates with any in-flight work,
+    # but the preview never writes to the sources table.
+    run = db.get_run(run_id) or {}
+    return social.preview_theme(theme_obj, run_id=run_id,
+                                problem=run.get("problem", ""))
+
+
 @app.post("/api/runs/{run_id}/break/{break_num}")
 def submit_break(run_id: str, break_num: int, body: BreakSubmission,
                  user: dict = Depends(auth.resolve_user)):
@@ -771,6 +806,63 @@ def get_artifact(run_id: str, artifact_id: str,
             content = ""
 
     return {**artifact, "content": content}
+
+
+# ---------------------------------------------------------------------------
+# Argument tree (F9)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/runs/{run_id}/tree")
+def get_argument_tree(run_id: str, user: dict = Depends(auth.resolve_user)):
+    """
+    The run's argument tree as a nested JSON structure.
+
+    Returns:
+      {
+        "run_id": str,
+        "tree":   { ...root node with nested children... } | null,
+        "stats":  { total_nodes, by_type, claim_statuses, unique_sources },
+        "sources": { source_id: {title, authors, year, source_name} },
+      }
+
+    Each node has: node_id, node_type, content, status, confidence,
+    source_ids (list), agent_origin, metadata (dict), children (list).
+    """
+    auth.require_run_access(user, run_id)
+
+    from core.argument_tree import TreeBuilder
+    tree = TreeBuilder(run_id)
+    nested = tree.get_tree()
+    stats = tree.get_stats()
+
+    # Attach source metadata so the UI can show what each evidence node
+    # points at without a second round-trip.
+    source_ids = tree.get_all_source_ids()
+    sources_map: dict[str, dict] = {}
+    if source_ids:
+        all_sources = db.get_sources_by_type("current", run_id=run_id) + \
+                      db.get_sources_by_type("seminal", run_id=run_id) + \
+                      db.get_sources_by_type("historical", run_id=run_id)
+        for s in all_sources:
+            sid = s.get("source_id") if isinstance(s, dict) else s["source_id"]
+            if sid in source_ids and sid not in sources_map:
+                get = (lambda k, _s=s: _s[k] if k in _s.keys() else None) \
+                      if not isinstance(s, dict) else (lambda k, _s=s: _s.get(k))
+                sources_map[sid] = {
+                    "title":       get("title") or "",
+                    "authors":     get("authors") or "",
+                    "year":        get("year"),
+                    "source_name": get("source_name") or "",
+                    "doi":         get("doi") or "",
+                    "active_link": get("active_link") or "",
+                }
+
+    return {
+        "run_id":  run_id,
+        "tree":    nested,
+        "stats":   stats,
+        "sources": sources_map,
+    }
 
 
 # ---------------------------------------------------------------------------
