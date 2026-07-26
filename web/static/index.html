@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SEEKER</title>
-  <link rel="stylesheet" href="/static/style.css?v=7">
+  <link rel="stylesheet" href="/static/style.css?v=8">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔎</text></svg>">
 </head>
 <body>
@@ -130,38 +130,56 @@
       <details class="disclosure">
         <summary>Model routing <span class="muted">(optional)</span></summary>
         <p class="muted small">
-          Leave blank to use the defaults from <code>config.json</code>.
-          You can change these later at any break.
+          Override which model each individual agent uses, and tune its
+          max tokens and temperature. Leave a field blank to inherit the
+          <strong>primary</strong> or <strong>light</strong> default from
+          above. Higher temperature (up to 2.0) produces more varied
+          output; lower (0.0) is more deterministic. Max tokens controls
+          how long each agent's response can be — higher values allow
+          more detailed reasoning but cost more. You can change these
+          mid-run at any break point.
         </p>
         <div id="new-model-grid" class="model-grid"></div>
       </details>
 
       <details class="disclosure">
-        <summary>Sources <span class="muted">(optional — review U1)</span></summary>
+        <summary>Sources <span class="muted">(optional)</span></summary>
         <p class="muted small">
-          Pick which academic sources this run will query. Sources you
-          disable here are skipped entirely. A source with no key is shown
-          but will be skipped at run time — add a key below or in your
-          <code>.env</code>.
+          Pick which academic sources this run will query. Each source is
+          an API — OpenAlex, arXiv, PubMed, etc. Uncheck a source to skip
+          it entirely for this run. Sources that require an API key
+          (Scopus, CORE, Semantic Scholar, etc.) will be shown but
+          silently skipped at run time if no key is provided — add one
+          in the <em>Source API keys</em> section below or in your
+          <code>.env</code> file. The default limit of 8 results per
+          source keeps runs fast; increase it for broader coverage.
         </p>
         <div id="new-source-grid" class="source-grid"></div>
       </details>
 
       <details class="disclosure">
-        <summary>Source API keys <span class="muted">(optional — review U2)</span></summary>
+        <summary>Source API keys <span class="muted">(optional)</span></summary>
         <p class="muted small">
-          Store a per-user key for an academic source (Scopus, CORE, …).
-          Used instead of the matching <code>.env</code> var for your runs.
+          Store a per-user API key for sources that require authentication
+          (Scopus, CORE, Semantic Scholar, etc.). These are stored
+          encrypted in the database and used instead of the matching
+          <code>.env</code> variable for your runs. Keys are per-user —
+          each researcher can use their own credentials. Get a key from
+          the source's developer portal (e.g. dev.elsevier.com for
+          Scopus, core.ac.uk/services/api for CORE).
         </p>
         <div id="new-source-keys" class="source-keys"></div>
       </details>
 
       <details class="disclosure">
-        <summary>Compare to previous run <span class="muted">(optional — F5)</span></summary>
+        <summary>Compare to previous run <span class="muted">(optional)</span></summary>
         <p class="muted small">
-          Select a previous run to compare against. Sources already in that
-          run are flagged as "previously seen" in the Understanding Map, so
-          you can see what's new since your last pass at this topic.
+          Select a previous run to compare against. Sources already found
+          in that run are flagged as "previously seen" in the
+          Understanding Map, so you can see what's new since your last
+          pass at this topic. Useful for tracking how the literature
+          evolves between runs, or for resuming a broad survey without
+          re-reading the same papers. Leave as "None" for a fresh start.
         </p>
         <label class="field">
           <span class="field-label">Previous run</span>
@@ -172,11 +190,17 @@
       </details>
 
       <details class="disclosure">
-        <summary>Excluded sources <span class="muted">(optional — F8)</span></summary>
+        <summary>Excluded sources <span class="muted">(optional)</span></summary>
         <p class="muted small">
           Sources you mark here are never inserted into your runs — useful
-          for retracted, predatory, or just wrong-for-your-field work.
-          Matches by DOI, URL, or title substring (case-insensitive).
+          for retracted papers, predatory journals, or authors whose work
+          you don't want cited. Matches are case-insensitive and work by:
+          <strong>DOI</strong> (exact, e.g. <code>10.1234/abc</code>),
+          <strong>URL</strong> (substring, e.g.
+          <code>predatory-journal.com</code>), or
+          <strong>title substring</strong> (e.g.
+          <code>"predatory journal"</code>). Exclusions persist across
+          all your future runs until removed.
         </p>
         <div id="new-blacklist" class="blacklist-box"></div>
       </details>
@@ -270,6 +294,6 @@
 
 <div class="toast-stack" id="toasts"></div>
 
-<script src="/static/app.js?v=7"></script>
+<script src="/static/app.js?v=8"></script>
 </body>
 </html>
