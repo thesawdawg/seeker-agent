@@ -2528,7 +2528,7 @@ function renderAdminAgentSources(panel) {
 
   panel.append(el('p', { class: 'muted small' },
     'Which sources each agent searches. Check a box to include a source ' +
-    'in that agent's search; uncheck to exclude it.'), saveBtn);
+    'in that agent\'s search; uncheck to exclude it.'), saveBtn);
 
   // Build a matrix: rows = agents, columns = sources
   const table = el('table', { class: 'admin-matrix' });
