@@ -843,6 +843,48 @@ def rerun_step(run_id: str, step_name: str, body: RerunRequest,
 
 
 # ---------------------------------------------------------------------------
+# Branch a run (F11) — clone state up to a chosen step into a new run
+# ---------------------------------------------------------------------------
+
+class BranchRequest(BaseModel):
+    branch_after_step: str = Field(..., description="The last step to clone")
+    new_problem: str = Field("", description="Optional new problem statement")
+    previous_run_id: str = Field("", description="Optional previous run for F5 dedup")
+
+
+@app.post("/api/runs/{run_id}/branch")
+def branch_run(run_id: str, body: BranchRequest,
+               user: dict = Depends(auth.resolve_user)):
+    """
+    Branch a run — clone its state up to a chosen step into a new run (F11).
+
+    The new run preserves the original's sources, tree, gaps, and break
+    instructions for the cloned prefix, then starts fresh from the next
+    step. The original run is untouched.
+    """
+    auth.require_run_access(user, run_id)
+    if body.branch_after_step not in pipeline.STEP_BY_NAME:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such step")
+
+    try:
+        new_run_id = pipeline.branch_run(
+            source_run_id=run_id,
+            branch_after_step=body.branch_after_step,
+            new_problem=body.new_problem or None,
+            previous_run_id=body.previous_run_id or None,
+        )
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+    # Claim the new run for the same user
+    users.claim_run(new_run_id, user["user_id"])
+    return {
+        "new_run_id": new_run_id,
+        "state": pipeline.get_state(new_run_id),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Artifacts
 # ---------------------------------------------------------------------------
 

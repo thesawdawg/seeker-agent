@@ -943,3 +943,315 @@ def create_run(problem: str, run_id: str = None, previous_run_id: str = None) ->
     db.create_run(run_id, problem, previous_run_id=previous_run_id)
     ensure_steps(run_id)
     return run_id
+
+
+# ---------------------------------------------------------------------------
+# Branch a run (F11) — clone state up to a chosen step into a new run.
+#
+# This is the natural extension of reset_step: instead of discarding a step's
+# output in place, it copies the prefix of a completed run into a new run_id
+# so the original is preserved for comparison. The new run starts from the
+# step after the branch point, with the cloned context already in place.
+# ---------------------------------------------------------------------------
+
+# Tables whose rows are scoped by run_id and need cloning. Each entry is
+# (table, id_column, extra_where) — extra_where filters by type/agent_origin
+# where a single table holds outputs from multiple steps.
+_CLONE_TABLES = [
+    ("sources",              "source_id",   None),
+    ("concept_expansions",   "expansion_id", None),
+    ("gaps",                 "gap_id",      None),
+    ("implications",         "implication_id", None),
+    ("proposals",            "proposal_id", None),
+    ("evaluations",          "evaluation_id", None),
+    ("syntheses",            "synthesis_id", None),
+    ("directions",           "direction_id", None),
+    ("break_instructions",   "instruction_id", None),
+]
+
+
+def branch_run(source_run_id: str, branch_after_step: str,
+               new_problem: str = None, previous_run_id: str = None) -> str:
+    """
+    Clone a run's state up to and including branch_after_step into a new run.
+
+    The new run's steps up to and including branch_after_step are marked
+    'done'; everything after is 'pending'. The original run is untouched.
+
+    Args:
+        source_run_id:     the run to branch from
+        branch_after_step: the last step to clone (must be done in the source)
+        new_problem:       optional new problem statement (defaults to the
+                           source run's problem)
+        previous_run_id:   optional previous_run_id for the new run (F5)
+
+    Returns:
+        The new run_id.
+    """
+    import json
+
+    if branch_after_step not in STEP_BY_NAME:
+        raise ValueError(f"Unknown step: {branch_after_step}")
+
+    source_state = get_state(source_run_id)
+    if not source_state.get("exists"):
+        raise ValueError(f"Source run {source_run_id} not found")
+
+    # The branch point must be done — you can't branch from a step that
+    # hasn't produced output yet.
+    step_statuses = {s["step_name"]: s["status"] for s in source_state["steps"]}
+    if step_statuses.get(branch_after_step) not in ("done", "skipped"):
+        raise ValueError(
+            f"Step {branch_after_step} is not done "
+            f"(status: {step_statuses.get(branch_after_step)}). "
+            f"Can only branch from a completed step."
+        )
+
+    # Determine which steps to clone (the prefix up to and including the
+    # branch point) and which to leave pending.
+    branch_ordinal = STEP_ORDER[branch_after_step]
+    clone_step_names = [s.name for s in STEP_DEFS[:branch_ordinal + 1]]
+
+    problem = new_problem or source_state.get("problem", "")
+    new_run_id = create_run(problem, previous_run_id=previous_run_id)
+
+    logger.info(f"[F11] Branching {source_run_id} after {branch_after_step} "
+                f"into {new_run_id}")
+
+    # 1. Clone output tables. Each table is run-scoped; we copy rows from
+    #    the source run, generating new IDs where needed.
+    for table, id_col, extra_where in _CLONE_TABLES:
+        _clone_table(table, id_col, source_run_id, new_run_id, extra_where)
+
+    # 2. Clone the argument tree. This needs special handling because
+    #    parent_node_id references must be remapped to the new node IDs.
+    _clone_argument_tree(source_run_id, new_run_id, branch_after_step)
+
+    # 3. Clone break instructions for completed breaks in the prefix.
+    _clone_breaks(source_run_id, new_run_id, clone_step_names)
+
+    # 4. Copy model and source overrides.
+    model_overrides = get_model_overrides(source_run_id)
+    if model_overrides:
+        set_model_overrides(new_run_id, model_overrides)
+    source_overrides = get_source_overrides(source_run_id)
+    if source_overrides:
+        set_source_overrides(new_run_id, source_overrides)
+
+    # 5. Mark cloned steps as done in the new run; leave the rest pending.
+    _mark_cloned_steps_done(new_run_id, clone_step_names)
+
+    # 6. Copy break{N}_done flags for completed breaks.
+    for step_name in clone_step_names:
+        step = STEP_BY_NAME[step_name]
+        if step.break_num is not None:
+            db.update("runs", {f"break{step.break_num}_done": 1},
+                      {"run_id": new_run_id})
+
+    logger.info(f"[F11] Branch {new_run_id} ready — "
+                f"{len(clone_step_names)} steps cloned, "
+                f"resuming from {STEP_DEFS[branch_ordinal + 1].name if branch_ordinal + 1 < len(STEP_DEFS) else 'end'}")
+    return new_run_id
+
+
+def _clone_table(table: str, id_col: str,
+                 source_run_id: str, new_run_id: str,
+                 extra_where: dict = None) -> int:
+    """Copy all rows for a run from source to new, generating new IDs."""
+    where = {"run_id": source_run_id}
+    if extra_where:
+        where.update(extra_where)
+    try:
+        rows = db.fetch(table, where)
+    except Exception as e:
+        # Table may not exist yet (e.g. concept_expansions if concept_mapper
+        # hasn't been initialized in this test context). Skip gracefully.
+        logger.debug(f"[F11] Could not fetch from {table}: {e}")
+        return 0
+    if not rows:
+        return 0
+    count = 0
+    for r in rows:
+        row = dict(r) if not isinstance(r, dict) else r.copy()
+        # Generate a new ID for the cloned row
+        old_id = row.get(id_col, "")
+        row[id_col] = generate_id(id_col[:3].upper())
+        row["run_id"] = new_run_id
+        try:
+            db.insert(table, row)
+            count += 1
+        except Exception as e:
+            logger.warning(f"[F11] Could not clone {table} row {old_id}: {e}")
+    return count
+
+
+def _clone_argument_tree(source_run_id: str, new_run_id: str,
+                         branch_after_step: str) -> int:
+    """
+    Clone argument_tree nodes from source to new run.
+
+    Only nodes from steps up to and including the branch point are cloned
+    (filtered by agent_origin). Parent-child relationships are preserved by
+    building an old_id → new_id mapping.
+    """
+    import json
+
+    # Determine which agents' nodes to clone based on the branch point.
+    # The argument_tree is written by grounder, social, historian, and gaper.
+    # If we're branching after grounder, only clone grounder's nodes.
+    # If after social, clone grounder + social, etc.
+    branch_ordinal = STEP_ORDER[branch_after_step]
+    clone_agents = set()
+    for step in STEP_DEFS[:branch_ordinal + 1]:
+        if step.name in ("grounder", "social", "historian", "gaper"):
+            clone_agents.add(step.name)
+    # Root nodes have agent_origin="system" — always clone them (created by
+    # grounder, but the column value is "system"). audit_note nodes are
+    # created by historian — include them with historian.
+    clone_agents.add("system")
+
+    rows = db.query(
+        "SELECT * FROM argument_tree WHERE run_id = ? ORDER BY depth, created_at",
+        (source_run_id,),
+    )
+    if not rows:
+        return 0
+
+    id_map: dict[str, str] = {}
+    count = 0
+    for r in rows:
+        row = dict(r) if not isinstance(r, dict) else r.copy()
+        agent = row.get("agent_origin")
+        node_type = row.get("node_type", "")
+
+        # Filter: only clone nodes from agents that have run by the branch point.
+        # Root nodes (agent_origin="system" or None) are always cloned.
+        if agent and agent not in clone_agents:
+            continue
+        if node_type == "audit_note" and "historian" not in clone_agents:
+            continue
+
+        old_id = row["node_id"]
+        new_id = generate_id("TND")
+        id_map[old_id] = new_id
+
+        # Remap parent reference
+        old_parent = row.get("parent_node_id")
+        row["parent_node_id"] = id_map.get(old_parent) if old_parent else None
+        row["node_id"] = new_id
+        row["run_id"] = new_run_id
+
+        # Remap source_ids references (they point to source_ids in the sources
+        # table, which were cloned with new IDs in _clone_table). We need a
+        # source ID map for this — build it from the sources we already cloned.
+        # This is handled below in a second pass for simplicity.
+
+        try:
+            db.insert("argument_tree", row)
+            count += 1
+        except Exception as e:
+            logger.warning(f"[F11] Could not clone tree node {old_id}: {e}")
+
+    # Second pass: remap source_ids in the cloned tree nodes.
+    # Build a map of old_source_id → new_source_id from the sources table.
+    _remap_tree_source_ids(source_run_id, new_run_id)
+
+    return count
+
+
+def _remap_tree_source_ids(source_run_id: str, new_run_id: str) -> None:
+    """
+    After cloning sources and tree nodes, remap the source_ids JSON arrays
+    in the new run's tree nodes to point at the cloned source IDs.
+    """
+    import json
+
+    # Build old → new source ID map by matching on title + doi + type.
+    # The _clone_table function generated new IDs, so we can't match by ID;
+    # we match by content.
+    old_sources = db.fetch("sources", {"run_id": source_run_id})
+    new_sources = db.fetch("sources", {"run_id": new_run_id})
+
+    # Build a lookup from (title, doi, type) → new_source_id
+    new_lookup = {}
+    for s in new_sources:
+        key = (s.get("title", ""), s.get("doi", ""), s.get("type", ""))
+        new_lookup[key] = s.get("source_id")
+
+    # Build old_source_id → new_source_id map
+    id_map = {}
+    for s in old_sources:
+        key = (s.get("title", ""), s.get("doi", ""), s.get("type", ""))
+        new_id = new_lookup.get(key)
+        if new_id:
+            id_map[s.get("source_id")] = new_id
+
+    if not id_map:
+        return
+
+    # Update tree nodes in the new run
+    new_nodes = db.query(
+        "SELECT node_id, source_ids FROM argument_tree WHERE run_id = ?",
+        (new_run_id,),
+    )
+    for r in new_nodes:
+        raw = r.get("source_ids")
+        if not raw:
+            continue
+        try:
+            ids = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(ids, list):
+            continue
+        new_ids = [id_map.get(sid, sid) for sid in ids]
+        if new_ids != ids:
+            db.execute(
+                "UPDATE argument_tree SET source_ids = ? WHERE node_id = ?",
+                (json.dumps(new_ids), r["node_id"]),
+            )
+
+
+def _clone_breaks(source_run_id: str, new_run_id: str,
+                  clone_step_names: list[str]) -> None:
+    """Clone break_instructions for breaks in the cloned prefix."""
+    break_nums = []
+    for name in clone_step_names:
+        step = STEP_BY_NAME.get(name)
+        if step and step.break_num is not None:
+            break_nums.append(step.break_num)
+    if not break_nums:
+        return
+    for break_num in break_nums:
+        try:
+            rows = db.fetch("break_instructions", {
+                "run_id": source_run_id, "break_num": break_num,
+            })
+        except Exception as e:
+            logger.debug(f"[F11] Could not fetch break_instructions: {e}")
+            continue
+        for r in rows:
+            row = dict(r) if not isinstance(r, dict) else r.copy()
+            row["instruction_id"] = generate_id("BIN")
+            row["run_id"] = new_run_id
+            try:
+                db.insert("break_instructions", row)
+            except Exception as e:
+                logger.warning(f"[F11] Could not clone break {break_num}: {e}")
+
+
+def _mark_cloned_steps_done(new_run_id: str, clone_step_names: list[str]) -> None:
+    """Mark the cloned prefix steps as done in the new run."""
+    now = _now()
+    for name in clone_step_names:
+        step = STEP_BY_NAME.get(name)
+        if step and step.kind == "break":
+            # Breaks are marked done via break{N}_done flag, not step status.
+            # The step itself stays as 'done' to indicate it was completed.
+            db.update("run_steps",
+                      {"status": "done", "finished_at": now},
+                      {"run_id": new_run_id, "step_name": name})
+        else:
+            db.update("run_steps",
+                      {"status": "done", "finished_at": now},
+                      {"run_id": new_run_id, "step_name": name})

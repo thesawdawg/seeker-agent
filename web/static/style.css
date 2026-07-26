@@ -224,6 +224,12 @@ input:focus, select:focus, textarea:focus {
 }
 .rail-step:hover .rail-rerun { opacity: 1; }
 .rail-rerun:hover { color: var(--accent); }
+.rail-branch {
+  opacity: 0; border: none; background: none; cursor: pointer;
+  color: var(--text-dim); font-size: .82rem; padding: 0 .2rem;
+}
+.rail-step:hover .rail-branch { opacity: 1; }
+.rail-branch:hover { color: var(--ok, #2a9d8f); }
 
 .spinner {
   display: inline-block; width: .8rem; height: .8rem;
