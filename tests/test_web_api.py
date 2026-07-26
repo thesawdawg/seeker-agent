@@ -887,6 +887,186 @@ def test_blacklist_invalid_match_type(client, provider, stub_agents):
 
 
 # ---------------------------------------------------------------------------
+# Branch a run (F11)
+# ---------------------------------------------------------------------------
+
+def test_branch_run_clones_prefix(client, provider, stub_agents):
+    """F11: branching clones completed steps into a new run, original untouched."""
+    from core import database as core_db
+    from core.argument_tree import TreeBuilder, init_tree_table
+
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "What is identity?"}).json()["run_id"]
+    drain()  # advances to break0 (concept_mapper done)
+
+    # Manually mark grounder as done and insert some sources + tree nodes
+    # so we have something to clone.
+    from core import pipeline
+    init_tree_table()
+    tree = TreeBuilder(run_id)
+    root = tree.create_root("What is identity?")
+    q1 = tree.add_question(root, "What is social identity?", agent="grounder")
+    c1 = tree.add_claim(q1, "Identity is socially constructed",
+                        confidence=0.8, agent="grounder")
+    tree.add_evidence(c1, source_id="SRC-ORIG-1", evidence_type="book",
+                      relationship="establishes", snippet="Mead argues...",
+                      agent="grounder")
+    tree.close()
+
+    core_db.upsert_source({
+        "source_id": "SRC-ORIG-1", "run_id": run_id,
+        "title": "Mind, Self, and Society", "doi": "10.1234/mead",
+        "source_name": "openalex", "type": "seminal",
+    })
+
+    # Mark concept_mapper and grounder as done
+    pipeline._mark_cloned_steps_done(run_id, ["concept_mapper", "grounder"])
+
+    # Branch from grounder
+    resp = client.post(f"/api/runs/{run_id}/branch", json={
+        "branch_after_step": "grounder",
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    new_run_id = body["new_run_id"]
+    assert new_run_id != run_id
+
+    # The new run should have cloned steps done up to grounder
+    new_state = body["state"]
+    new_steps = {s["step_name"]: s["status"] for s in new_state["steps"]}
+    assert new_steps["concept_mapper"] == "done"
+    assert new_steps["grounder"] == "done"
+    assert new_steps["social"] == "pending"
+
+    # The original run should be unchanged
+    orig_state = client.get(f"/api/runs/{run_id}/status").json()
+    orig_steps = {s["name"]: s["status"] for s in orig_state["steps"]}
+    assert orig_steps["concept_mapper"] == "done"
+    assert orig_steps["grounder"] == "done"
+
+    # The new run should have the cloned source
+    new_sources = core_db.fetch("sources", {"run_id": new_run_id})
+    assert len(new_sources) == 1
+    assert new_sources[0]["title"] == "Mind, Self, and Society"
+    assert new_sources[0]["source_id"] != "SRC-ORIG-1"  # new ID
+
+    # The new run should have the cloned tree
+    new_tree = client.get(f"/api/runs/{new_run_id}/tree").json()
+    assert new_tree["tree"] is not None
+    assert new_tree["tree"]["content"] == "What is identity?"
+    assert new_tree["stats"]["total_nodes"] >= 4
+
+
+def test_branch_run_with_new_problem(client, provider, stub_agents):
+    """F11: branching with a new problem statement uses it in the new run."""
+    from core import database as core_db
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "Original problem"}).json()["run_id"]
+    drain()
+
+    from core import pipeline
+    pipeline._mark_cloned_steps_done(run_id, ["concept_mapper"])
+
+    resp = client.post(f"/api/runs/{run_id}/branch", json={
+        "branch_after_step": "concept_mapper",
+        "new_problem": "A different angle on the problem",
+    })
+    assert resp.status_code == 200
+    new_run_id = resp.json()["new_run_id"]
+
+    # The new run's problem should be the new one
+    new_run = core_db.get_run(new_run_id)
+    assert new_run["problem"] == "A different angle on the problem"
+
+    # Original run's problem is unchanged
+    orig_run = core_db.get_run(run_id)
+    assert orig_run["problem"] == "Original problem"
+
+
+def test_branch_run_rejects_incomplete_step(client, provider, stub_agents):
+    """F11: cannot branch from a step that hasn't completed."""
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()  # only concept_mapper is done; break0 is awaiting_input
+
+    # Try to branch from grounder, which is still pending
+    resp = client.post(f"/api/runs/{run_id}/branch", json={
+        "branch_after_step": "grounder",
+    })
+    assert resp.status_code == 400
+    assert "not done" in resp.json()["detail"].lower()
+
+
+def test_branch_run_rejects_unknown_step(client, provider, stub_agents):
+    """F11: unknown step name returns 404."""
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()
+
+    resp = client.post(f"/api/runs/{run_id}/branch", json={
+        "branch_after_step": "nonexistent_step",
+    })
+    assert resp.status_code == 404
+
+
+def test_branch_run_preserves_tree_source_references(client, provider, stub_agents):
+    """F11: tree node source_ids are remapped to the cloned sources' new IDs."""
+    from core import database as core_db
+    from core.argument_tree import TreeBuilder, init_tree_table
+    from core import pipeline
+
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "Test problem"}).json()["run_id"]
+    drain()
+
+    init_tree_table()
+    tree = TreeBuilder(run_id)
+    root = tree.create_root("Test problem")
+    q = tree.add_question(root, "Q1", agent="grounder")
+    c = tree.add_claim(q, "C1", confidence=0.5, agent="grounder")
+    tree.add_evidence(c, source_id="SRC-X", evidence_type="paper",
+                      relationship="supports", snippet="...",
+                      agent="grounder")
+    tree.close()
+
+    core_db.upsert_source({
+        "source_id": "SRC-X", "run_id": run_id, "title": "Paper X",
+        "doi": "10.1/x", "source_name": "openalex", "type": "seminal",
+    })
+
+    pipeline._mark_cloned_steps_done(run_id, ["concept_mapper", "grounder"])
+
+    resp = client.post(f"/api/runs/{run_id}/branch", json={
+        "branch_after_step": "grounder",
+    })
+    assert resp.status_code == 200
+    new_run_id = resp.json()["new_run_id"]
+
+    # The new run's tree should have evidence nodes whose source_ids point
+    # to the new run's sources (not the old SRC-X).
+    new_tree = client.get(f"/api/runs/{new_run_id}/tree").json()
+    new_sources = core_db.fetch("sources", {"run_id": new_run_id})
+    new_source_ids = {s["source_id"] for s in new_sources}
+    assert "SRC-X" not in new_source_ids  # old ID not present
+
+    # Find the evidence node and check its source_ids
+    def find_evidence(node):
+        if node["node_type"] == "evidence":
+            return node
+        for child in node.get("children", []):
+            result = find_evidence(child)
+            if result:
+                return result
+        return None
+
+    ev = find_evidence(new_tree["tree"])
+    assert ev is not None
+    # The source_ids should reference the new source IDs
+    for sid in ev["source_ids"]:
+        assert sid in new_source_ids
+
+
+# ---------------------------------------------------------------------------
 # Mid-run model changes
 # ---------------------------------------------------------------------------
 

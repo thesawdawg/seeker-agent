@@ -822,10 +822,18 @@ function renderRail(status) {
         onClick: ev => { ev.stopPropagation(); openBreak(num); },
       }, '↗'));
     } else if (['done', 'failed', 'skipped'].includes(step.status)) {
-      row.append(el('button', {
+      const rerunBtn = el('button', {
         class: 'rail-rerun', type: 'button', title: 'Re-run this step',
         onClick: ev => { ev.stopPropagation(); confirmRerun(step.name); },
-      }, '↻'));
+      }, '↻');
+      row.append(rerunBtn);
+      // F11: Branch from here — only for completed (not failed) steps.
+      if (step.status === 'done') {
+        row.append(el('button', {
+          class: 'rail-branch', type: 'button', title: 'Branch from here',
+          onClick: ev => { ev.stopPropagation(); confirmBranch(step.name); },
+        }, '⎇'));
+      }
     }
     rail.append(row);
   }
@@ -1408,6 +1416,51 @@ function confirmRerun(stepName) {
       startPolling();
     });
   }).catch(err => toast(err.message, 'error'));
+}
+
+// F11: Branch from a completed step — clone the run's state up to this
+// step into a new run, preserving the original for comparison.
+function confirmBranch(stepName) {
+  const stepLabel = pipeline_label(stepName);
+  const problemInput = el('textarea', {
+    rows: 3, style: 'width:100%;',
+    placeholder: 'Leave blank to keep the original problem',
+  });
+  const body = el('div', {},
+    el('p', {},
+      'Branching from ',
+      el('strong', { text: stepLabel }),
+      ' creates a new run with everything up to this step already done. ',
+      'The original run is preserved unchanged.'),
+    el('p', { class: 'muted small' },
+      'The new run starts from the next step with the cloned sources, tree, ',
+      'and break instructions in place. Useful for exploring a specific gap ',
+      'or proposal in depth without re-running the gathering steps.'),
+    el('label', { class: 'field', style: 'margin-top:.6rem;' },
+      el('span', { class: 'field-label' }, 'New problem (optional)'),
+      problemInput,
+      el('span', { class: 'field-hint' },
+        'Change the problem to explore a different angle, or leave blank to ',
+        'keep the original.'),
+    ),
+  );
+  openModal('Branch from ' + stepLabel, body, async () => {
+    const resp = await api(`/api/runs/${state.runId}/branch`, {
+      method: 'POST', body: {
+        branch_after_step: stepName,
+        new_problem: problemInput.value.trim(),
+      },
+    });
+    toast(`Branched into ${resp.new_run_id.slice(-8)}.`, 'ok');
+    await openRun(resp.new_run_id);
+    startPolling();
+  });
+}
+
+// Look up a step's display label from the current run's step list.
+function pipeline_label(stepName) {
+  const step = (state.status?.steps || []).find(s => s.name === stepName);
+  return step?.label || stepName;
 }
 
 function openModal(title, bodyNode, onConfirm) {
