@@ -363,8 +363,27 @@ function showNewRun() {
   buildSourceGrid();
   buildSourceKeys();
   buildTemplateBar();
+  buildPreviousRunPicker();
   $('#new-error').hidden = true;
   $('#role-warning').hidden = true;
+}
+
+// F5: populate the "Compare to previous run" dropdown with the user's runs.
+async function buildPreviousRunPicker() {
+  const select = $('#new-previous-run');
+  if (!select) return;
+  // Keep the "None" option, clear the rest
+  const noneOpt = select.querySelector('option');
+  clear(select);
+  if (noneOpt) select.append(noneOpt);
+  try {
+    const data = await api('/api/runs');
+    const runs = (data.runs || []).filter(r => r.run_id);
+    for (const r of runs.slice(0, 50)) {  // cap at 50 for performance
+      const label = `${r.run_id.slice(-8)} — ${r.problem.slice(0, 60)}`;
+      select.append(el('option', { value: r.run_id, text: label }));
+    }
+  } catch { /* non-essential */ }
 }
 
 // Config template bar (review U10) — save/restore model + source overrides.
@@ -576,6 +595,7 @@ function wireNewRun() {
           provider: $('#new-provider').value,
           model_overrides: collectModelOverrides($('#new-model-grid')),
           source_overrides: collectSourceOverrides($('#new-source-grid')),
+          previous_run_id: ($('#new-previous-run') || {}).value || '',
         },
       });
       $('#new-problem').value = '';
@@ -2090,10 +2110,23 @@ async function renderSources() {
   clear(panel);
   const health = data.health || [];
   const inserted = data.inserted || {};
+  const previouslySeen = data.previously_seen || 0;
+  const previousRunId = data.previous_run_id || '';
   if (!health.length) {
     panel.append(el('p', { class: 'muted small',
       text: 'No source activity yet — the gathering steps have not run.' }));
     return;
+  }
+  // F5: previously-seen banner
+  if (previouslySeen > 0 && previousRunId) {
+    panel.append(el('div', { class: 'review-group' },
+      el('h3', {}, 'Cross-run comparison'),
+      el('p', { class: 'muted small' },
+        `${previouslySeen} source(s) in this run also appeared in the previous run `,
+        el('code', { text: previousRunId.slice(-8) }),
+        `. These are flagged as "previously seen" in the Understanding Map. ` +
+        `${Object.values(inserted).reduce((a,b)=>a+b,0) - previouslySeen} source(s) are new.`),
+    ));
   }
   panel.append(el('h3', {}, 'Source coverage'),
     el('p', { class: 'muted small',

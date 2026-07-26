@@ -59,6 +59,7 @@ class CitableSource:
     apa:          str = ""           # formatted APA string, computed
     theme_tags:   list[str] = field(default_factory=list)  # JSON array from sources table
     source_type:  str = ""           # 'current' | 'seminal' | 'historical'
+    previously_seen: int = 0         # F5: 1 if this source appeared in a previous run
     # verification outputs
     exists_online:   Optional[bool] = None
     verified_via:    Optional[str]  = None   # 'crossref' | 'openalex' | 'url_head' | None
@@ -250,6 +251,7 @@ def build_manifest(run_id: str) -> list[CitableSource]:
             source_name = get("source_name") or "",
             theme_tags  = theme_tags,
             source_type = get("type") or "",
+            previously_seen = int(get("previously_seen") or 0),
         ))
     _assign_cite_keys(citables)
     for c in citables:
@@ -347,6 +349,8 @@ def build_coverage_matrix(manifest: list[CitableSource]) -> dict:
 
     thin_themes = sorted(t for t, r in themes.items() if r["total"] < 3)
 
+    previously_seen = sum(1 for s in manifest if s.previously_seen)
+
     return {
         "total_sources": len(manifest),
         "themes": themes,
@@ -354,6 +358,8 @@ def build_coverage_matrix(manifest: list[CitableSource]) -> dict:
         "by_type": by_type,
         "thin_themes": thin_themes,
         "untagged": untagged,
+        "previously_seen": previously_seen,
+        "new_sources": len(manifest) - previously_seen,
     }
 
 
@@ -385,6 +391,13 @@ def format_coverage_for_prompt(matrix: dict, max_themes: int = 30) -> str:
 
     if untagged:
         lines.append(f"UNTAGGED (no theme): {untagged}")
+
+    # F5: previously-seen sources from a prior run
+    prev_seen = matrix.get("previously_seen", 0)
+    if prev_seen:
+        new_count = matrix.get("new_sources", total - prev_seen)
+        lines.append(f"PREVIOUSLY SEEN: {prev_seen} sources also appeared in a prior run; "
+                     f"{new_count} are new to this run.")
 
     lines.append("")
     lines.append("PER-THEME COVERAGE:")

@@ -212,6 +212,7 @@ A short preamble (80-120 words) that tells the researcher what the map is built 
   - The total number of sources the map is built from, and how they break down by source (e.g. OpenAlex, Semantic Scholar) and by type (current / seminal / historical).
   - How many distinct themes the sources cover.
   - Any themes flagged as THIN-COVERAGE (fewer than 3 sources). Explicitly warn the researcher that claims about those themes rest on limited evidence and should be treated as provisional.
+  - If the COVERAGE MATRIX shows PREVIOUSLY SEEN sources, note how many sources are new vs previously seen from a prior run.
   - One sentence on what this means for how to read the rest of the map (e.g. "The foundations are well-supported; the current frontier is thinner and several of its claims are best read as hypotheses to test").
 Do NOT cite individual sources in this section — it is a meta-statement about coverage, not a claim about content.
 

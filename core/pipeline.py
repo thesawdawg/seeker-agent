@@ -936,10 +936,10 @@ def apply_source_overrides(run_id: str, config: dict) -> dict:
     return cfg
 
 
-def create_run(problem: str, run_id: str = None) -> str:
+def create_run(problem: str, run_id: str = None, previous_run_id: str = None) -> str:
     """Register a new run and its steps."""
     from core.utils import generate_run_id
     run_id = run_id or generate_run_id()
-    db.create_run(run_id, problem)
+    db.create_run(run_id, problem, previous_run_id=previous_run_id)
     ensure_steps(run_id)
     return run_id
