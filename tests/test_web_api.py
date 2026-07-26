@@ -709,6 +709,184 @@ def test_cross_run_title_only_match(client, provider, stub_agents):
 
 
 # ---------------------------------------------------------------------------
+# Built-in run templates (F4)
+# ---------------------------------------------------------------------------
+
+def test_builtin_templates_endpoint(client, provider, stub_agents):
+    """F4: GET /api/templates/built-in returns templates from config.json."""
+    sign_in(client, provider)
+    resp = client.get("/api/templates/built-in")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    names = {t["name"] for t in body["templates"]}
+    # The three shipped defaults
+    assert "Humanities" in names
+    assert "CS / Quantitative" in names
+    assert "Quick scan" in names
+    # Each has a description and config
+    for t in body["templates"]:
+        assert t["built_in"] is True
+        assert "description" in t
+        assert "config" in t
+        assert "source_overrides" in t["config"]
+
+
+# ---------------------------------------------------------------------------
+# Per-step artifact download (F6)
+# ---------------------------------------------------------------------------
+
+def test_step_artifacts_lists_and_reads_files(client, provider, stub_agents):
+    """F6: GET /api/runs/{id}/step-artifacts lists per-step markdown files."""
+    from pathlib import Path
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()
+
+    # Write a fake per-step artifact
+    artifacts_dir = Path(__file__).parent.parent / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"{run_id}_grounder_foundations.md"
+    fpath = artifacts_dir / fname
+    fpath.write_text("# Grounder Foundations\n\nA test doc.", encoding="utf-8")
+    try:
+        resp = client.get(f"/api/runs/{run_id}/step-artifacts")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        files = body["files"]
+        assert any(f["filename"] == fname for f in files)
+        the_file = next(f for f in files if f["filename"] == fname)
+        assert the_file["step_key"] == "grounder_foundations"
+        assert "Foundations" in the_file["label"]
+        assert the_file["size"] > 0
+
+        # Read the file's contents
+        resp2 = client.get(f"/api/runs/{run_id}/step-artifacts/{fname}")
+        assert resp2.status_code == 200
+        body2 = resp2.json()
+        assert "Grounder Foundations" in body2["content"]
+        assert body2["step_key"] == "grounder_foundations"
+    finally:
+        fpath.unlink(missing_ok=True)
+
+
+def test_step_artifacts_path_traversal_blocked(client, provider, stub_agents):
+    """F6: filenames outside {run_id}_*.md are rejected."""
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()
+
+    # Wrong prefix
+    resp = client.get(f"/api/runs/{run_id}/step-artifacts/other_run_grounder.md")
+    assert resp.status_code == 400
+    # Non-md extension
+    resp = client.get(f"/api/runs/{run_id}/step-artifacts/{run_id}_foo.txt")
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Source blacklist (F8)
+# ---------------------------------------------------------------------------
+
+def test_blacklist_add_list_remove(client, provider, stub_agents):
+    """F8: blacklist entries can be added, listed, and removed."""
+    sign_in(client, provider)
+
+    # Add a DOI entry
+    resp = client.post("/api/blacklist", json={
+        "match_type": "doi", "match_value": "10.1234/abc",
+        "reason": "retracted",
+    })
+    assert resp.status_code == 200
+
+    # Add a title substring entry
+    resp = client.post("/api/blacklist", json={
+        "match_type": "title_substring", "match_value": "predatory journal",
+    })
+    assert resp.status_code == 200
+
+    # List
+    resp = client.get("/api/blacklist")
+    assert resp.status_code == 200
+    entries = resp.json()["entries"]
+    types = {e["match_type"] for e in entries}
+    assert "doi" in types
+    assert "title_substring" in types
+    # DOI should be normalized
+    doi_entry = next(e for e in entries if e["match_type"] == "doi")
+    assert doi_entry["match_value"] == "10.1234/abc"
+    assert doi_entry["reason"] == "retracted"
+
+    # Remove
+    resp = client.request("DELETE", "/api/blacklist", json={
+        "match_type": "doi", "match_value": "10.1234/abc",
+    })
+    assert resp.status_code == 200
+    resp = client.get("/api/blacklist")
+    entries = resp.json()["entries"]
+    assert not any(e["match_type"] == "doi" for e in entries)
+
+
+def test_blacklist_blocks_source_insertion(client, provider, stub_agents):
+    """F8: a blacklisted source is dropped by upsert_source."""
+    from core import database as core_db
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()
+
+    # Get the user_id from the run owner
+    from core import users
+    owner = users.run_owner(run_id)
+    user_id = owner["user_id"] if owner else "anon"
+
+    # Blacklist a DOI
+    core_db.add_to_blacklist(user_id, "doi", "10.5555/blocked", reason="predatory")
+
+    # Try to insert a source with that DOI — should be dropped
+    result = core_db.upsert_source({
+        "source_id": "SRC-BLK-1", "run_id": run_id, "title": "Bad Paper",
+        "doi": "10.5555/blocked", "source_name": "openalex", "type": "current",
+    })
+    assert result is False
+
+    # A non-blacklisted source still inserts fine
+    result = core_db.upsert_source({
+        "source_id": "SRC-OK-1", "run_id": run_id, "title": "Good Paper",
+        "doi": "10.5555/ok", "source_name": "openalex", "type": "current",
+    })
+    assert result is True
+
+
+def test_blacklist_title_substring_match(client, provider, stub_agents):
+    """F8: title_substring matching is case-insensitive."""
+    from core import database as core_db
+    sign_in(client, provider)
+    run_id = client.post("/api/runs", json={"problem": "A problem"}).json()["run_id"]
+    drain()
+
+    from core import users
+    owner = users.run_owner(run_id)
+    user_id = owner["user_id"] if owner else "anon"
+
+    core_db.add_to_blacklist(user_id, "title_substring", "PREDATORY")
+
+    result = core_db.upsert_source({
+        "source_id": "SRC-BLK-2", "run_id": run_id,
+        "title": "Some predatory journal article",
+        "source_name": "openalex", "type": "current",
+    })
+    assert result is False
+
+
+def test_blacklist_invalid_match_type(client, provider, stub_agents):
+    """F8: invalid match_type is rejected by the API."""
+    sign_in(client, provider)
+    resp = client.post("/api/blacklist", json={
+        "match_type": "invalid", "match_value": "foo",
+    })
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
 # Mid-run model changes
 # ---------------------------------------------------------------------------
 

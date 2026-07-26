@@ -17,6 +17,7 @@ Run:
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -527,6 +528,68 @@ def list_templates(user: dict = Depends(auth.resolve_user)):
     return {"templates": users.list_templates(user["user_id"])}
 
 
+@app.get("/api/templates/built-in")
+def list_builtin_templates(user: dict = Depends(auth.resolve_user)):
+    """
+    Built-in run templates from config.json (F4). Read-only — operators
+    edit them by editing config.json. User-saved templates (U10) coexist
+    with these in the template picker.
+    """
+    from core.utils import load_config
+    try:
+        cfg = load_config()
+    except FileNotFoundError:
+        return {"templates": []}
+    raw = cfg.get("run_templates", {}) or {}
+    out = []
+    for name, spec in raw.items():
+        if name.startswith("_"):
+            continue
+        out.append({
+            "name": name,
+            "description": spec.get("description", "") if isinstance(spec, dict) else "",
+            "config": spec if isinstance(spec, dict) else {},
+            "built_in": True,
+        })
+    return {"templates": out}
+
+
+# ---------------------------------------------------------------------------
+# Source blacklist (F8) — "don't cite this"
+# ---------------------------------------------------------------------------
+
+class BlacklistEntry(BaseModel):
+    match_type: str = Field(..., description="doi | url | title_substring")
+    match_value: str = Field(..., min_length=1)
+    reason: str = ""
+
+
+@app.get("/api/blacklist")
+def list_blacklist(user: dict = Depends(auth.resolve_user)):
+    """List the caller's source blacklist entries (F8)."""
+    return {"entries": db.list_blacklist(user["user_id"])}
+
+
+@app.post("/api/blacklist")
+def add_blacklist_entry(body: BlacklistEntry,
+                        user: dict = Depends(auth.resolve_user)):
+    """Add a source to the blacklist (F8)."""
+    if body.match_type not in ("doi", "url", "title_substring"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "match_type must be doi, url, or title_substring")
+    db.add_to_blacklist(user["user_id"], body.match_type,
+                        body.match_value, body.reason)
+    return {"ok": True}
+
+
+@app.delete("/api/blacklist")
+def remove_blacklist_entry(body: BlacklistEntry,
+                           user: dict = Depends(auth.resolve_user)):
+    """Remove a source from the blacklist (F8)."""
+    db.remove_from_blacklist(user["user_id"], body.match_type, body.match_value)
+    return {"ok": True}
+
+
 @app.post("/api/templates")
 def save_template(body: dict, user: dict = Depends(auth.resolve_user)):
     """Save a config template (model_overrides + source_overrides + limit)."""
@@ -820,6 +883,93 @@ def get_artifact(run_id: str, artifact_id: str,
             content = ""
 
     return {**artifact, "content": content}
+
+
+# Per-step artifact files on disk (F6). Every agent writes a markdown doc
+# to artifacts/{run_id}_{step}.md; this endpoint lists them so the UI can
+# show them alongside Scribe's curated artifacts.
+_STEP_LABELS = {
+    "grounder_foundations":   "Grounder — Foundations",
+    "historian_map":          "Historian — Chronological map",
+    "theorist_proposals":     "Theorist — Proposals",
+    "thinker_directions":     "Thinker — New directions",
+    "synthesizer_narrative":  "Synthesizer — Narrative",
+    "rude_evaluations":       "Rude — Evaluations",
+    "vision_implications":    "Vision — Implications",
+    "gaper_gaps":             "Gaper — Gap analysis",
+    "understanding_map":      "Scribe — Understanding Map",
+    "blog_post":              "Scribe — Blog post",
+    "break0_review":          "Break 0 — Review",
+    "break1_review":          "Break 1 — Review",
+    "break2_review":          "Break 2 — Review",
+}
+
+
+@app.get("/api/runs/{run_id}/step-artifacts")
+def list_step_artifacts(run_id: str, user: dict = Depends(auth.resolve_user)):
+    """
+    All markdown files in artifacts/ matching {run_id}_*.md (F6).
+
+    Returns:
+      {
+        "run_id": str,
+        "files": [
+          { "filename": str, "step_key": str, "label": str,
+            "size": int, "modified": str }
+        ]
+      }
+    """
+    auth.require_run_access(user, run_id)
+    artifacts_root = (Path(__file__).parent.parent / "artifacts").resolve()
+    files = []
+    if artifacts_root.exists():
+        for path in sorted(artifacts_root.glob(f"{run_id}_*.md")):
+            try:
+                resolved = path.resolve()
+                resolved.relative_to(artifacts_root)  # safety
+            except ValueError:
+                continue
+            # Extract step key: {run_id}_{step_key}.md
+            stem = path.stem  # filename without .md
+            step_key = stem[len(run_id) + 1:] if stem.startswith(run_id + "_") else stem
+            files.append({
+                "filename":  path.name,
+                "step_key":  step_key,
+                "label":     _STEP_LABELS.get(step_key, step_key.replace("_", " ").title()),
+                "size":      path.stat().st_size,
+                "modified":  datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+            })
+    return {"run_id": run_id, "files": files}
+
+
+@app.get("/api/runs/{run_id}/step-artifacts/{filename}")
+def get_step_artifact(run_id: str, filename: str,
+                      user: dict = Depends(auth.resolve_user)):
+    """Return the contents of one per-step artifact file (F6)."""
+    auth.require_run_access(user, run_id)
+    # Confine reads to artifacts/{run_id}_*.md — never anything else.
+    if not filename.endswith(".md") or not filename.startswith(f"{run_id}_"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid filename")
+    artifacts_root = (Path(__file__).parent.parent / "artifacts").resolve()
+    target = (artifacts_root / filename).resolve()
+    try:
+        target.relative_to(artifacts_root)
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid path")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Artifact not found")
+    try:
+        content = target.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning(f"Could not read {target}: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Read failed")
+    return {
+        "run_id":   run_id,
+        "filename": filename,
+        "step_key": filename[len(run_id) + 1:-len(".md")],
+        "content":  content,
+        "size":     target.stat().st_size,
+    }
 
 
 # ---------------------------------------------------------------------------

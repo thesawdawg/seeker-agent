@@ -364,6 +364,7 @@ function showNewRun() {
   buildSourceKeys();
   buildTemplateBar();
   buildPreviousRunPicker();
+  buildBlacklist();
   $('#new-error').hidden = true;
   $('#role-warning').hidden = true;
 }
@@ -386,25 +387,117 @@ async function buildPreviousRunPicker() {
   } catch { /* non-essential */ }
 }
 
-// Config template bar (review U10) — save/restore model + source overrides.
+// F8: source blacklist — list, add, remove entries.
+async function buildBlacklist() {
+  const box = $('#new-blacklist');
+  if (!box) return;
+  clear(box);
+  let entries = [];
+  try {
+    entries = (await api('/api/blacklist')).entries || [];
+  } catch { /* non-essential */ }
+
+  // Existing entries
+  if (entries.length) {
+    const list = el('ul', { class: 'blacklist-list' });
+    for (const e of entries) {
+      list.append(el('li', {},
+        el('span', { class: 'blacklist-type', text: e.match_type }),
+        el('span', { class: 'blacklist-value', text: e.match_value }),
+        e.reason ? el('span', { class: 'muted small', text: `— ${e.reason}` }) : null,
+        el('button', { class: 'btn btn-small', type: 'button',
+          onClick: async () => {
+            try {
+              await api('/api/blacklist', { method: 'DELETE', body: {
+                match_type: e.match_type, match_value: e.match_value,
+              }});
+              buildBlacklist();
+            } catch (err) { toast(err.message, 'error'); }
+          },
+        }, 'Remove'),
+      ));
+    }
+    box.append(list);
+  } else {
+    box.append(el('p', { class: 'muted small', text: 'No excluded sources yet.' }));
+  }
+
+  // Add form
+  const typeSelect = el('select', {},
+    el('option', { value: 'doi', text: 'DOI' }),
+    el('option', { value: 'url', text: 'URL' }),
+    el('option', { value: 'title_substring', text: 'Title contains' }),
+  );
+  const valueInput = el('input', {
+    type: 'text', placeholder: 'e.g. 10.1234/abc or "predatory journal"',
+    style: 'flex:1; min-width: 200px;',
+  });
+  const reasonInput = el('input', {
+    type: 'text', placeholder: 'reason (optional)',
+    style: 'flex:1; min-width: 150px;',
+  });
+  const addBtn = el('button', { class: 'btn btn-small', type: 'button',
+    onClick: async () => {
+      if (!valueInput.value.trim()) return;
+      try {
+        await api('/api/blacklist', { method: 'POST', body: {
+          match_type: typeSelect.value,
+          match_value: valueInput.value.trim(),
+          reason: reasonInput.value.trim(),
+        }});
+        valueInput.value = '';
+        reasonInput.value = '';
+        buildBlacklist();
+        toast('Added to blacklist', 'ok');
+      } catch (err) { toast(err.message, 'error'); }
+    },
+  }, 'Add');
+  box.append(el('div', { class: 'blacklist-add' },
+    typeSelect, valueInput, reasonInput, addBtn));
+}
+
+// Config template bar (review U10 + F4) — save/restore model + source
+// overrides. Built-in templates from config.json (F4) appear alongside
+// user-saved templates.
 async function buildTemplateBar() {
   const bar = $('#template-bar');
   if (!bar) return;
   clear(bar);
-  let templates = [];
-  try { templates = (await api('/api/templates')).templates || []; } catch {}
+
+  // Fetch user-saved and built-in templates in parallel.
+  const [userRes, builtinRes] = await Promise.all([
+    api('/api/templates').catch(() => ({ templates: [] })),
+    api('/api/templates/built-in').catch(() => ({ templates: [] })),
+  ]);
+  const userTpls    = (userRes.templates || []);
+  const builtinTpls = (builtinRes.templates || []);
+
+  const allTpls = [
+    ...builtinTpls.map(t => ({ ...t, _builtin: true })),
+    ...userTpls.map(t => ({ ...t, _builtin: false })),
+  ];
+
   const select = el('select', { id: 'template-select' },
     el('option', { value: '', text: '— load template —' }),
-    ...templates.map(t => el('option', { value: t.name, text: t.name })),
+    ...builtinTpls.map(t => el('option', { value: `builtin::${t.name}`,
+      text: `${t.name} (built-in)` })),
+    ...userTpls.length
+      ? [el('option', { disabled: true, text: '— your templates —' })]
+      : [],
+    ...userTpls.map(t => el('option', { value: `user::${t.name}`,
+      text: t.name })),
   );
   select.addEventListener('change', async () => {
-    const name = select.value;
-    if (!name) return;
-    const tpl = templates.find(t => t.name === name);
+    const value = select.value;
+    if (!value) return;
+    const [kind, name] = value.split('::');
+    const tpl = (kind === 'builtin' ? builtinTpls : userTpls)
+      .find(t => t.name === name);
     if (!tpl) return;
     // Apply template to the form
-    const mo = tpl.config.model_overrides || {};
-    const so = tpl.config.source_overrides || {};
+    const cfg = tpl.config || {};
+    const mo = cfg.model_overrides || {};
+    const so = cfg.source_overrides || {};
     // Set model selects
     $$('select[data-agent]', $('#new-model-grid')).forEach(sel => {
       const spec = mo[sel.dataset.agent];
@@ -416,7 +509,8 @@ async function buildTemplateBar() {
     });
     // Set limit
     const lim = $('#new-source-grid input[data-field="limit_per_source"]');
-    if (lim && so.limit_per_source) lim.value = so.limit_per_source;
+    if (lim && cfg.limit_per_source) lim.value = cfg.limit_per_source;
+    else if (lim && so.limit_per_source) lim.value = so.limit_per_source;
     toast(`Loaded template "${name}"`, 'ok');
   });
   const saveBtn = el('button', { class: 'btn btn-small', type: 'button',
@@ -1799,44 +1893,96 @@ async function submitBreak() {
 async function renderArtifacts() {
   const panel = $('#panel-artifacts');
   clear(panel);
-  const { artifacts } = await api(`/api/runs/${state.runId}/artifacts`);
 
-  if (!artifacts.length) {
+  // Fetch Scribe artifacts and per-step artifacts in parallel (F6).
+  const [scribeRes, stepRes] = await Promise.all([
+    api(`/api/runs/${state.runId}/artifacts`).catch(() => ({ artifacts: [] })),
+    api(`/api/runs/${state.runId}/step-artifacts`).catch(() => ({ files: [] })),
+  ]);
+  const artifacts = scribeRes.artifacts || [];
+  const stepFiles = stepRes.files || [];
+
+  if (!artifacts.length && !stepFiles.length) {
     panel.append(el('p', { class: 'empty',
-      text: 'No artifacts yet. Scribe produces them at the end of the run.' }));
+      text: 'No artifacts yet. The pipeline writes them as each step completes.' }));
     return;
   }
 
-  for (const artifact of artifacts) {
-    const body = el('div', { hidden: true });
-    panel.append(el('div', { class: 'item' },
-      el('div', { class: 'item-title',
-                  text: artifact.title || artifact.output_type }),
-      el('div', { class: 'item-meta',
-        text: [artifact.output_type, artifact.audience,
-               artifact.word_count ? `${artifact.word_count} words` : null,
-               shortTime(artifact.date_produced)].filter(Boolean).join(' · ') }),
-      el('div', { class: 'item-actions' },
-        el('button', { class: 'btn btn-small', type: 'button',
-          onClick: async ev => {
-            if (!body.hidden) { body.hidden = true; ev.target.textContent = 'View'; return; }
-            ev.target.disabled = true;
-            try {
-              const full = await api(
-                `/api/runs/${state.runId}/artifacts/${artifact.artifact_id}`);
-              clear(body);
-              body.append(el('div', { class: 'narrative',
-                text: full.content || '(the file is missing on disk)' }));
-              body.hidden = false;
-              ev.target.textContent = 'Hide';
-            } catch (err) {
-              toast(err.message, 'error');
-            } finally { ev.target.disabled = false; }
-          },
-        }, 'View'),
-      ),
-      body,
-    ));
+  // Scribe's curated artifacts (the original Artifacts tab content).
+  if (artifacts.length) {
+    panel.append(el('h3', {}, 'Scribe artifacts'),
+      el('p', { class: 'muted small' },
+        'Final outputs produced by Scribe at the end of the run.'));
+    for (const artifact of artifacts) {
+      const body = el('div', { hidden: true });
+      panel.append(el('div', { class: 'item' },
+        el('div', { class: 'item-title',
+                    text: artifact.title || artifact.output_type }),
+        el('div', { class: 'item-meta',
+          text: [artifact.output_type, artifact.audience,
+                 artifact.word_count ? `${artifact.word_count} words` : null,
+                 shortTime(artifact.date_produced)].filter(Boolean).join(' · ') }),
+        el('div', { class: 'item-actions' },
+          el('button', { class: 'btn btn-small', type: 'button',
+            onClick: async ev => {
+              if (!body.hidden) { body.hidden = true; ev.target.textContent = 'View'; return; }
+              ev.target.disabled = true;
+              try {
+                const full = await api(
+                  `/api/runs/${state.runId}/artifacts/${artifact.artifact_id}`);
+                clear(body);
+                body.append(el('div', { class: 'narrative',
+                  text: full.content || '(the file is missing on disk)' }));
+                body.hidden = false;
+                ev.target.textContent = 'Hide';
+              } catch (err) {
+                toast(err.message, 'error');
+              } finally { ev.target.disabled = false; }
+            },
+          }, 'View'),
+        ),
+        body,
+      ));
+    }
+  }
+
+  // Per-step artifacts (F6) — every agent's markdown doc.
+  if (stepFiles.length) {
+    if (artifacts.length) panel.append(el('hr', {}));
+    panel.append(el('h3', {}, 'Per-step documents'),
+      el('p', { class: 'muted small' },
+        'Each agent writes a markdown document as it runs. These are the ' +
+        'raw outputs behind the Understanding Map — useful for tracing ' +
+        'how a claim entered the synthesis.'));
+    for (const f of stepFiles) {
+      const body = el('div', { hidden: true });
+      panel.append(el('div', { class: 'item' },
+        el('div', { class: 'item-title', text: f.label }),
+        el('div', { class: 'item-meta',
+          text: [`${(f.size / 1024).toFixed(1)} KB`, shortTime(f.modified)]
+            .filter(Boolean).join(' · ') }),
+        el('div', { class: 'item-actions' },
+          el('button', { class: 'btn btn-small', type: 'button',
+            onClick: async ev => {
+              if (!body.hidden) { body.hidden = true; ev.target.textContent = 'View'; return; }
+              ev.target.disabled = true;
+              try {
+                const full = await api(
+                  `/api/runs/${state.runId}/step-artifacts/${encodeURIComponent(f.filename)}`);
+                clear(body);
+                body.append(el('div', { class: 'narrative',
+                  text: full.content || '(empty)' }));
+                body.hidden = false;
+                ev.target.textContent = 'Hide';
+              } catch (err) {
+                toast(err.message, 'error');
+              } finally { ev.target.disabled = false; }
+            },
+          }, 'View'),
+        ),
+        body,
+      ));
+    }
   }
 }
 
