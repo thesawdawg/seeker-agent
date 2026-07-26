@@ -527,7 +527,6 @@ For each seminal work, use the exact title and author from the sources above whe
             data = {}
         if not data:
             logger.warning("[Grounder] Synthesis JSON parse failed — partial result")
-            from core import progress
             progress.warn("Synthesis JSON parse failed — seminal works and themes may be incomplete. The raw LLM response was kept in intellectual_genealogy.")
             data = {
                 "themes_extracted": [], "seminal_works": [],
