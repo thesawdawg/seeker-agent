@@ -50,7 +50,22 @@ CREATE TABLE IF NOT EXISTS user_credentials (
     UNIQUE (user_id, provider)
 );
 
+-- Per-user academic source API keys (review U2). A multi-user deployment
+-- can't have every user's Scopus/CORE key in one .env file. Stored
+-- encrypted, same as provider credentials, and never returned to the client.
+CREATE TABLE IF NOT EXISTS user_source_credentials (
+    cred_id       {ID} PRIMARY KEY,
+    user_id       {ID} NOT NULL,
+    source_id     {KEY} NOT NULL,                -- scopus / semantic_scholar / core / ...
+    api_key_enc   {LONGTEXT},
+    key_hint      {KEY},
+    created_at    {TEXT} NOT NULL,
+    updated_at    {TEXT},
+    UNIQUE (user_id, source_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_user_creds_user ON user_credentials(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_source_creds ON user_source_credentials(user_id);
 """
 
 _schema_ready = False
@@ -290,3 +305,64 @@ def runs_for_user(user_id: str) -> list[str]:
     init_run_owners()
     rows = db.fetch("run_owners", {"user_id": user_id})
     return [r["run_id"] for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Per-user academic source API keys (review U2)
+# ---------------------------------------------------------------------------
+
+def set_source_credentials(user_id: str, source_id: str, api_key: str) -> dict:
+    """Store a user's API key for one academic source (Scopus, CORE, ...)."""
+    init_users_tables()
+    encrypted = crypto.encrypt(api_key) if api_key else ""
+    existing = db.fetch("user_source_credentials",
+                        {"user_id": user_id, "source_id": source_id})
+    existing = existing[0] if existing else {}
+    record = {
+        "cred_id":     existing.get("cred_id") or generate_id("SCRD"),
+        "user_id":     user_id,
+        "source_id":   source_id,
+        "api_key_enc": encrypted,
+        "key_hint":    crypto.mask(api_key),
+        "created_at":  existing.get("created_at") or _now(),
+        "updated_at":  _now(),
+    }
+    db.insert("user_source_credentials", record)
+    return public_source_credentials(record)
+
+
+def get_source_credentials_row(user_id: str, source_id: str) -> Optional[dict]:
+    init_users_tables()
+    rows = db.fetch("user_source_credentials",
+                    {"user_id": user_id, "source_id": source_id})
+    return rows[0] if rows else None
+
+
+def get_source_api_key(user_id: str, source_id: str) -> str:
+    """Decrypt and return a user's key for a source, or '' if not stored."""
+    row = get_source_credentials_row(user_id, source_id)
+    if not row:
+        return ""
+    return crypto.decrypt(row.get("api_key_enc") or "")
+
+
+def list_source_credentials(user_id: str) -> list[dict]:
+    init_users_tables()
+    return [public_source_credentials(r)
+            for r in db.fetch("user_source_credentials", {"user_id": user_id})]
+
+
+def public_source_credentials(row: dict) -> dict:
+    return {
+        "source_id":  row.get("source_id"),
+        "key_hint":   row.get("key_hint"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def delete_source_credentials(user_id: str, source_id: str) -> bool:
+    init_users_tables()
+    return db.execute(
+        "DELETE FROM user_source_credentials WHERE user_id = ? AND source_id = ?",
+        (user_id, source_id),
+    )

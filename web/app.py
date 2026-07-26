@@ -92,6 +92,10 @@ class CreateRunRequest(BaseModel):
         default_factory=dict,
         description='Per-agent overrides, e.g. {"grounder": {"model": "qwen3:32b"}}',
     )
+    source_overrides: dict = Field(
+        default_factory=dict,
+        description='Per-run source enable/disable, e.g. {"scopus": true, "arxiv": false} (review U1)',
+    )
 
 
 class BreakSubmission(BaseModel):
@@ -104,6 +108,15 @@ class BreakSubmission(BaseModel):
         default_factory=dict,
         description="Change models for the agents that have not run yet",
     )
+    source_overrides: dict = Field(
+        default_factory=dict,
+        description="Per-run source enable/disable changes for the steps still to run",
+    )
+
+
+class SourceCredentialRequest(BaseModel):
+    source_id: str = Field(..., description="e.g. scopus, semantic_scholar, core")
+    api_key: str
 
 
 class ModelRolesRequest(BaseModel):
@@ -221,6 +234,29 @@ def delete_credentials(provider: str, user: dict = Depends(auth.resolve_user)):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Source credentials — per-user academic source API keys (review U2)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/source-credentials")
+def list_source_credentials(user: dict = Depends(auth.resolve_user)):
+    return {"credentials": users.list_source_credentials(user["user_id"])}
+
+
+@app.put("/api/source-credentials")
+def put_source_credentials(body: SourceCredentialRequest,
+                           user: dict = Depends(auth.resolve_user)):
+    """Add or replace a user's API key for one academic source."""
+    stored = users.set_source_credentials(user["user_id"], body.source_id, body.api_key)
+    return {"credential": stored}
+
+
+@app.delete("/api/source-credentials/{source_id}")
+def delete_source_credentials(source_id: str, user: dict = Depends(auth.resolve_user)):
+    users.delete_source_credentials(user["user_id"], source_id)
+    return {"ok": True}
+
+
 @app.get("/api/models")
 def list_models(provider: str = "open-webui",
                 user: dict = Depends(auth.resolve_user)):
@@ -287,6 +323,8 @@ def create_run(body: CreateRunRequest, user: dict = Depends(auth.resolve_user)):
     users.claim_run(run_id, user["user_id"], body.provider)
     if body.model_overrides:
         _store_model_overrides(run_id, body.model_overrides)
+    if body.source_overrides:
+        pipeline.set_source_overrides(run_id, body.source_overrides)
 
     job_id = jobs.enqueue(run_id)
     logger.info(f"Run {run_id} created by {user['user_id']} (job {job_id})")
@@ -306,6 +344,7 @@ def get_run(run_id: str, user: dict = Depends(auth.resolve_user)):
                       "evaluations", "directions", "artifacts")
     }
     state["model_overrides"] = pipeline.get_model_overrides(run_id)
+    state["source_overrides"] = pipeline.get_source_overrides(run_id)
     return state
 
 
@@ -356,6 +395,90 @@ def advance_run(run_id: str, user: dict = Depends(auth.resolve_user)):
     """Nudge a run — queue work for it. Safe to call repeatedly."""
     auth.require_run_access(user, run_id)
     return {"job_id": jobs.enqueue(run_id), "state": pipeline.get_state(run_id)}
+
+
+@app.get("/api/runs/{run_id}/sources")
+def run_sources(run_id: str, user: dict = Depends(auth.resolve_user)):
+    """
+    Per-source health and coverage for a run (review U3).
+
+    Combines the source_health table (which sources succeeded/failed and how
+    many results each returned) with the actual sources inserted, so the
+    researcher can judge whether the Understanding Map is trustworthy.
+    """
+    auth.require_run_access(user, run_id)
+    health = db.get_source_health(run_id)
+    # Count actual sources inserted per source_name
+    rows = db.query(
+        "SELECT source_name, COUNT(*) AS n FROM sources WHERE run_id = ? GROUP BY source_name",
+        (run_id,),
+    )
+    inserted = {r["source_name"]: int(r["n"]) for r in rows}
+    return {
+        "run_id": run_id,
+        "health": health,
+        "inserted": inserted,
+    }
+
+
+@app.get("/api/sources/health")
+def sources_health(user: dict = Depends(auth.resolve_user)):
+    """
+    Pre-flight: which sources are ready to use for this user (review R8).
+
+    For each configured source, reports whether it is enabled, whether a key
+    is available (env or the user's stored source credentials), and whether
+    it is currently marked exhausted. Lets the New Run screen show
+    "Scopus will be skipped — no key set" before the run starts.
+    """
+    config = load_config()
+    sources_cfg = config.get("sources", {})
+    agent_sources = config.get("agent_sources", {})
+    # Sources referenced anywhere in agent_sources
+    referenced: set[str] = set()
+    for srcs in agent_sources.values():
+        if isinstance(srcs, list):
+            referenced.update(s for s in srcs if isinstance(s, str))
+
+    # Map source_id -> env var name for the key check
+    key_env = {
+        "openalex": "OPENALEX_API_KEY",
+        "pubmed": "NCBI_API_KEY",
+        "semantic_scholar": "SEMANTIC_SCHOLAR_API_KEY",
+        "core": "CORE_API_KEY",
+        "philpapers": "PHILPAPERS_API_KEY",
+        "scopus": "SCOPUS_API_KEY",
+        "google_books": "GOOGLE_BOOKS_API_KEY",
+    }
+    # Sources that work without any key
+    keyless = {"arxiv", "philarchive", "philsci", "open_library", "jstor",
+               "ssrn", "base", "hal", "eric", "nber", "persee", "crossref", "web"}
+
+    out = []
+    for source_id in sorted(referenced | set(sources_cfg.keys())):
+        enabled = sources_cfg.get(source_id, {}).get("enabled", True)
+        env_var = key_env.get(source_id)
+        has_key = False
+        note = ""
+        if source_id in keyless:
+            has_key = True
+            note = "keyless"
+        elif env_var:
+            env_set = bool(os.environ.get(env_var, "").strip())
+            stored = bool(users.get_source_api_key(user["user_id"], source_id))
+            has_key = env_set or stored
+            note = "env" if env_set else ("stored" if stored else "no key — will skip")
+        else:
+            note = "no key check defined"
+        exhausted_until = db.source_exhausted_until(source_id, user["user_id"])
+        out.append({
+            "source_id": source_id,
+            "enabled": enabled,
+            "has_key": has_key,
+            "note": note,
+            "exhausted_until": exhausted_until,
+        })
+    return {"sources": out}
 
 
 @app.post("/api/runs/{run_id}/stop")
@@ -477,6 +600,8 @@ def submit_break(run_id: str, break_num: int, body: BreakSubmission,
     # A break is the safe point to change models for the agents still to come
     if body.model_overrides:
         _store_model_overrides(run_id, body.model_overrides)
+    if body.source_overrides:
+        pipeline.set_source_overrides(run_id, body.source_overrides)
 
     result = pipeline.submit_break(run_id, break_num, combined, source="web")
     job_id = jobs.enqueue(run_id)

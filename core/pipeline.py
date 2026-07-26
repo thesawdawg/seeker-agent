@@ -68,6 +68,16 @@ CREATE TABLE IF NOT EXISTS run_model_overrides (
     overrides   {LONGTEXT} NOT NULL,   -- JSON {agent: {model, provider, ...}}
     updated_at  {TEXT}
 );
+
+-- Per-run source enable/disable overrides (review U1). A researcher can
+-- drop arXiv for a humanities run or add Scopus when they have access,
+-- without editing config.json. JSON: {source_id: bool} applied on top of
+-- config.sources.<name>.enabled and config.agent_sources.<agent>.
+CREATE TABLE IF NOT EXISTS run_source_overrides (
+    run_id      {ID} PRIMARY KEY,
+    overrides   {LONGTEXT} NOT NULL,   -- JSON {source_id: true/false}
+    updated_at  {TEXT}
+);
 """
 
 _schema_ready = False
@@ -796,6 +806,70 @@ def apply_model_overrides(run_id: str) -> dict:
     if overrides:
         llm.set_run_overrides(run_id, overrides)
     return overrides
+
+
+# ---------------------------------------------------------------------------
+# Per-run source overrides (review U1)
+# ---------------------------------------------------------------------------
+
+def set_source_overrides(run_id: str, overrides: dict) -> dict:
+    """Record per-run source enable/disable choices. Merges with existing."""
+    import json
+    init_steps_table()
+    cleaned = {str(k).lower(): bool(v)
+               for k, v in (overrides or {}).items() if isinstance(v, bool)}
+    if not cleaned:
+        return get_source_overrides(run_id)
+    merged = get_source_overrides(run_id)
+    merged.update(cleaned)
+    db.insert("run_source_overrides", {
+        "run_id":     run_id,
+        "overrides":  json.dumps(merged),
+        "updated_at": _now(),
+    })
+    return merged
+
+
+def get_source_overrides(run_id: str) -> dict:
+    """Stored per-run source enable/disable choices."""
+    import json
+    init_steps_table()
+    rows = db.fetch("run_source_overrides", {"run_id": run_id})
+    if not rows:
+        return {}
+    try:
+        return json.loads(rows[0].get("overrides") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def apply_source_overrides(run_id: str, config: dict) -> dict:
+    """
+    Merge a run's source overrides into the config dict the agents see.
+
+    The worker calls this before advancing. Overrides are {source_id: bool};
+    True forces a source on, False forces it off. This updates both
+    config.sources.<name>.enabled and prunes config.agent_sources.<agent>
+    lists, so the agents' existing config reads pick up the change.
+    """
+    overrides = get_source_overrides(run_id)
+    if not overrides:
+        return config
+    import copy
+    cfg = copy.deepcopy(config)
+    sources_cfg = cfg.setdefault("sources", {})
+    for source_id, enabled in overrides.items():
+        sources_cfg.setdefault(source_id, {})["enabled"] = enabled
+    # Also prune agent_sources lists so a disabled source is not even
+    # attempted (the agents iterate agent_sources.<agent>).
+    agent_sources = cfg.get("agent_sources", {})
+    for agent, src_list in agent_sources.items():
+        if isinstance(src_list, list):
+            agent_sources[agent] = [
+                s for s in src_list
+                if overrides.get(s, sources_cfg.get(s, {}).get("enabled", True))
+            ]
+    return cfg
 
 
 def create_run(problem: str, run_id: str = None) -> str:

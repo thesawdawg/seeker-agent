@@ -324,8 +324,113 @@ function showNewRun() {
   }
   buildRoleGrid();
   buildModelGrid($('#new-model-grid'));
+  buildSourceGrid();
+  buildSourceKeys();
   $('#new-error').hidden = true;
   $('#role-warning').hidden = true;
+}
+
+// Pre-flight source health + per-run source enable/disable (review U1 + R8).
+// Fetches /api/sources/health once per New Run open and renders a checkbox
+// per source with a readiness indicator.
+async function buildSourceGrid() {
+  const container = $('#new-source-grid');
+  if (!container) return;
+  clear(container);
+  container.append(el('p', { class: 'muted small', text: 'Loading source status…' }));
+  let health;
+  try {
+    health = await api('/api/sources/health');
+  } catch (err) {
+    clear(container);
+    container.append(el('p', { class: 'muted small',
+      text: `Could not load source status: ${err.message}` }));
+    return;
+  }
+  clear(container);
+  const sources = health.sources || [];
+  if (!sources.length) {
+    container.append(el('p', { class: 'muted small',
+      text: 'No sources configured in config.json.' }));
+    return;
+  }
+  for (const s of sources) {
+    const checked = s.enabled;
+    const indicator = s.has_key ? '✓' : '⚠';
+    const indicatorClass = s.has_key ? 'src-ok' : 'src-warn';
+    const note = s.note || '';
+    container.append(el('label', { class: 'source-row' },
+      el('input', { type: 'checkbox', 'data-source': s.source_id, checked }),
+      el('span', { class: 'source-name', text: s.source_id }),
+      el('span', { class: `source-indicator ${indicatorClass}`, text: indicator,
+                   title: note }),
+      el('span', { class: 'muted small', text: note }),
+    ));
+  }
+}
+
+function collectSourceOverrides(container) {
+  const overrides = {};
+  for (const cb of container.querySelectorAll('input[type=checkbox][data-source]')) {
+    overrides[cb.dataset.source] = cb.checked;
+  }
+  return overrides;
+}
+
+// Per-user academic source API keys (review U2). Lets a researcher add a
+// Scopus/CORE/... key inline on the New Run screen.
+function buildSourceKeys() {
+  const container = $('#new-source-keys');
+  if (!container) return;
+  clear(container);
+  const keyable = ['scopus', 'semantic_scholar', 'core', 'google_books',
+                   'philpapers', 'openalex', 'pubmed'];
+  const row = el('div', { class: 'source-key-row' },
+    el('select', { id: 'src-key-source' },
+      ...keyable.map(s => el('option', { value: s, text: s }))),
+    el('input', { type: 'password', id: 'src-key-value',
+                  placeholder: 'API key', autocomplete: 'off' }),
+    el('button', { class: 'btn btn-small', type: 'button', id: 'btn-save-src-key',
+                   onClick: saveSourceKey }, 'Save'),
+  );
+  container.append(row);
+  // List existing source keys
+  api('/api/source-credentials').then(res => {
+    const list = (res.credentials || []);
+    if (!list.length) return;
+    container.append(el('div', { class: 'source-key-list' },
+      ...list.map(c => el('div', { class: 'source-key-item' },
+        el('span', { text: c.source_id }),
+        el('span', { class: 'muted small', text: c.key_hint || '••••' }),
+        el('button', { class: 'btn btn-ghost btn-small', type: 'button',
+          onClick: () => deleteSourceKey(c.source_id) }, 'Remove'),
+      )),
+    ));
+  }).catch(() => {});
+}
+
+async function saveSourceKey() {
+  const sourceId = $('#src-key-source').value;
+  const value = $('#src-key-value').value;
+  if (!value) return;
+  try {
+    await api('/api/source-credentials', {
+      method: 'PUT', body: { source_id: sourceId, api_key: value } });
+    $('#src-key-value').value = '';
+    toast(`Key for ${sourceId} saved.`, 'ok');
+    buildSourceKeys();
+    buildSourceGrid();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteSourceKey(sourceId) {
+  try {
+    await api(`/api/source-credentials/${encodeURIComponent(sourceId)}`,
+              { method: 'DELETE' });
+    toast(`Key for ${sourceId} removed.`, 'ok');
+    buildSourceKeys();
+    buildSourceGrid();
+  } catch (err) { toast(err.message, 'error'); }
 }
 
 function wireNewRun() {
@@ -367,6 +472,7 @@ function wireNewRun() {
           problem:  $('#new-problem').value.trim(),
           provider: $('#new-provider').value,
           model_overrides: collectModelOverrides($('#new-model-grid')),
+          source_overrides: collectSourceOverrides($('#new-source-grid')),
         },
       });
       $('#new-problem').value = '';
@@ -875,6 +981,7 @@ function renderOverview(status) {
     if (note) {
       clear(note);
       const overrides = detail.model_overrides || {};
+      const srcOverrides = detail.source_overrides || {};
       if (Object.keys(overrides).length) {
         note.append(el('div', { class: 'review-group' },
           el('h3', {}, 'Model routing for this run'),
@@ -882,6 +989,20 @@ function renderOverview(status) {
             text: Object.entries(overrides)
               .map(([agent, spec]) => `${agent}: ${spec.model || spec.provider || ''}`)
               .join('\n') }),
+        ));
+      }
+      const offSources = Object.entries(srcOverrides)
+        .filter(([, v]) => v === false).map(([k]) => k);
+      const onSources = Object.entries(srcOverrides)
+        .filter(([, v]) => v === true).map(([k]) => k);
+      if (offSources.length || onSources.length) {
+        note.append(el('div', { class: 'review-group' },
+          el('h3', {}, 'Sources for this run'),
+          el('div', { class: 'directive-preview',
+            text: [
+              onSources.length ? `Forced on: ${onSources.join(', ')}` : '',
+              offSources.length ? `Forced off: ${offSources.join(', ')}` : '',
+            ].filter(Boolean).join('\n') }),
         ));
       }
     }
@@ -1304,6 +1425,7 @@ async function submitBreak() {
         directives: buildDirectives(draft),
         instructions: draft.freeText.trim(),
         model_overrides: collectModelOverrides($('#panel-break')),
+        source_overrides: collectSourceOverrides($('#panel-break')),
       },
     });
     toast('Submitted — the pipeline is moving again.', 'ok');
@@ -1371,14 +1493,69 @@ function switchTab(name) {
   $$('.tab').forEach(t => t.classList.toggle('is-active', t.dataset.tab === name));
   $('#panel-overview').hidden  = name !== 'overview';
   $('#panel-break').hidden     = name !== 'break';
+  $('#panel-sources').hidden   = name !== 'sources';
   $('#panel-artifacts').hidden = name !== 'artifacts';
 
   if (name === 'artifacts') renderArtifacts().catch(err => toast(err.message, 'error'));
   if (name === 'overview' && state.status) renderOverview(state.status);
+  if (name === 'sources') renderSources().catch(err => toast(err.message, 'error'));
   if (name === 'break' && !state.breakDraft && state.status &&
       state.status.awaiting_break !== null) {
     openBreak(state.status.awaiting_break).catch(err => toast(err.message, 'error'));
   }
+}
+
+// Per-run source health + coverage (review U3). Shows which sources
+// succeeded / failed / were skipped, how many results each returned, and
+// how many made it into the Understanding Map.
+async function renderSources() {
+  const panel = $('#panel-sources');
+  if (!panel) return;
+  clear(panel);
+  panel.append(el('p', { class: 'muted small', text: 'Loading source health…' }));
+  let data;
+  try {
+    data = await api(`/api/runs/${state.runId}/sources`);
+  } catch (err) {
+    clear(panel);
+    panel.append(el('p', { class: 'muted small', text: err.message }));
+    return;
+  }
+  clear(panel);
+  const health = data.health || [];
+  const inserted = data.inserted || {};
+  if (!health.length) {
+    panel.append(el('p', { class: 'muted small',
+      text: 'No source activity yet — the gathering steps have not run.' }));
+    return;
+  }
+  panel.append(el('h3', {}, 'Source coverage'),
+    el('p', { class: 'muted small',
+      text: 'Each source the gathering steps queried, with its outcome and '
+          + 'how many results made it into the Understanding Map.' }),
+    el('table', { class: 'source-table' },
+      el('thead', {},
+        el('tr', {},
+          el('th', { text: 'Source' }),
+          el('th', { text: 'Step' }),
+          el('th', { text: 'Status' }),
+          el('th', { text: 'Results' }),
+          el('th', { text: 'Inserted' }),
+          el('th', { text: 'Last error' }),
+        ),
+      ),
+      el('tbody', {},
+        ...health.map(h => el('tr', {},
+          el('td', { text: h.source_id }),
+          el('td', { text: h.step || '' }),
+          el('td', { class: `src-status is-${h.status}`, text: h.status }),
+          el('td', { text: h.results_returned ?? '' }),
+          el('td', { text: inserted[h.source_id] ?? 0 }),
+          el('td', { class: 'muted small', text: (h.last_error || '').slice(0, 80) }),
+        )),
+      ),
+    ),
+  );
 }
 
 function wireChrome() {

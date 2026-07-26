@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SEEKER</title>
-  <link rel="stylesheet" href="/static/style.css?v=6">
+  <link rel="stylesheet" href="/static/style.css?v=7">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔎</text></svg>">
 </head>
 <body>
@@ -133,6 +133,26 @@
         <div id="new-model-grid" class="model-grid"></div>
       </details>
 
+      <details class="disclosure">
+        <summary>Sources <span class="muted">(optional — review U1)</span></summary>
+        <p class="muted small">
+          Pick which academic sources this run will query. Sources you
+          disable here are skipped entirely. A source with no key is shown
+          but will be skipped at run time — add a key below or in your
+          <code>.env</code>.
+        </p>
+        <div id="new-source-grid" class="source-grid"></div>
+      </details>
+
+      <details class="disclosure">
+        <summary>Source API keys <span class="muted">(optional — review U2)</span></summary>
+        <p class="muted small">
+          Store a per-user key for an academic source (Scopus, CORE, …).
+          Used instead of the matching <code>.env</code> var for your runs.
+        </p>
+        <div id="new-source-keys" class="source-keys"></div>
+      </details>
+
       <button class="btn btn-primary" type="submit" id="btn-start-run">
         Start run
       </button>
@@ -167,11 +187,13 @@
         <nav class="tabs" id="run-tabs">
           <button class="tab is-active" data-tab="overview" type="button">Overview</button>
           <button class="tab" data-tab="break" type="button" id="tab-break" hidden>Break</button>
+          <button class="tab" data-tab="sources" type="button">Sources</button>
           <button class="tab" data-tab="artifacts" type="button">Artifacts</button>
         </nav>
 
         <div class="tab-panel" id="panel-overview"></div>
         <div class="tab-panel" id="panel-break" hidden></div>
+        <div class="tab-panel" id="panel-sources" hidden></div>
         <div class="tab-panel" id="panel-artifacts" hidden></div>
       </div>
     </div>
@@ -192,6 +214,6 @@
 
 <div class="toast-stack" id="toasts"></div>
 
-<script src="/static/app.js?v=6"></script>
+<script src="/static/app.js?v=7"></script>
 </body>
 </html>

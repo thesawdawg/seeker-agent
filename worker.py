@@ -36,6 +36,7 @@ _load_env()
 
 from core import database as db
 from core import jobs, llm, pipeline, users
+from core import rate_limiter
 from core.utils import load_config, setup_logging
 
 logger = logging.getLogger("worker")
@@ -157,9 +158,21 @@ def process_job(job: dict, config: dict) -> None:
 
     try:
         _register_user_providers(run_id)
+        # Bind the run's owner to the rate limiter so the global daily call
+        # limit (review R4) is shared across all of this user's runs.
+        owner = users.run_owner(run_id)
+        if owner:
+            rate_limiter.set_run_user(run_id, owner["user_id"])
+            # Make the owner's per-source API keys available to the handlers
+            # (review U2). The keys module checks this context before env.
+            from core import keys
+            keys.set_current_user(owner["user_id"])
         # Model choices were made in the web process — load them here
         pipeline.apply_model_overrides(run_id)
-        state = _advance_with_stop_deadline(run_id, config)
+        # Per-run source enable/disable choices (review U1) — merge into the
+        # config the agents will see.
+        run_config = pipeline.apply_source_overrides(run_id, config)
+        state = _advance_with_stop_deadline(run_id, run_config)
         if state is None:
             # Abandoned past the stop deadline; the run is already at rest
             jobs.finish(job_id, "done", error="stopped by request (forced)")
@@ -196,6 +209,12 @@ def process_job(job: dict, config: dict) -> None:
         # Credentials are per-run and must not outlive the job in memory
         llm.clear_run_providers(run_id)
         llm.clear_run_overrides(run_id)
+        # Drop this run's rate limiter so the per-run dict doesn't grow
+        # unbounded across runs (review R2).
+        rate_limiter.clear_limiter(run_id)
+        # Clear the per-run source-key user context (review U2).
+        from core import keys
+        keys.clear_current_user()
 
 
 def main():
@@ -216,6 +235,8 @@ def main():
     users.init_users_tables()
     users.init_run_owners()
     config = load_config()
+    # Feed the rate_limiting config (if any) to new limiters (review R5).
+    rate_limiter.configure(config)
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)

@@ -45,31 +45,47 @@ class SourceHandler:
 
     def _get(self, url: str, params: dict = None, timeout: int = 15,
              run_id: str = "") -> Optional[dict]:
-        """Rate-limited GET with backoff on 429/5xx."""
+        """Rate-limited GET with backoff on 429/5xx.
+
+        Honours Retry-After headers, records success/failure to feed the
+        circuit breaker, and skips the call entirely when the daily limit is
+        reached or the breaker is tripped.
+        """
+        from core.rate_limiter import SourceUnavailable, _parse_retry_after
         limiter = get_limiter(run_id)
-        limiter.wait(self.SOURCE_ID)
+        try:
+            ok = limiter.wait(self.SOURCE_ID)
+        except SourceUnavailable:
+            return None
+        if not ok:
+            logger.info(f"[{self.SOURCE_ID}] daily limit reached — skipping {url}")
+            return None
         for attempt in range(3):
             try:
                 resp = requests.get(url, params=params, timeout=timeout,
                                     headers={"User-Agent": "PipelineResearchBot/1.0 mailto:pipeline@research.local"})
-                if resp.status_code == 429:
-                    limiter.backoff(self.SOURCE_ID, attempt, 429)
-                    continue
-                if resp.status_code >= 500:
-                    limiter.backoff(self.SOURCE_ID, attempt, resp.status_code)
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    retry_after = _parse_retry_after(resp.headers.get("Retry-After", ""))
+                    limiter.backoff(self.SOURCE_ID, attempt, resp.status_code, retry_after=retry_after)
                     continue
                 resp.raise_for_status()
-                return resp.json()
+                data = resp.json()
+                limiter.record_success(self.SOURCE_ID)
+                return data
             except requests.exceptions.Timeout:
                 logger.warning(f"[{self.SOURCE_ID}] Timeout (attempt {attempt+1}): {url}")
                 if attempt < 2:
-                    limiter.backoff(self.SOURCE_ID, attempt, 0)
+                    limiter.backoff(self.SOURCE_ID, attempt, status_code=None)
             except requests.exceptions.ConnectionError as e:
-                logger.warning(f"[{self.SOURCE_ID}] Connection error: {e}")
+                logger.warning(f"[{self.SOURCE_ID}] Connection error (attempt {attempt+1}): {e}")
+                if attempt < 2:
+                    limiter.backoff(self.SOURCE_ID, attempt, status_code=None)
+                    continue
                 return None
             except Exception as e:
                 logger.warning(f"[{self.SOURCE_ID}] Error: {e}")
                 return None
+        limiter.record_failure(self.SOURCE_ID)
         return None
 
     def _check_link(self, url: str) -> str:
@@ -704,18 +720,110 @@ class ConsensusHandler(SourceHandler):
             )
             return []
 
+        from core.rate_limiter import SourceUnavailable
         limiter = get_limiter(run_id)
-        limiter.wait(self.SOURCE_ID)
+        try:
+            ok = limiter.wait(self.SOURCE_ID)
+        except SourceUnavailable:
+            return []
+        if not ok:
+            logger.info(f"[{self.SOURCE_ID}] daily limit reached — skipping")
+            return []
 
         try:
             results = search_consensus(query, limit=limit)
+            limiter.record_success(self.SOURCE_ID)
             logger.info(
                 f"[Consensus] '{query}' → {len(results)} results (MCP)"
             )
             return results
         except Exception as e:
             logger.warning(f"[Consensus] Search failed: {e}")
+            limiter.record_failure(self.SOURCE_ID)
             return []
+
+
+# ---------------------------------------------------------------------------
+# Google Books — foundational books for Grounder (review O1: consolidated
+# here from grounder.py's _search_google_books so it routes through the
+# shared rate limiter / retry / circuit-breaker machinery).
+# ---------------------------------------------------------------------------
+
+class GoogleBooksHandler(SourceHandler):
+    SOURCE_ID = "google_books"
+    BASE_URL  = "https://www.googleapis.com/books/v1/volumes"
+
+    def search(self, query: str, keywords: list[str], limit: int = 10,
+               run_id: str = "") -> list[dict]:
+        from core.keys import google_books as get_key
+        api_key = get_key()
+        params = {"q": query, "maxResults": limit, "orderBy": "relevance",
+                  "printType": "books", "langRestrict": "en"}
+        if api_key:
+            params["key"] = api_key
+        data = self._get(self.BASE_URL, params=params, run_id=run_id)
+        if not data:
+            return []
+        results = []
+        for item in (data.get("items") or [])[:limit]:
+            info = item.get("volumeInfo", {})
+            isbn = ""
+            for id_obj in info.get("industryIdentifiers", []):
+                if id_obj.get("type") in ("ISBN_13", "ISBN_10"):
+                    isbn = id_obj.get("identifier", "")
+                    break
+            year = None
+            pub_date = info.get("publishedDate", "")
+            if pub_date and len(pub_date) >= 4:
+                year = int(pub_date[:4]) if pub_date[:4].isdigit() else None
+            results.append({
+                "title":         info.get("title", ""),
+                "authors":       info.get("authors", [])[:3],
+                "year":          year,
+                "material_type": "book",
+                "source_name":   self.SOURCE_ID,
+                "doi":           "",
+                "isbn":          isbn,
+                "abstract":      (info.get("description") or "")[:800],
+                "active_link":   info.get("canonicalVolumeLink", "")
+                                 or f"https://books.google.com/books?id={item.get('id','')}",
+            })
+        return results
+
+
+# ---------------------------------------------------------------------------
+# Open Library — foundational books, no key needed (review O1).
+# ---------------------------------------------------------------------------
+
+class OpenLibraryHandler(SourceHandler):
+    SOURCE_ID = "open_library"
+    BASE_URL  = "https://openlibrary.org/search.json"
+
+    def search(self, query: str, keywords: list[str], limit: int = 10,
+               run_id: str = "") -> list[dict]:
+        params = {"q": query, "limit": limit,
+                  "fields": "title,author_name,first_publish_year,isbn,key,subject"}
+        data = self._get(self.BASE_URL, params=params, timeout=15, run_id=run_id)
+        if not data:
+            return []
+        results = []
+        for doc in (data.get("docs") or [])[:limit]:
+            key  = doc.get("key", "")
+            link = f"https://openlibrary.org{key}" if key else ""
+            isbn_list = doc.get("isbn", [])
+            isbn = isbn_list[0] if isbn_list else ""
+            results.append({
+                "title":         doc.get("title", ""),
+                "authors":       doc.get("author_name", [])[:3],
+                "year":          doc.get("first_publish_year"),
+                "material_type": "book",
+                "source_name":   self.SOURCE_ID,
+                "doi":           "",
+                "isbn":          isbn,
+                "abstract":      "",
+                "active_link":   link,
+            })
+        return results
 
 
 # ---------------------------------------------------------------------------
@@ -733,6 +841,8 @@ SOURCE_HANDLERS = {
     "philsci":          PhilSciHandler(),
     "scopus":           ScopusHandler(),
     "consensus":        ConsensusHandler(),
+    "google_books":     GoogleBooksHandler(),
+    "open_library":     OpenLibraryHandler(),
 }
 
 
@@ -814,45 +924,87 @@ def _collect_for_theme(
     print(f"  Sources: {', '.join(enabled_sources)}")
     print(f"  {'─'*55}")
 
-    for src_idx, source_id in enumerate(sources):
-        # Check if source is enabled in config
+    # Build the list of (source_id, handler) pairs to query, respecting
+    # config.sources.<name>.enabled. The rate limiter is already thread-safe
+    # (per-source Lock), so parallel searches still respect per-source
+    # min-delays (review O2).
+    keywords = [kw.get("seed", "") for kw in theme.get("keywords", [])]
+    tasks: list[tuple[str, SourceHandler]] = []
+    for source_id in sources:
         source_cfg = config.get("sources", {}).get(source_id, {})
         if not source_cfg.get("enabled", True):
             continue
-
         handler = SOURCE_HANDLERS.get(source_id)
         if not handler:
             logger.warning(f"[Social] No handler for source: {source_id}")
             continue
+        tasks.append((source_id, handler))
 
-        limiter.print_source_start(source_id, theme_id, query)
-        progress.note(source_id, f"searching ({theme_id})", query)
+    # Search sources in parallel — the limiter serializes calls to the same
+    # source, but different sources run concurrently. This cuts a multi-source
+    # theme from ~N*delay to ~max(delay) (review O2).
+    search_results: dict[str, list[dict]] = {}
+    search_errors: dict[str, str] = {}
 
+    def _search_one(src_id: str, handler: SourceHandler) -> None:
         try:
-            results = handler.search(
-                query,
-                [kw.get("seed","") for kw in theme.get("keywords",[])],
-                limit_per_source,
-                run_id=run_id
-            )
-            limiter.print_source_done(source_id, len(results))
+            res = handler.search(query, keywords, limit_per_source, run_id=run_id)
+            search_results[src_id] = res
         except Exception as e:
-            logger.warning(f"[Social] {source_id} search failed: {e}")
-            print(f"\r  ✗ [{source_id}] failed: {str(e)[:60]}{' '*20}")
+            search_errors[src_id] = str(e)
+
+    max_workers = min(4, len(tasks)) if tasks else 1
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {}
+        for src_id, handler in tasks:
+            limiter.print_source_start(src_id, theme_id, query)
+            # progress.note doubles as the cancellation checkpoint and the
+            # live activity indicator; call it from the main thread so the
+            # ContextVar is bound (review O2).
+            progress.note(src_id, f"searching ({theme_id})", query)
+            futures[pool.submit(_search_one, src_id, handler)] = src_id
+        for fut in as_completed(futures):
+            src_id = futures[fut]
+            fut.result()  # re-raise if _search_one itself blew up unexpectedly
+
+    # Process results serially — relevance rating, link check, and DB insert
+    # are cheap relative to the searches and touch shared state (DB, LLM).
+    for source_id, handler in tasks:
+        if source_id in search_errors:
+            err = search_errors[source_id]
+            logger.warning(f"[Social] {source_id} search failed: {err}")
+            print(f"\r  ✗ [{source_id}] failed: {err[:60]}{' '*20}")
             results = []
-
-        for r in results:
-            if not r.get("title"):
-                continue
-
-            # Rate relevance
-            rating, reason = rate_relevance(
-                r.get("title", ""),
-                r.get("abstract", ""),
-                problem or theme_label,
-                theme_label
+            db.record_source_health(
+                run_id, source_id, "social",
+                status="failed", last_error=err[:200],
+            )
+        else:
+            results = search_results.get(source_id, [])
+            limiter.print_source_done(source_id, len(results))
+            db.record_source_health(
+                run_id, source_id, "social",
+                status="ok" if results else "degraded",
+                results_returned=len(results),
+                calls_made=1,
             )
 
+        # Rate relevance for all results in parallel — the LLM router holds
+        # no per-call state, so concurrent calls are safe (review O3). Link
+        # checks and DB inserts stay serial (cheap, touch shared state).
+        titled = [r for r in results if r.get("title")]
+        ratings: list[tuple[str, str]] = []
+        if titled:
+            from concurrent.futures import ThreadPoolExecutor
+            ctx_problem = problem or theme_label
+            def _rate(r):
+                return rate_relevance(r.get("title", ""), r.get("abstract", ""),
+                                      ctx_problem, theme_label)
+            with ThreadPoolExecutor(max_workers=min(6, len(titled))) as pool:
+                ratings = list(pool.map(_rate, titled))
+
+        for r, (rating, reason) in zip(titled, ratings):
             # Check link
             link_status = handler._check_link(r.get("active_link", ""))
 

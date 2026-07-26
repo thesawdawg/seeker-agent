@@ -296,6 +296,39 @@ CREATE TABLE IF NOT EXISTS break_instructions (
     UNIQUE (run_id, break_num)
 );
 
+-- Per-source outcome for each (run, source, agent) search. Makes a failed
+-- source visible — today a source that returned [] because it was down is
+-- indistinguishable from one that returned [] because nothing matched
+-- (review E4). One row per (run_id, source_id, agent) — updated in place.
+CREATE TABLE IF NOT EXISTS source_health (
+    health_id       {ID} PRIMARY KEY,
+    run_id          {ID} NOT NULL,
+    source_id       {KEY} NOT NULL,
+    agent           {KEY} NOT NULL,            -- social / grounder / historian
+    status          {KEY} NOT NULL,            -- ok / degraded / failed / skipped
+    results_returned {INT} DEFAULT 0,
+    calls_made      {INT} DEFAULT 0,
+    retries         {INT} DEFAULT 0,
+    last_error      {TEXT},
+    checked_at      {TEXT} NOT NULL,
+    UNIQUE (run_id, source_id, agent)
+);
+
+-- Global daily call counts per (date, source, user). OpenAlex's 100k/day is
+-- a global limit across all of a user's runs, not per-run; tracking it in the
+-- DB makes it shared across workers and survives restarts (review R4).
+-- exhausted_until marks a source that 429'd with a long Retry-After, so a
+-- fresh run skips it instead of burning its retry budget.
+CREATE TABLE IF NOT EXISTS source_call_log (
+    log_id          {ID} PRIMARY KEY,
+    log_date        {KEY} NOT NULL,            -- YYYY-MM-DD (UTC)
+    source_id       {KEY} NOT NULL,
+    user_id         {KEY} NOT NULL DEFAULT 'anon',
+    calls           {INT} DEFAULT 0,
+    exhausted_until {TEXT},                    -- ISO timestamp or NULL
+    UNIQUE (log_date, source_id, user_id)
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_break_instr_run  ON break_instructions(run_id);
 CREATE INDEX IF NOT EXISTS idx_sources_type     ON sources(type);
@@ -309,6 +342,8 @@ CREATE INDEX IF NOT EXISTS idx_evaluations_proposal ON evaluations(proposal_id);
 CREATE INDEX IF NOT EXISTS idx_syntheses_run    ON syntheses(run_id);
 CREATE INDEX IF NOT EXISTS idx_directions_run   ON directions(run_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run    ON artifacts(run_id);
+CREATE INDEX IF NOT EXISTS idx_source_health_run ON source_health(run_id);
+CREATE INDEX IF NOT EXISTS idx_source_call_log  ON source_call_log(log_date, source_id, user_id);
 """
 
 
@@ -704,3 +739,129 @@ def insert_seminal_proposal(proposal: dict) -> bool:
 
 def get_seminal_bank(status: str = "pending_review") -> list[dict]:
     return fetch("seminal_bank", {"status": status})
+
+
+# ---------------------------------------------------------------------------
+# Source health — per (run, source, agent) outcome (review E4)
+#
+# Today a source that returned [] because it was down is indistinguishable
+# from one that returned [] because nothing matched. This makes the
+# distinction visible to the researcher, so they can judge whether the
+# Understanding Map at the end is trustworthy.
+# ---------------------------------------------------------------------------
+
+def record_source_health(run_id: str, source_id: str, agent: str,
+                         status: str, *, results_returned: int = 0,
+                         calls_made: int = 0, retries: int = 0,
+                         last_error: str = "") -> bool:
+    """Upsert one source_health row. status: ok / degraded / failed / skipped."""
+    from core.utils import generate_id
+    row = {
+        "health_id":        generate_id("HLTH"),
+        "run_id":           run_id,
+        "source_id":        source_id,
+        "agent":            agent,
+        "status":           status,
+        "results_returned": results_returned,
+        "calls_made":       calls_made,
+        "retries":          retries,
+        "last_error":       last_error,
+        "checked_at":       _now(),
+    }
+    # The UNIQUE (run_id, source_id, agent) constraint + upsert_sql means a
+    # second report for the same triple overwrites the first. We accumulate
+    # results/calls across the run by reading the existing row first.
+    existing = fetch("source_health",
+                     {"run_id": run_id, "source_id": source_id, "agent": agent})
+    if existing:
+        ex = existing[0]
+        row["health_id"] = ex["health_id"]
+        row["results_returned"] = ex.get("results_returned", 0) + results_returned
+        row["calls_made"] = ex.get("calls_made", 0) + calls_made
+        row["retries"] = ex.get("retries", 0) + retries
+        # Don't downgrade a failed source back to degraded on a later call.
+        severity = {"ok": 0, "degraded": 1, "failed": 2, "skipped": 3}
+        if severity.get(status, 1) < severity.get(ex.get("status", "ok"), 0):
+            row["status"] = ex["status"]
+    return insert("source_health", row)
+
+
+def get_source_health(run_id: str) -> list[dict]:
+    """All source_health rows for a run, newest first."""
+    rows = fetch("source_health", {"run_id": run_id})
+    rows.sort(key=lambda r: r.get("checked_at", ""), reverse=True)
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Global daily call log — shared across runs and workers (review R4)
+# ---------------------------------------------------------------------------
+
+def _today_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+def increment_daily_calls(source_id: str, user_id: str = "anon",
+                          n: int = 1) -> int:
+    """Add n to today's call count for (source, user). Returns the new total."""
+    from core.utils import generate_id
+    date = _today_utc()
+    # Read current, then upsert — the UNIQUE constraint makes this safe.
+    existing = fetch("source_call_log",
+                     {"log_date": date, "source_id": source_id, "user_id": user_id})
+    if existing:
+        new_total = int(existing[0].get("calls", 0)) + n
+        update("source_call_log", {"calls": new_total},
+               {"log_date": date, "source_id": source_id, "user_id": user_id})
+        return new_total
+    insert("source_call_log", {
+        "log_id":    generate_id("SCL"),
+        "log_date":  date,
+        "source_id": source_id,
+        "user_id":   user_id,
+        "calls":     n,
+    })
+    return n
+
+def daily_call_count(source_id: str, user_id: str = "anon") -> int:
+    rows = fetch("source_call_log",
+                 {"log_date": _today_utc(), "source_id": source_id, "user_id": user_id})
+    return int(rows[0].get("calls", 0)) if rows else 0
+
+def mark_source_exhausted(source_id: str, exhausted_until_iso: str,
+                          user_id: str = "anon") -> bool:
+    """Record that a source 429'd with a long Retry-After (review R10)."""
+    date = _today_utc()
+    existing = fetch("source_call_log",
+                     {"log_date": date, "source_id": source_id, "user_id": user_id})
+    if existing:
+        return update("source_call_log", {"exhausted_until": exhausted_until_iso},
+                      {"log_date": date, "source_id": source_id, "user_id": user_id})
+    from core.utils import generate_id
+    insert("source_call_log", {
+        "log_id":          generate_id("SCL"),
+        "log_date":        date,
+        "source_id":       source_id,
+        "user_id":         user_id,
+        "calls":           0,
+        "exhausted_until": exhausted_until_iso,
+    })
+    return True
+
+def source_exhausted_until(source_id: str, user_id: str = "anon") -> Optional[str]:
+    """ISO timestamp the source is exhausted until, or None if not exhausted."""
+    rows = fetch("source_call_log",
+                 {"log_date": _today_utc(), "source_id": source_id, "user_id": user_id})
+    if not rows:
+        return None
+    until = rows[0].get("exhausted_until")
+    if not until:
+        return None
+    # Stale exhaustion marker — clear it.
+    try:
+        if datetime.fromisoformat(until) < datetime.now(timezone.utc):
+            update("source_call_log", {"exhausted_until": None},
+                   {"log_date": _today_utc(), "source_id": source_id, "user_id": user_id})
+            return None
+    except Exception:
+        return None
+    return until

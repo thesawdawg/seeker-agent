@@ -360,3 +360,40 @@ input:focus, select:focus, textarea:focus {
 }
 .toast.is-error { border-left-color: var(--danger); }
 .toast.is-ok    { border-left-color: var(--ok); }
+
+/* ── Source controls (review U1/U2/U3) ──────────────────────────────── */
+.source-grid { display: grid; gap: .35rem; }
+.source-row {
+  display: flex; align-items: center; gap: .5rem;
+  padding: .3rem .4rem; border-radius: 6px;
+}
+.source-row:hover { background: var(--surface); }
+.source-name { font-weight: 600; min-width: 9rem; }
+.source-indicator {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.2rem; height: 1.2rem; border-radius: 50%;
+  font-size: .75rem; font-weight: 700;
+}
+.source-indicator.src-ok  { background: var(--ok); color: #fff; }
+.source-indicator.src-warn{ background: var(--warning, #d97706); color: #fff; }
+
+.source-keys { margin-top: .5rem; }
+.source-key-row { display: flex; gap: .4rem; align-items: center; }
+.source-key-row select, .source-key-row input { flex: 1; }
+.source-key-list { margin-top: .6rem; display: grid; gap: .3rem; }
+.source-key-item {
+  display: flex; gap: .6rem; align-items: center;
+  padding: .3rem .4rem; border: 1px solid var(--border); border-radius: 6px;
+}
+.source-key-item span:first-child { font-weight: 600; min-width: 9rem; }
+
+.source-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+.source-table th, .source-table td {
+  padding: .4rem .6rem; text-align: left; border-bottom: 1px solid var(--border);
+}
+.source-table th { font-weight: 600; }
+.src-status { font-weight: 600; }
+.src-status.is-ok       { color: var(--ok); }
+.src-status.is-degraded { color: var(--warning, #d97706); }
+.src-status.is-failed   { color: var(--danger); }
+.src-status.is-skipped  { color: var(--muted); }

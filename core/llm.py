@@ -463,8 +463,15 @@ class LLMClient:
                     time.sleep(self.settings.retry_delay)
 
             except requests.ConnectionError as e:
-                logger.warning(f"[{agent_name}] {provider.name} unreachable at {provider.base_url}: {e}")
-                return None
+                # A connection blip (DNS hiccup, model container restarting,
+                # transient partition) is just as retryable as a timeout —
+                # only abandon the rung after max_retries attempts (review E1).
+                logger.warning(
+                    f"[{agent_name}] {provider.name} unreachable at "
+                    f"{provider.base_url} (attempt {attempt+1}): {e}"
+                )
+                if attempt < self.settings.max_retries:
+                    time.sleep(self.settings.retry_delay)
 
             except Exception as e:
                 logger.error(f"[{agent_name}] {provider.name} error: {e}")
