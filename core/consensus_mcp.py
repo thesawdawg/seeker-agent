@@ -260,6 +260,15 @@ class ConsensusAuthRequired(RuntimeError):
     """
 
 
+class ConsensusRateLimited(RuntimeError):
+    """The MCP server returned a 429 or rate-limit error (review R9).
+
+    Raised instead of returning [] so the calling handler can record the
+    failure with the rate limiter — otherwise the limiter never hears about
+    the 429 and keeps allowing calls that will also fail.
+    """
+
+
 def interactive_auth_allowed() -> bool:
     """
     Whether this process may open a browser and wait for a human.
@@ -354,7 +363,15 @@ async def _async_search(
     ):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            response = await session.call_tool("search", arguments=arguments)
+            try:
+                response = await session.call_tool("search", arguments=arguments)
+            except Exception as e:
+                # Detect rate-limiting from the underlying HTTP transport
+                # so the handler can record it with the rate limiter (review R9).
+                msg = str(e).lower()
+                if "429" in msg or "rate limit" in msg or "too many requests" in msg:
+                    raise ConsensusRateLimited(f"MCP search returned 429: {e}")
+                raise
 
     # Collect all text content from response blocks
     raw_text = ""
@@ -529,6 +546,10 @@ def search_consensus(query: str, limit: int = 10, **kwargs) -> list[dict]:
             _warned_unavailable = True
             logger.warning("[Consensus] %s", e)
         return []
+    except ConsensusRateLimited:
+        # Re-raise so the handler can record the failure with the rate
+        # limiter (review R9) — the limiter needs to know about the 429.
+        raise
     except Exception as e:
         # An optional source must never take the pipeline down with it
         logger.warning("[Consensus] Search failed (%s) — continuing without it",

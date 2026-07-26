@@ -136,3 +136,23 @@ def clear() -> None:
                   {"run_id": ctx["run_id"], "step_name": ctx["step"]})
     except Exception:
         pass
+
+
+def warn(message: str) -> None:
+    """
+    Record a non-fatal warning on the current step (review E7).
+
+    Agents call this when they have degraded data (JSON parse failure,
+    empty LLM response, partial extraction) so the researcher is told the
+    Understanding Map is partial rather than seeing nothing. Safe to call
+    outside a run — the warning is only logged in that case.
+    """
+    ctx = _current.get()
+    if not ctx:
+        logger.warning(f"[progress] {message}")
+        return
+    try:
+        from core import pipeline
+        pipeline.record_step_warning(ctx["run_id"], ctx["step"], message)
+    except Exception as e:
+        logger.debug(f"[progress] could not record warning: {e}")

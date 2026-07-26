@@ -77,6 +77,8 @@ def run(context: str, run_id: str, **kwargs):
         data = json.loads(clean)
     except json.JSONDecodeError:
         logger.warning("[Rude] JSON parse failed — partial extraction")
+        from core import progress
+        progress.warn("Evaluation JSON parse failed — proposal evaluations may be incomplete.")
         data = {"evaluations": [], "overall_ranking": response[:2000], "feasibility_summary": ""}
 
     # Match evaluations to proposals by text similarity and save

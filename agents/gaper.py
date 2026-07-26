@@ -323,6 +323,8 @@ def run(context: str, run_id: str, **kwargs):
         pass1_data = json.loads(clean)
     except json.JSONDecodeError:
         logger.warning("[Gaper] Pass 1 JSON parse failed")
+        from core import progress
+        progress.warn("Gap analysis pass 1 JSON parse failed — analytical gaps may be incomplete.")
         pass1_data = {"analytical_gaps": [], "tree_observations": pass1_response[:1000]}
 
     analytical = pass1_data.get("analytical_gaps", [])
@@ -353,6 +355,8 @@ def run(context: str, run_id: str, **kwargs):
         pass2_data = json.loads(clean2)
     except json.JSONDecodeError:
         logger.warning("[Gaper] Pass 2 JSON parse failed")
+        from core import progress
+        progress.warn("Gap analysis pass 2 JSON parse failed — gaps may be incomplete.")
         pass2_data = {"gaps": [], "gap_map_summary": pass2_response[:2000]}
 
     # ── Step 3: Merge + validate ──────────────────────────────────────────

@@ -95,6 +95,7 @@ def init_steps_table():
     db_backend.ensure_columns("run_steps", {
         "activity":    "{TEXT}",
         "activity_at": "{TEXT}",
+        "warnings":    "{LONGTEXT}",  # JSON list of non-fatal warnings (review E7)
     })
     # When a stop was asked for, so its deadline can be measured
     db_backend.ensure_columns("runs", {"cancel_requested_at": "{TEXT}"})
@@ -200,6 +201,29 @@ def set_step_status(run_id: str, step_name: str, status: str,
     if error is not None:
         data["error"] = error[:4000]
     db.update("run_steps", data, {"run_id": run_id, "step_name": step_name})
+
+
+def record_step_warning(run_id: str, step_name: str, warning: str) -> None:
+    """
+    Record a non-fatal warning on a step (review E7).
+
+    JSON parse failures, empty LLM responses, and other degraded-data cases
+    used to only emit logger.warning — invisible to the researcher. This
+    appends to a JSON list in run_steps.warnings that the UI surfaces on
+    the step card so the researcher knows the Understanding Map is partial.
+    """
+    import json
+    step = get_step(run_id, step_name)
+    if not step:
+        return
+    raw = step.get("warnings") or "[]"
+    try:
+        warnings = json.loads(raw) if isinstance(raw, str) else (raw or [])
+    except (json.JSONDecodeError, TypeError):
+        warnings = []
+    warnings.append({"at": _now(), "message": warning[:500]})
+    db.update("run_steps", {"warnings": json.dumps(warnings[-20:])},
+              {"run_id": run_id, "step_name": step_name})
 
 
 # Statuses that mean a step still needs work. `failed` is included
@@ -848,9 +872,11 @@ def apply_source_overrides(run_id: str, config: dict) -> dict:
     Merge a run's source overrides into the config dict the agents see.
 
     The worker calls this before advancing. Overrides are {source_id: bool};
-    True forces a source on, False forces it off. This updates both
-    config.sources.<name>.enabled and prunes config.agent_sources.<agent>
-    lists, so the agents' existing config reads pick up the change.
+    True forces a source on, False forces it off. A special key
+    "limit_per_source" (int) sets the per-source result limit for this run
+    (review U5). This updates both config.sources.<name>.enabled and prunes
+    config.agent_sources.<agent> lists, so the agents' existing config reads
+    pick up the change.
     """
     overrides = get_source_overrides(run_id)
     if not overrides:
@@ -858,6 +884,10 @@ def apply_source_overrides(run_id: str, config: dict) -> dict:
     import copy
     cfg = copy.deepcopy(config)
     sources_cfg = cfg.setdefault("sources", {})
+    # Work on a copy so the special key is not permanently removed from the
+    # stored overrides dict (review U5).
+    overrides = dict(overrides)
+    run_limit = overrides.pop("limit_per_source", None)
     for source_id, enabled in overrides.items():
         sources_cfg.setdefault(source_id, {})["enabled"] = enabled
     # Also prune agent_sources lists so a disabled source is not even
@@ -869,6 +899,13 @@ def apply_source_overrides(run_id: str, config: dict) -> dict:
                 s for s in src_list
                 if overrides.get(s, sources_cfg.get(s, {}).get("enabled", True))
             ]
+    # Apply the per-run source limit (review U5)
+    if run_limit is not None:
+        agent_sources["social_limit"] = int(run_limit)
+        gl = agent_sources.setdefault("grounder_limits", {})
+        for src in ("openalex", "semantic_scholar", "consensus",
+                    "google_books", "open_library"):
+            gl.setdefault(src, int(run_limit))
     return cfg
 
 

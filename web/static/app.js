@@ -251,9 +251,22 @@ function buildModelGrid(container, { completed = [], scope = 'new' } = {}) {
     const done = completed.includes(agent.name);
     // Scoped so the new-run grid and a break's grid never collide on id
     const id = `model-${scope}-${agent.name}`;
+    const tokId = `tok-${scope}-${agent.name}`;
+    const tempId = `temp-${scope}-${agent.name}`;
+    // Defaults from the agent's profile, if known
+    const defTok = agent.max_tokens ?? '';
+    const defTemp = agent.temperature ?? '';
     container.append(el('div', { class: `model-row ${done ? 'is-done' : ''}` },
       el('label', { for: id, text: `${agent.name}${done ? ' (already run)' : ''}` }),
       el('select', { id, 'data-agent': agent.name, disabled: done }, modelOptions()),
+      el('input', { type: 'number', id: tokId, 'data-agent': agent.name,
+        'data-field': 'max_tokens', placeholder: 'tokens',
+        value: defTok, min: 256, max: 32768, disabled: done,
+        title: 'Max tokens for this agent' }),
+      el('input', { type: 'number', id: tempId, 'data-agent': agent.name,
+        'data-field': 'temperature', placeholder: 'temp',
+        value: defTemp, min: 0, max: 2, step: 0.1, disabled: done,
+        title: 'Temperature for this agent' }),
     ));
   }
 }
@@ -264,6 +277,16 @@ function collectModelOverrides(container) {
     if (!select.disabled && select.value) {
       overrides[select.dataset.agent] = { model: select.value };
     }
+  });
+  // Also collect max_tokens / temperature if they were set (review U4)
+  $$('input[data-field]', container).forEach(input => {
+    if (input.disabled) return;
+    const agent = input.dataset.agent;
+    const field = input.dataset.field;
+    const val = input.value.trim();
+    if (!val) return;
+    overrides[agent] = overrides[agent] || {};
+    overrides[agent][field] = field === 'temperature' ? parseFloat(val) : parseInt(val, 10);
   });
   return overrides;
 }
@@ -367,12 +390,26 @@ async function buildSourceGrid() {
       el('span', { class: 'muted small', text: note }),
     ));
   }
+  // Per-source result limit control (review U5)
+  container.append(el('div', { class: 'source-limit-row' },
+    el('label', { for: 'src-limit', text: 'Results per source',
+                  title: 'How many results to fetch from each source. Lower = faster shallow scan, higher = deeper coverage.' }),
+    el('input', { type: 'number', id: 'src-limit',
+                  'data-field': 'limit_per_source',
+                  value: 8, min: 1, max: 50 }),
+    el('span', { class: 'muted small', text: 'shallow ↔ deep' }),
+  ));
 }
 
 function collectSourceOverrides(container) {
   const overrides = {};
   for (const cb of container.querySelectorAll('input[type=checkbox][data-source]')) {
     overrides[cb.dataset.source] = cb.checked;
+  }
+  // Per-run source result limit (review U5) — shallow vs deep scan control.
+  const lim = container.querySelector('input[data-field="limit_per_source"]');
+  if (lim && lim.value.trim()) {
+    overrides.limit_per_source = parseInt(lim.value, 10);
   }
   return overrides;
 }
@@ -583,13 +620,19 @@ function renderRail(status) {
     // Where the run stands, and nothing more. What a step is doing right now
     // belongs to the live card and activity log, so the rail stays a stable
     // map of the pipeline rather than a second, competing feed.
+    let warnings = [];
+    try { warnings = JSON.parse(step.warnings || '[]'); } catch { warnings = []; }
     const row = el('li', {
       class: `rail-step status-${step.status} ${isBreak ? 'is-break' : ''} ` +
-             `${step.name === status.current_step ? 'is-current' : ''}`,
+             `${step.name === status.current_step ? 'is-current' : ''} ` +
+             `${warnings.length ? 'has-warnings' : ''}`,
       title: step.error || step.label,
     },
       el('span', { class: 'rail-step-icon' }, icon),
       el('span', { class: 'rail-step-label', text: step.label }),
+      warnings.length ? el('span', { class: 'rail-warn-badge',
+        title: `${warnings.length} warning(s): ${warnings.map(w => w.message).join('; ')}`,
+        text: '⚠' }) : null,
     );
 
     if (isBreak && ['done', 'awaiting_input'].includes(step.status)) {
