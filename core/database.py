@@ -368,7 +368,7 @@ CREATE TABLE IF NOT EXISTS source_blacklist (
     blacklist_id   {ID} PRIMARY KEY,
     user_id        {ID} NOT NULL DEFAULT 'anon',
     match_type     {KEY} NOT NULL,            -- doi | url | title_substring
-    match_value    {TEXT} NOT NULL,
+    match_value    {KEY} NOT NULL,            -- indexed (UNIQUE), so {KEY} not {TEXT}
     reason         {TEXT},
     created_at     {TEXT} NOT NULL,
     UNIQUE (user_id, match_type, match_value)
