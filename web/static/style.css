@@ -313,7 +313,7 @@ input:focus, select:focus, textarea:focus {
 }
 .theme-preview-title { font-weight: 500; }
 
-.model-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: .5rem; margin-top: .6rem; }
+.model-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: .5rem; margin-top: .6rem; }
 .model-row { display: grid; gap: .2rem; }
 .model-row label { font-size: .8rem; font-weight: 500; }
 .model-row select { font-size: .85rem; padding: .35rem .5rem; }
@@ -327,7 +327,7 @@ input:focus, select:focus, textarea:focus {
   align-items: center; gap: .4rem;
 }
 .model-row label { grid-column: 1 / -1; }
-.model-row select { grid-column: 1; min-width: 0; }
+.model-row select { grid-column: 1; min-width: 0; width: 100%; }
 .model-row input[data-field="max_tokens"] { grid-column: 2; }
 .model-row input[data-field="temperature"] { grid-column: 3; }
 
@@ -436,11 +436,14 @@ input:focus, select:focus, textarea:focus {
 /* ── Source controls (review U1/U2/U3) ──────────────────────────────── */
 .source-grid { display: grid; gap: .35rem; }
 .source-row {
-  display: flex; align-items: center; gap: .5rem;
+  display: grid;
+  grid-template-columns: auto 9rem auto 1fr;
+  align-items: center; gap: .5rem;
   padding: .3rem .4rem; border-radius: 6px;
 }
 .source-row:hover { background: var(--surface); }
-.source-name { font-weight: 600; min-width: 9rem; }
+.source-name { font-weight: 600; }
+.source-row .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .source-limit-row {
   display: flex; align-items: center; gap: .5rem;
   margin-top: .6rem; padding-top: .6rem; border-top: 1px solid var(--border);
