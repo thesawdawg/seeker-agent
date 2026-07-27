@@ -46,6 +46,8 @@ async def lifespan(_app: FastAPI):
     jobs.init_jobs_table()
     users.init_users_tables()
     users.init_run_owners()
+    # Register auth backend routes (simple, saml, etc.)
+    auth.get_manager().register_routes(_app)
     logger.info(f"SEEKER API ready — storage: {db.backend_name()}")
     yield
 
@@ -71,14 +73,6 @@ if _origins:
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
-
-class LoginRequest(BaseModel):
-    base_url: str = Field(..., description="Provider base URL, e.g. http://localhost:3000/api")
-    api_key: str
-    provider: str = "open-webui"
-    display_name: str = ""
-    models: dict = Field(default_factory=dict)
-
 
 class CredentialRequest(BaseModel):
     provider: str
@@ -163,20 +157,14 @@ def health():
 
 
 # ---------------------------------------------------------------------------
-# Auth
+# Auth — login is handled by backend routes registered via AuthManager.
+# Logout, /me, and method discovery live here (they are backend-agnostic).
 # ---------------------------------------------------------------------------
 
-@app.post("/api/auth/login")
-def login(body: LoginRequest, request: Request, response: Response):
-    """Validate a provider key, identify the user, and start a session."""
-    auth.check_login_rate(request.client.host if request.client else "unknown")
-    result = auth.login(body.base_url, body.api_key, body.provider,
-                        body.display_name, body.models)
-    response.set_cookie(
-        "seeker_session", result["session"],
-        max_age=result["expires_in"], httponly=True, samesite="lax",
-    )
-    return result
+@app.get("/api/auth/methods")
+def auth_methods():
+    """List available auth backends so the UI can render login options."""
+    return {"methods": auth.get_manager().describe_methods()}
 
 
 @app.post("/api/auth/logout")

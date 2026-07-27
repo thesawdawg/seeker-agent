@@ -105,14 +105,27 @@ def test_every_js_element_id_exists():
 def test_every_api_path_has_a_route():
     """The frontend and the API must not drift apart."""
     js = JS.read_text()
-    app = (Path(__file__).parent.parent / "web" / "app.py").read_text()
+    app_py = (Path(__file__).parent.parent / "web" / "app.py").read_text()
 
     called = set()
     for raw in re.findall(r"api\(\s*[`'\"]([^`'\"]+)[`'\"]", js):
         called.add(re.sub(r"\$\{[^}]+\}", "{p}", raw.split("?")[0]))
 
+    # Routes declared directly on the app via @app.get/post/...
     routes = {re.sub(r"\{[^}]+\}", "{p}", path) for _, path in
-              re.findall(r'@app\.(get|post|put|patch|delete)\("([^"]+)"\)', app)}
+              re.findall(r'@app\.(get|post|put|patch|delete)\("([^"]+)"\)', app_py)}
+
+    # Routes registered via APIRouter in auth backends (included via
+    # app.include_router). Scan the auth package for @router.(get|post/...)
+    auth_dir = Path(__file__).parent.parent / "web" / "auth"
+    if auth_dir.is_dir():
+        for py in auth_dir.rglob("*.py"):
+            src = py.read_text()
+            routes.update(
+                re.sub(r"\{[^}]+\}", "{p}", path)
+                for _, path in re.findall(
+                    r'@router\.(get|post|put|patch|delete)\("([^"]+)"\)', src)
+            )
 
     missing = sorted(called - routes)
     assert not missing, f"app.js calls paths with no route: {missing}"

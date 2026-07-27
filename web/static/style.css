@@ -178,6 +178,18 @@ summary:focus-visible,
 .btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn-block { width: 100%; margin-top: .5rem; }
 .btn-small { padding: .25rem .6rem; font-size: .82rem; }
+.btn-sso { background: #fff; border: 1px solid var(--border); color: var(--text); }
+.btn-sso:hover { background: var(--surface); }
+
+/* Divider between login methods */
+.divider {
+  display: flex; align-items: center; text-align: center;
+  margin: 1rem 0; color: var(--text-dim); font-size: .82rem;
+}
+.divider::before, .divider::after {
+  content: ''; flex: 1; border-bottom: 1px solid var(--border);
+}
+.divider span { padding: 0 .75rem; }
 
 .disclosure {
   border: 1px solid var(--border); border-radius: 8px;

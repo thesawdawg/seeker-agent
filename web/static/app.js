@@ -314,6 +314,19 @@ function wireLogin() {
     }
   });
 
+  // SSO button — redirect to the SAML backend's login endpoint.
+  // The SSO section is only visible when the SAML backend is enabled
+  // (discovered via /api/auth/methods on page load).
+  const ssoBtn = $('#btn-sso');
+  if (ssoBtn) {
+    ssoBtn.addEventListener('click', () => {
+      // Redirect to the SP-initiated SAML login; the IdP will redirect
+      // back to /api/auth/saml/callback which sets the session cookie
+      // and redirects to the app root.
+      window.location.href = '/api/auth/saml/login';
+    });
+  }
+
   $('#btn-logout').addEventListener('click', async () => {
     try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
     state.user = null;
@@ -332,6 +345,24 @@ function wireLogin() {
     document.documentElement.setAttribute('data-theme', next);
     localStorage.setItem('seeker-theme', next);
   });
+}
+
+/**
+ * Discover available auth methods and show the SSO button if SAML is enabled.
+ * Called on page load before the user signs in.
+ */
+async function discoverAuthMethods() {
+  try {
+    const body = await api('/api/auth/methods');
+    const methods = body.methods || [];
+    const saml = methods.find(m => m.name === 'saml' && m.enabled);
+    if (saml) {
+      const section = $('#sso-section');
+      if (section) section.hidden = false;
+    }
+  } catch {
+    // If the endpoint isn't available (older server), just hide SSO.
+  }
 }
 
 async function afterSignIn() {
@@ -3126,6 +3157,9 @@ async function init() {
       toast('Server has no SEEKER_SECRET_KEY — sign-in will be refused.', 'error');
     }
   } catch { /* health is advisory */ }
+
+  // Discover available auth methods (shows SSO button if SAML is configured)
+  discoverAuthMethods();
 
   try {
     await afterSignIn();          // an existing session cookie signs us straight in
