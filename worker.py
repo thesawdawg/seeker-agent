@@ -141,10 +141,18 @@ def _advance_with_stop_deadline(run_id: str, config: dict):
         if not thread.is_alive():
             break
         if pipeline.enforce_stop_deadline(run_id):
+            # Disown the thread before walking away. It is still alive inside
+            # a socket read and will resume when that returns; without this it
+            # would carry on writing into a run whose step has already been
+            # reset (review C3). Bumping the epoch makes its next checkpoint
+            # raise, so it unwinds instead.
+            from core import cancellation
+            cancellation.new_epoch(run_id)
             logger.warning(
                 f"[{run_id}] Step did not stop within "
                 f"{pipeline.STOP_GRACE_SECONDS}s — abandoning it. The worker is "
-                f"free again; the abandoned call ends when it times out.")
+                f"free again; the abandoned call unwinds at its next "
+                f"checkpoint once the call it is blocked on returns.")
             return None
 
     if "error" in outcome:
