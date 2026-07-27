@@ -143,6 +143,8 @@ STEP_DEFS: tuple[StepDef, ...] = (
     StepDef("break2", "break", "Break 2 — Trajectory Evaluation", break_num=2),
     StepDef("thinker", "agent", "Thinker", outputs=(("directions", {}),)),
     StepDef("scribe", "agent", "Scribe", outputs=(("artifacts", {}),)),
+    StepDef("reporter", "agent", "Reporter",
+            outputs=(("artifacts", {"output_type": "combined_report"}),)),
 )
 
 STEP_BY_NAME = {s.name: s for s in STEP_DEFS}
@@ -606,7 +608,7 @@ def _run_agent_step(step_name: str, run_id: str, problem: str, config: dict) -> 
     from core.context import (
         for_grounder, for_historian, for_gaper, for_vision, for_theorist,
         for_rude, for_synthesizer, for_thinker, for_scribe,
-        for_understanding_map,
+        for_understanding_map, for_reporter,
     )
 
     b1 = _instructions(run_id, 1)
@@ -662,6 +664,10 @@ def _run_agent_step(step_name: str, run_id: str, problem: str, config: dict) -> 
             except Exception as e:
                 # One failed output type should not lose the others
                 logger.warning(f"[{run_id}] Scribe failed for {output_type}: {e}")
+
+    elif step_name == "reporter":
+        from agents.reporter import run as agent
+        agent(for_reporter(run_id, problem), run_id)
 
     else:
         raise ValueError(f"No runner for step: {step_name}")
