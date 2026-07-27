@@ -1461,3 +1461,61 @@ def test_static_pipeline_shape_is_public(client):
     steps = client.get("/api/steps").json()["steps"]
     assert [s["name"] for s in steps][:2] == ["concept_mapper", "break0"]
     assert any(s["kind"] == "break" for s in steps)
+
+
+# ---------------------------------------------------------------------------
+# Pre-run estimate (review X2)
+# ---------------------------------------------------------------------------
+
+def test_estimate_endpoint_requires_auth(client):
+    # Weak on its own: /api/runs/{run_id} also 401s unauthenticated, so this
+    # passes even when the literal path is being swallowed by it. The test
+    # below is what actually pins the routing.
+    assert client.get("/api/runs/estimate").status_code == 401
+
+
+def test_estimate_endpoint_describes_the_run_ahead(client, provider):
+    """
+    Also the routing regression: FastAPI matches in declaration order, so if
+    /api/runs/{run_id} is ever moved above this route it captures 'estimate'
+    as a run_id and this comes back {"detail": "Run not found"}.
+    """
+    sign_in(client, provider)
+    body = client.get("/api/runs/estimate").json()
+    assert "detail" not in body, (
+        "the literal /api/runs/estimate path was captured by "
+        "/api/runs/{run_id} — declaration order matters"
+    )
+    for field in ("themes", "sources", "source_lookups", "estimated_calls",
+                  "estimated_tokens", "estimated_seconds", "breaks", "basis",
+                  "is_measured"):
+        assert field in body, f"estimate is missing {field}"
+    assert body["breaks"] == 3
+    assert body["estimated_calls"] > 0
+
+
+def test_estimate_shrinks_when_sources_are_turned_off(client, provider):
+    """Turning a source off has to visibly change the number, or the card is
+    decoration rather than a control."""
+    sign_in(client, provider)
+    full = client.get("/api/runs/estimate").json()
+    if not full["sources"]:
+        pytest.skip("no sources configured in this config.json")
+
+    off = json.dumps({s: False for s in full["sources"]})
+    trimmed = client.get(f"/api/runs/estimate?source_overrides={off}").json()
+    assert trimmed["source_lookups"] == 0
+    assert trimmed["estimated_calls"] < full["estimated_calls"]
+
+
+def test_estimate_rejects_malformed_overrides(client, provider):
+    sign_in(client, provider)
+    resp = client.get("/api/runs/estimate?source_overrides=not-json")
+    assert resp.status_code == 400
+
+
+def test_estimate_flags_itself_as_a_guess_before_any_run(client, provider):
+    sign_in(client, provider)
+    body = client.get("/api/runs/estimate").json()
+    assert body["is_measured"] is False
+    assert "no completed runs" in body["basis"]

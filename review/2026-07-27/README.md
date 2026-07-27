@@ -53,6 +53,20 @@ If only five things get done:
 | 4 | **V2** — link check discards 17% of sources | Same, and it is invisible to the researcher |
 | 5 | **S2** — arbitrary user auto-promoted to admin | Config write access handed out non-deterministically |
 
+## Status
+
+Everything rated Critical or High, plus the cheap Mediums, landed in
+[#2](https://github.com/thesawdawg/seeker-agent/pull/2). The four items that
+pass deferred there — V3, V6, X2, X4 — landed in the follow-up. Struck-through
+rows below are closed; the rest stand.
+
+Still open, in rough order of value: **V4** (a real token budget rather than
+item caps), **O3** (converting the remaining `db.fetch` callers to the new
+`order_by`/projection support), **X3** (a fuller coverage strip in the run
+view), **S3/S4** (decoupling identity from the provider key, and a
+`SEEKER_SECRET_KEY` rotation path), and **S6**'s open question of whether
+`db/pipeline.db` needs removing from history as well as from the index.
+
 ## Full finding index
 
 | ID | Severity | Effort | Finding |
@@ -75,10 +89,10 @@ If only five things get done:
 | S8 | Low | S | Admin config editor has no size limit, audit trail, or write lock |
 | V1 | Critical | M | Context truncation ignores the rankings the pipeline paid to compute |
 | V2 | High | M | `HEAD` liveness check silently discarded 17.2% of all sources |
-| V3 | High | M | One LLM call per source to produce a rating nothing downstream filters on |
-| V4 | Medium | M | No token budgeting — context is sliced by characters, not tokens |
+| V3 | High | M | ~~One LLM call per source to produce a rating nothing downstream filters on~~ — **fixed**: batched, ~10x fewer calls |
+| V4 | Medium | M | No token budgeting — context is sliced by characters, not tokens. Item caps landed; a real token budget has not |
 | V5 | Medium | S | Relevance failures fall back to "Medium" indistinguishably from real ratings |
-| V6 | Medium | M | No evidence-coverage report on the final deliverable |
+| V6 | Medium | M | ~~No evidence-coverage report on the final deliverable~~ — **fixed**: `core/provenance.py` |
 | O1 | High | M | SSE endpoint does blocking DB I/O inside `async def` — stalls the event loop |
 | O2 | Medium | S | `GET /api/runs` is N+1 across every run the user owns |
 | O3 | Medium | M | `db.fetch` has no `ORDER BY`/projection; whole tables read to count or filter |
@@ -87,12 +101,12 @@ If only five things get done:
 | O6 | Low | S | `get_state()` walks the step list twice; `queue_depth()` is four queries |
 | O7 | Low | S | `progress.note()` writes to the DB on every source call |
 | X1 | High | S | Pre-flight lies: `/api/sources/health` reports `stored` keys that are never used |
-| X2 | High | M | No cost or duration estimate before committing to a run |
+| X2 | High | M | ~~No cost or duration estimate before committing to a run~~ — **fixed**: `GET /api/runs/estimate` + New Run card |
 | X3 | Medium | M | Truncation and discard are invisible in the UI |
-| X4 | Medium | M | Dynamically built controls have no labels or ARIA; toasts are not announced |
+| X4 | Medium | M | ~~No ARIA on the tab strips; toasts and progress not announced~~ — **fixed** (the source grid already used wrapping `<label>`; the review overstated that part) |
 | X5 | Medium | S | Nothing explains that changing your provider key loses your account |
 | X6 | Low | S | Run list is unpaginated and unfiltered |
-| X7 | Low | S | No `prefers-reduced-motion`; focus styling only on form fields |
+| X7 | Low | S | ~~No `prefers-reduced-motion`; focus styling only on form fields~~ — **fixed** |
 | H1 | High | S | No CI — a green 209-test suite that nothing runs |
 | H2 | Medium | S | Test dependencies undeclared outside a `dev` extra; suite fails misleadingly |
 | H3 | Medium | S | Artifacts, logs and exports from real runs are committed |

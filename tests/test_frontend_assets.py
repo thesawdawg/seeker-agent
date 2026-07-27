@@ -136,3 +136,88 @@ def test_views_are_declared_hidden_except_the_first(view):
     assert match, f"view-{view} is missing"
     if view != "login":
         assert "hidden" in match.group(0), f"view-{view} must start hidden"
+
+
+# ---------------------------------------------------------------------------
+# Accessibility (review X4)
+#
+# The interface is keyboard-driven and long-running: a researcher watches it
+# for twenty minutes at a stretch. These pin the parts that make that usable
+# without a mouse or without sight, all of which were missing.
+# ---------------------------------------------------------------------------
+
+def test_tabs_carry_tablist_semantics():
+    """
+    The tab strips are real buttons, so they were always focusable — but they
+    announced as five unrelated buttons, with no indication of which was
+    current, because aria-selected is what conveys that, not a CSS class.
+    """
+    html = HTML.read_text()
+    assert html.count('role="tablist"') >= 2, "both tab strips need a tablist role"
+    assert html.count('role="tab"') >= 9
+    assert html.count('role="tabpanel"') >= 9
+    assert 'aria-selected="true"' in html
+    assert 'aria-controls="panel-overview"' in html
+
+
+def test_tab_selection_updates_aria_not_only_the_class():
+    js = JS.read_text()
+    assert "markSelectedTab" in js
+    assert "aria-selected" in js, (
+        "switching tabs must update aria-selected; a screen reader reads that, "
+        "not the is-active class"
+    )
+
+
+def test_tablists_support_arrow_key_navigation():
+    """Expected of anything using the tab role, and the reason for the
+    roving tabindex."""
+    js = JS.read_text()
+    assert "wireTablistKeys" in js
+    for key in ("ArrowLeft", "ArrowRight", "Home", "End"):
+        assert key in js
+
+
+def test_status_changes_are_announced():
+    """
+    Toasts carry "your session expired"; the live card carries run progress.
+    Without a live region both are silent to a screen reader — and progress
+    is the single thing a blind user most needs during a long run.
+    """
+    html = HTML.read_text()
+    js = JS.read_text()
+    assert re.search(r'id="toasts"[^>]*aria-live', html), \
+        "the toast stack must be a live region"
+    assert re.search(r"id: 'live-card'[^)]*aria-live", js), \
+        "the live progress card must be a live region"
+
+
+def test_keyboard_focus_is_visible_beyond_form_fields():
+    css = CSS.read_text()
+    assert ":focus-visible" in css
+    for selector in ("button:focus-visible", "[role=\"tab\"]:focus-visible"):
+        assert selector in css, f"{selector} needs a visible focus ring"
+
+
+def test_reduced_motion_is_respected():
+    """The spinner and the pulsing live dot run for the length of a run."""
+    css = CSS.read_text()
+    assert "prefers-reduced-motion" in css
+    block = css.split("prefers-reduced-motion", 1)[1]
+    assert "animation-duration" in block and "transition-duration" in block
+
+
+def test_a_div_with_a_button_role_responds_to_the_keyboard():
+    """A real button fires on Enter and Space; one faked with a role must too."""
+    html = HTML.read_text()
+    js = JS.read_text()
+    if 'role="button"' not in html:
+        pytest.skip("no faked buttons in the markup")
+    assert "'Enter'" in js and "' '" in js
+    assert "getAttribute('role') === 'button'" in js
+
+
+def test_the_estimate_card_is_announced_when_it_updates():
+    """It changes as the user toggles sources; a silent change is invisible."""
+    html = HTML.read_text()
+    assert re.search(r'id="new-estimate"[^>]*aria-live', html)

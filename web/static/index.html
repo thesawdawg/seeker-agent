@@ -218,6 +218,9 @@
         <div id="new-blacklist" class="blacklist-box"></div>
       </details>
 
+      <!-- Pre-run estimate (review X2) — scale of the commitment, before it -->
+      <aside class="estimate-card" id="new-estimate" aria-live="polite" hidden></aside>
+
       <button class="btn btn-primary" type="submit" id="btn-start-run">
         Start run
       </button>
@@ -249,19 +252,24 @@
       </aside>
 
       <div class="run-main">
-        <nav class="tabs" id="run-tabs">
-          <button class="tab is-active" data-tab="overview" type="button">Overview</button>
-          <button class="tab" data-tab="break" type="button" id="tab-break" hidden>Break</button>
-          <button class="tab" data-tab="sources" type="button">Sources</button>
-          <button class="tab" data-tab="tree" type="button">Tree</button>
-          <button class="tab" data-tab="artifacts" type="button">Artifacts</button>
+        <nav class="tabs" id="run-tabs" role="tablist" aria-label="Run detail sections">
+          <button class="tab is-active" data-tab="overview" type="button"
+                  role="tab" aria-selected="true" aria-controls="panel-overview">Overview</button>
+          <button class="tab" data-tab="break" type="button" id="tab-break" hidden
+                  role="tab" aria-selected="false" aria-controls="panel-break">Break</button>
+          <button class="tab" data-tab="sources" type="button"
+                  role="tab" aria-selected="false" aria-controls="panel-sources">Sources</button>
+          <button class="tab" data-tab="tree" type="button"
+                  role="tab" aria-selected="false" aria-controls="panel-tree">Tree</button>
+          <button class="tab" data-tab="artifacts" type="button"
+                  role="tab" aria-selected="false" aria-controls="panel-artifacts">Artifacts</button>
         </nav>
 
-        <div class="tab-panel" id="panel-overview"></div>
-        <div class="tab-panel" id="panel-break" hidden></div>
-        <div class="tab-panel" id="panel-sources" hidden></div>
-        <div class="tab-panel" id="panel-tree" hidden></div>
-        <div class="tab-panel" id="panel-artifacts" hidden></div>
+        <div class="tab-panel" role="tabpanel" id="panel-overview"></div>
+        <div class="tab-panel" role="tabpanel" id="panel-break" hidden></div>
+        <div class="tab-panel" role="tabpanel" id="panel-sources" hidden></div>
+        <div class="tab-panel" role="tabpanel" id="panel-tree" hidden></div>
+        <div class="tab-panel" role="tabpanel" id="panel-artifacts" hidden></div>
       </div>
     </div>
   </section>
@@ -279,17 +287,21 @@
       </div>
     </div>
 
-    <nav class="tabs" id="admin-tabs">
-      <button class="tab is-active" data-admin-tab="sources" type="button">Sources</button>
-      <button class="tab" data-admin-tab="agent_sources" type="button">Agent routing</button>
-      <button class="tab" data-admin-tab="themes" type="button">Themes</button>
-      <button class="tab" data-admin-tab="run_templates" type="button">Templates</button>
+    <nav class="tabs" id="admin-tabs" role="tablist" aria-label="Configuration sections">
+      <button class="tab is-active" data-admin-tab="sources" type="button"
+              role="tab" aria-selected="true" aria-controls="panel-admin-sources">Sources</button>
+      <button class="tab" data-admin-tab="agent_sources" type="button"
+              role="tab" aria-selected="false" aria-controls="panel-admin-agent_sources">Agent routing</button>
+      <button class="tab" data-admin-tab="themes" type="button"
+              role="tab" aria-selected="false" aria-controls="panel-admin-themes">Themes</button>
+      <button class="tab" data-admin-tab="run_templates" type="button"
+              role="tab" aria-selected="false" aria-controls="panel-admin-run_templates">Templates</button>
     </nav>
 
-    <div class="tab-panel" id="panel-admin-sources"></div>
-    <div class="tab-panel" id="panel-admin-agent_sources" hidden></div>
-    <div class="tab-panel" id="panel-admin-themes" hidden></div>
-    <div class="tab-panel" id="panel-admin-run_templates" hidden></div>
+    <div class="tab-panel" role="tabpanel" id="panel-admin-sources"></div>
+    <div class="tab-panel" role="tabpanel" id="panel-admin-agent_sources" hidden></div>
+    <div class="tab-panel" role="tabpanel" id="panel-admin-themes" hidden></div>
+    <div class="tab-panel" role="tabpanel" id="panel-admin-run_templates" hidden></div>
   </section>
 
   <!-- ── Guide / workflow documentation ──────────────────────────────── -->
@@ -652,7 +664,7 @@
   </div>
 </div>
 
-<div class="toast-stack" id="toasts"></div>
+<div class="toast-stack" id="toasts" role="status" aria-live="polite"></div>
 
 <script src="/static/app.js?v=13"></script>
 </body>

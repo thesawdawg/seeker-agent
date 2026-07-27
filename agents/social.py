@@ -912,6 +912,24 @@ rate the paper's relevance as High, Medium, or Low.
 Respond with ONLY a JSON object: {"rating": "High|Medium|Low", "reason": "one sentence"}
 Do not include any other text."""
 
+BATCH_RATING_SYSTEM = """You are a research relevance evaluator.
+
+You will be given a research problem, a theme, and a numbered list of papers.
+Rate each paper's relevance to the problem as High, Medium, or Low.
+
+Judge them against each other as well as against the problem: in a list of
+twenty search results, a handful are usually genuinely central and most are
+peripheral. Do not rate everything Medium.
+
+Respond with ONLY a JSON array, one object per paper, in the same order:
+[{"n": 1, "rating": "High", "reason": "one sentence"}, ...]
+Include every paper you were given. Do not include any other text."""
+
+# How many papers to put in one rating call. Large enough to make the
+# comparison useful and cut call volume hard, small enough that the response
+# stays inside a modest output budget and one bad batch loses little.
+RATING_BATCH_SIZE = 10
+
 def _doi_link(doi: str) -> str:
     """A durable link for a source, independent of the publisher's URL."""
     d = (doi or "").strip()
@@ -953,6 +971,113 @@ def rate_relevance(title: str, abstract: str, problem: str,
     except Exception as e:
         logger.warning(f"Relevance rating failed: {e}")
         return None, f"not assessed: {str(e)[:150]}"
+
+
+def rate_relevance_batch(papers: list[dict], problem: str,
+                         theme_label: str) -> list[tuple[Optional[str], str]]:
+    """
+    Rate a list of papers in as few model calls as possible.
+
+    Returns one (rating, reason) per input paper, in order.
+
+    This used to be one call per paper — with ~10 sources × 8 results × N
+    themes, several hundred to a few thousand calls per run, comfortably the
+    dominant model cost of the whole pipeline, all to produce a single
+    ordering column (review V3).
+
+    Batching also produces *better* ratings, not merely cheaper ones. Rating
+    papers one at a time gives the model no basis for comparison, and the
+    shipped database shows what that yields: 90% Low, 1% High. Twenty results
+    judged side by side let it say which few are actually central.
+
+    A batch that fails or comes back malformed degrades to unrated for that
+    batch only — never to a fabricated "Medium" (review V5).
+    """
+    if not papers:
+        return []
+
+    out: list[tuple[Optional[str], str]] = []
+    for start in range(0, len(papers), RATING_BATCH_SIZE):
+        chunk = papers[start:start + RATING_BATCH_SIZE]
+        out.extend(_rate_one_batch(chunk, problem, theme_label))
+    return out
+
+
+def _rate_one_batch(chunk: list[dict], problem: str,
+                    theme_label: str) -> list[tuple[Optional[str], str]]:
+    import json
+
+    lines = []
+    for i, paper in enumerate(chunk, start=1):
+        title = (paper.get("title") or "").strip()
+        abstract = (paper.get("abstract") or "").strip()
+        lines.append(f"{i}. {title}\n   Abstract: {abstract[:400]}")
+
+    prompt = (
+        f"Research problem: {problem}\n"
+        f"Theme: {theme_label}\n\n"
+        f"Papers ({len(chunk)}):\n" + "\n".join(lines) +
+        f"\n\nRate all {len(chunk)}."
+    )
+
+    try:
+        response = llm.call(prompt, BATCH_RATING_SYSTEM, agent_name="social")
+    except Exception as e:
+        logger.warning(f"[Social] Batch relevance rating failed: {e}")
+        return [(None, f"not assessed: {str(e)[:150]}")] * len(chunk)
+
+    parsed = _parse_batch_ratings(response, len(chunk))
+    if parsed is None:
+        logger.warning("[Social] Batch relevance rating returned unusable JSON")
+        return [(None, "not assessed: model returned unusable JSON")] * len(chunk)
+    return parsed
+
+
+def _parse_batch_ratings(response: str,
+                         expected: int) -> Optional[list[tuple[Optional[str], str]]]:
+    """
+    Pull `expected` (rating, reason) pairs out of a batch response.
+
+    Returns None when the response cannot be used at all. Individual entries
+    that are missing or malformed come back as unrated rather than sinking
+    the whole batch — one bad line should not discard nine good judgements.
+    """
+    import json
+
+    match = re.search(r"\[.*\]", response or "", re.DOTALL)
+    if not match:
+        return None
+    try:
+        rows = json.loads(match.group())
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(rows, list):
+        return None
+
+    # Index by the model's own "n" where it gave one, so a reordered or
+    # partial response still lands on the right papers.
+    by_position: dict[int, dict] = {}
+    for i, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        try:
+            n = int(row.get("n", i))
+        except (TypeError, ValueError):
+            n = i
+        by_position.setdefault(n, row)
+
+    out: list[tuple[Optional[str], str]] = []
+    for n in range(1, expected + 1):
+        row = by_position.get(n)
+        if not row:
+            out.append((None, "not assessed: missing from the model's response"))
+            continue
+        rating = row.get("rating")
+        if rating not in ("High", "Medium", "Low"):
+            out.append((None, f"not assessed: unusable rating {rating!r}"))
+            continue
+        out.append((rating, str(row.get("reason") or "")))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1146,32 +1271,31 @@ def _collect_for_theme(
                 calls_made=1,
             )
 
-        # Rate relevance AND check links in parallel — both are independent
-        # per-result operations. HEAD requests to different publishers are
-        # I/O-bound so they parallelize well (review O4). DB inserts stay
-        # serial.
+        # Relevance is rated in batches, not one call per paper (review V3).
+        # Link checks stay parallel — they are independent HTTP round-trips
+        # to different publishers and parallelize well (review O4). DB
+        # inserts stay serial.
         #
-        # The router holds no per-*call* state, but it does hold per-*run*
-        # state in a ContextVar, and a pool thread starts with an empty
-        # context. Without runctx.propagate these rating calls would ignore
-        # the user's own provider credentials and this run's model overrides,
-        # and would fall back to config.json — silently.
+        # Both run through runctx.propagate: the router holds per-*run* state
+        # in a ContextVar and a pool thread starts with an empty context, so
+        # without it these calls would ignore the user's own provider
+        # credentials and this run's model overrides, silently.
         titled = [r for r in results if r.get("title")]
         ratings: list[tuple[Optional[str], str]] = []
         link_statuses: list[str] = []
         if titled:
             ctx_problem = problem or theme_label
-            def _rate(r):
-                return rate_relevance(r.get("title", ""), r.get("abstract", ""),
-                                      ctx_problem, theme_label)
-            def _link(r):
-                return handler._check_link(r.get("active_link", ""))
-            rate_in_context = runctx.propagate(_rate)
-            link_in_context = runctx.propagate(_link)
-            with ThreadPoolExecutor(max_workers=min(8, len(titled) * 2)) as pool:
-                ratings = list(pool.map(rate_in_context, titled))
-                link_statuses = (list(pool.map(link_in_context, titled))
-                                 if verify_links else ["unchecked"] * len(titled))
+            progress.note("llm", f"rating {len(titled)} result(s) ({theme_id})")
+            ratings = rate_relevance_batch(titled, ctx_problem, theme_label)
+
+            if verify_links:
+                def _link(r):
+                    return handler._check_link(r.get("active_link", ""))
+                link_in_context = runctx.propagate(_link)
+                with ThreadPoolExecutor(max_workers=min(8, len(titled))) as pool:
+                    link_statuses = list(pool.map(link_in_context, titled))
+            else:
+                link_statuses = ["unchecked"] * len(titled)
 
         for r, (rating, reason), link_status in zip(titled, ratings, link_statuses):
 
