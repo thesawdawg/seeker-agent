@@ -1,5 +1,9 @@
 # SEEKER — Application Review
 
+> **A second review pass (2026-07-27) is in [`2026-07-27/`](2026-07-27/README.md).** It covers
+> correctness, security, research efficacy and UI/UX, and records which findings from this pass
+> landed in `4814e8b`.
+
 **Date:** 2026-07-26
 **Scope:** Optimization, redundancy/error handling, user configuration control & UI progress, 429 control across research endpoints (including keyless ones).
 **Method:** Static review of `core/`, `agents/`, `web/`, `tools/`, `worker.py`, `main.py`, `config.json`, `.env.example`. Findings are evidence-backed; line numbers refer to the current tree.
