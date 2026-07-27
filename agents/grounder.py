@@ -314,6 +314,7 @@ def run(context: str, run_id: str, **kwargs):
     #          For each result, save to DB AND add to tree
     # -----------------------------------------------------------------------
     all_sources: list[dict] = []
+    title_to_temp_src: dict[str, str] = {}  # title → temp_src_id for replacement
     source_texts: list[str] = []
 
     for sq in sub_questions:
@@ -368,6 +369,8 @@ def run(context: str, run_id: str, **kwargs):
                 r['_temp_src_id'] = temp_src_id
                 r['_question_id'] = q_id
                 r['_evidence_type'] = evidence_type
+                if title:
+                    title_to_temp_src[title.lower().strip()] = temp_src_id
 
                 # Add claim + evidence to tree under this question
                 claim_text = (
@@ -540,6 +543,7 @@ For each seminal work, use the exact title and author from the sources above whe
     # Step 4 — Save seminal works to database + update tree with real source_ids
     # -----------------------------------------------------------------------
     saved = 0
+    replaced = 0
     for work in data.get("seminal_works", []):
         if not work.get("title"):
             continue
@@ -566,6 +570,13 @@ For each seminal work, use the exact title and author from the sources above whe
         })
         if ok:
             saved += 1
+        # Replace temp source IDs in the tree with the real DB source_id,
+        # matching by title (case-insensitive).
+        work_title = work.get("title", "").lower().strip()
+        temp_id = title_to_temp_src.get(work_title)
+        if temp_id:
+            tree.replace_source_id(temp_id, source_id)
+            replaced += 1
         time.sleep(0.05)
 
     # Save proposed themes to seminal bank
@@ -592,6 +603,7 @@ For each seminal work, use the exact title and author from the sources above whe
     n_books  = sum(1 for s in data.get("seminal_works",[]) if s.get("material_type") == "book")
     n_papers = sum(1 for s in data.get("seminal_works",[]) if s.get("material_type") != "book")
     print(f"  [Grounder] {saved} seminal works saved ({n_papers} papers, {n_books} books) | "
+          f"{replaced} tree source IDs linked | "
           f"{len(data.get('themes_extracted',[]))} themes | "
           f"{len(data.get('proposed_new_themes',[]))} proposals to seminal bank")
     print(f"  [Grounder] Tree: {final_stats['total_nodes']} nodes | "
