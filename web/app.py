@@ -1387,3 +1387,10 @@ if STATIC_DIR.exists():
         if page.exists():
             return FileResponse(str(page))
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Frontend not built")
+
+    @app.get("/guide")
+    def guide():
+        page = STATIC_DIR / "index.html"
+        if page.exists():
+            return FileResponse(str(page))
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Frontend not built")

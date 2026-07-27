@@ -2705,6 +2705,7 @@ function wireChrome() {
   });
   // F12: admin button + admin tab switching
   $('#btn-admin')?.addEventListener('click', () => showAdmin().catch(err => toast(err.message, 'error')));
+  $('#btn-guide')?.addEventListener('click', () => showView('guide'));
   $('#admin-tabs')?.addEventListener('click', ev => {
     const tab = ev.target.closest('[data-admin-tab]');
     if (tab) switchAdminTab(tab.dataset.adminTab);

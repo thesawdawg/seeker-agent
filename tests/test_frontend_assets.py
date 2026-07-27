@@ -125,7 +125,7 @@ def test_modal_can_be_dismissed():
     assert re.search(r"key\s*===\s*'Escape'", js), "Escape does not close the modal"
 
 
-@pytest.mark.parametrize("view", ["login", "runs", "new", "run"])
+@pytest.mark.parametrize("view", ["login", "runs", "new", "run", "admin", "guide"])
 def test_views_are_declared_hidden_except_the_first(view):
     """
     Only one view may be visible at load. Everything else starts hidden, and
