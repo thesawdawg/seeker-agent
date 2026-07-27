@@ -391,6 +391,22 @@ class TreeBuilder:
                 )
                 self._conn.commit()
 
+    def replace_source_id(self, old_id: str, new_id: str):
+        """Replace a source_id in all nodes that reference it."""
+        rows = self._q(
+            "SELECT node_id, source_ids FROM argument_tree WHERE run_id = ?",
+            (self.run_id,)
+        ).fetchall()
+        for row in rows:
+            ids = json.loads(row["source_ids"])
+            if old_id in ids:
+                ids = [new_id if x == old_id else x for x in ids]
+                self._q(
+                    "UPDATE argument_tree SET source_ids = ? WHERE node_id = ?",
+                    (json.dumps(ids), row["node_id"])
+                )
+        self._conn.commit()
+
     # ── Query methods ─────────────────────────────────────────────────────
 
     def _get_field(self, node_id: str, field: str):
