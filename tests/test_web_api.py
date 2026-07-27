@@ -112,6 +112,7 @@ def client(tmp_path, monkeypatch):
     # The login throttle (review S7) is per-process and keyed by client
     # address; every test signs in from the same one.
     auth.reset_login_rate()
+    auth.reset_manager()
     utils.invalidate_config_cache()
 
     from web.app import app
@@ -121,6 +122,7 @@ def client(tmp_path, monkeypatch):
     db_backend.reset_backend()
     auth.reset_sessions()
     auth.reset_login_rate()
+    auth.reset_manager()
     utils.invalidate_config_cache()
 
 
@@ -213,6 +215,118 @@ def test_logout_invalidates_the_session(client, provider):
     assert client.get("/api/auth/me").status_code == 200
     client.post("/api/auth/logout")
     assert client.get("/api/auth/me").status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Password auth (username/password backend)
+# ---------------------------------------------------------------------------
+
+def _register(client, username="alice", password="testpass123",
+              display_name="Alice"):
+    resp = client.post("/api/auth/password/register", json={
+        "username": username, "password": password,
+        "display_name": display_name,
+    })
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def _pw_login(client, username="alice", password="testpass123"):
+    resp = client.post("/api/auth/password/login", json={
+        "username": username, "password": password,
+    })
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_password_register_creates_user_and_session(client):
+    body = _register(client)
+    assert body["user_id"].startswith("USR-")
+    assert body["session"]
+    assert body["display_name"] == "Alice"
+    me = client.get("/api/auth/me").json()
+    assert me["display_name"] == "Alice"
+    assert me["credentials"] == []  # no provider keys yet
+
+
+def test_password_register_rejects_duplicate_username(client):
+    _register(client, username="bob")
+    resp = client.post("/api/auth/password/register", json={
+        "username": "bob", "password": "anotherpass",
+    })
+    assert resp.status_code == 409
+
+
+def test_password_login_succeeds_with_correct_credentials(client):
+    _register(client, username="carol")
+    body = _pw_login(client, username="carol")
+    assert body["user_id"].startswith("USR-")
+    assert body["session"]
+
+
+def test_password_login_rejects_wrong_password(client):
+    _register(client, username="dave", password="correctpass1")
+    resp = client.post("/api/auth/password/login", json={
+        "username": "dave", "password": "wrongpassword",
+    })
+    assert resp.status_code == 401
+    assert "Invalid" in resp.json()["detail"]
+
+
+def test_password_login_rejects_unknown_user(client):
+    resp = client.post("/api/auth/password/login", json={
+        "username": "nobody", "password": "whatever123",
+    })
+    assert resp.status_code == 401
+
+
+def test_password_register_rejects_short_password(client):
+    resp = client.post("/api/auth/password/register", json={
+        "username": "eve", "password": "short",
+    })
+    assert resp.status_code == 422  # pydantic validation
+
+
+def test_password_user_can_add_provider_credentials(client, provider):
+    """A password-authenticated user can add provider API keys via the
+    credentials endpoints — same account, multiple provider keys."""
+    _register(client, username="frank")
+    # Add provider credentials
+    resp = client.put("/api/credentials", json={
+        "provider": "open-webui",
+        "base_url": provider.base_url,
+        "api_key": provider.valid_key,
+        "models": {},
+    })
+    assert resp.status_code == 200, resp.text
+    # Verify the credentials are associated with this user
+    me = client.get("/api/auth/me").json()
+    assert len(me["credentials"]) == 1
+    assert me["credentials"][0]["provider"] == "open-webui"
+
+
+def test_password_user_is_isolated_from_provider_key_user(client, provider):
+    """A password user and a provider-key user are different accounts."""
+    _register(client, username="grace", display_name="Grace")
+    # Sign in with provider key (different user)
+    client.post("/api/auth/logout")
+    sign_in(client, provider, name="ProviderUser")
+    me = client.get("/api/auth/me").json()
+    assert me["display_name"] == "ProviderUser"
+    # The password user's runs should not be visible
+    client.post("/api/auth/logout")
+    _pw_login(client, username="grace")
+    me = client.get("/api/auth/me").json()
+    assert me["display_name"] == "Grace"
+
+
+def test_auth_methods_lists_all_backends(client):
+    resp = client.get("/api/auth/methods")
+    assert resp.status_code == 200
+    names = [m["name"] for m in resp.json()["methods"]]
+    assert "simple" in names
+    assert "password" in names
+    assert "saml" in names
 
 
 # ---------------------------------------------------------------------------

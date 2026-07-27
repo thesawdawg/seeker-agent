@@ -165,6 +165,10 @@ def get_manager() -> AuthManager:
         from web.auth.backends.simple import SimpleBackend
         _manager.add_backend(SimpleBackend())
 
+        # Always register the password backend (username/password auth)
+        from web.auth.backends.password import PasswordBackend
+        _manager.add_backend(PasswordBackend())
+
         # Always register the SAML backend so its routes exist (they return
         # 503 when unconfigured). The backend's `enabled` property controls
         # whether it shows up in /api/auth/methods — it returns False when

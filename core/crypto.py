@@ -117,3 +117,49 @@ def mask(value: str) -> str:
     if len(value) <= 8:
         return "****"
     return f"{value[:4]}…{value[-4:]}"
+
+
+# ---------------------------------------------------------------------------
+# Password hashing — PBKDF2-HMAC-SHA256 (stdlib, no extra dependency)
+# ---------------------------------------------------------------------------
+
+_PBKDF2_ITERATIONS = 310_000  # OWASP 2023 recommendation for SHA-256
+_PBKDF2_DKLEN = 32            # 256-bit derived key
+_SALT_LEN = 16                # 128-bit salt
+
+
+def hash_password(password: str) -> str:
+    """
+    Hash a password for storage.
+
+    Returns a self-contained string: ``pbkdf2_sha256$<iterations>$<salt_b64>$<hash_b64>``
+    """
+    if not password:
+        raise ValueError("Password must not be empty")
+    salt = os.urandom(_SALT_LEN)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt,
+                             _PBKDF2_ITERATIONS, dklen=_PBKDF2_DKLEN)
+    return (f"pbkdf2_sha256${_PBKDF2_ITERATIONS}$"
+            f"{base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}")
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """
+    Verify a password against a stored hash.
+
+    Uses constant-time comparison to prevent timing attacks.
+    Returns False on any mismatch or malformed hash (never raises).
+    """
+    if not password or not stored:
+        return False
+    try:
+        algo, iterations, salt_b64, hash_b64 = stored.split("$", 3)
+        if algo != "pbkdf2_sha256":
+            return False
+        salt = base64.b64decode(salt_b64)
+        expected = base64.b64decode(hash_b64)
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt,
+                                 int(iterations), dklen=len(expected))
+        return hmac.compare_digest(dk, expected)
+    except (ValueError, TypeError, base64.binascii.Error):
+        return False

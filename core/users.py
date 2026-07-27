@@ -93,6 +93,9 @@ def init_users_tables():
     # means the first user is the operator). A specific admin can also be
     # pinned via the SEEKER_ADMIN_USER_ID env var.
     db_backend.ensure_columns("users", {"is_admin": "{INT} DEFAULT 0"})
+    # password_hash column — for username/password auth (auth_kind="password").
+    # The hash is stored here; auth_ref holds the username for lookup.
+    db_backend.ensure_columns("users", {"password_hash": "{TEXT}"})
     _maybe_auto_promote_first_user()
     _maybe_promote_env_admin()
     _schema_ready = True
@@ -209,6 +212,73 @@ def get_or_create(auth_ref: str, display_name: str = "",
 
 def set_display_name(user_id: str, name: str) -> bool:
     return db.update("users", {"display_name": name}, {"user_id": user_id})
+
+
+# ---------------------------------------------------------------------------
+# Password auth (auth_kind="password")
+# ---------------------------------------------------------------------------
+
+def create_password_user(username: str, password: str,
+                         display_name: str = "") -> dict:
+    """
+    Register a new username/password account.
+
+    Returns the new user dict. Raises ValueError if the username is taken.
+    The username is stored as ``auth_ref`` with ``auth_kind="password"``;
+    the password hash goes in the ``password_hash`` column.
+    """
+    init_users_tables()
+    username = (username or "").strip()
+    if not username:
+        raise ValueError("Username must not be empty")
+    if find_by_auth(username, "password"):
+        raise ValueError(f"Username '{username}' is already taken")
+
+    user_id = generate_id("USR")
+    db.insert("users", {
+        "user_id":       user_id,
+        "display_name":  display_name or username,
+        "auth_kind":     "password",
+        "auth_ref":      username,
+        "password_hash": crypto.hash_password(password),
+        "created_at":    _now(),
+        "last_seen_at":  _now(),
+    })
+    logger.info(f"New user registered: {user_id} (password, username={username})")
+    _maybe_auto_promote_first_user()
+    _maybe_promote_env_admin()
+    return get_user(user_id)
+
+
+def verify_password_login(username: str, password: str) -> Optional[dict]:
+    """
+    Look up a password user and verify the password.
+
+    Returns the user dict on success, None on any failure (unknown user,
+    wrong password, or not a password-kind account). Constant-time password
+    comparison is handled by ``crypto.verify_password``.
+    """
+    init_users_tables()
+    user = find_by_auth((username or "").strip(), "password")
+    if not user:
+        return None
+    stored_hash = user.get("password_hash") or ""
+    if not stored_hash:
+        return None
+    if not crypto.verify_password(password, stored_hash):
+        return None
+    # Update last_seen_at on successful login
+    db.update("users", {"last_seen_at": _now()},
+              {"user_id": user["user_id"]})
+    return get_user(user["user_id"])
+
+
+def set_password(user_id: str, password: str) -> bool:
+    """Set or change the password for an existing user."""
+    init_users_tables()
+    return bool(db.update("users",
+                          {"password_hash": crypto.hash_password(password)},
+                          {"user_id": user_id}))
 
 
 # ---------------------------------------------------------------------------

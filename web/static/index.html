@@ -29,48 +29,95 @@
   <section class="view view-centered" id="view-login">
     <form class="card card-narrow" id="form-login">
       <h1 class="card-title"><span class="logo">◎</span> SEEKER</h1>
-      <p class="muted">
-        Sign in with the API key for your own model provider. There is no
-        separate password — your provider key identifies you.
-      </p>
 
-      <label class="field">
-        <span class="field-label">Provider</span>
-        <select id="login-provider">
-          <option value="open-webui" selected>Open-WebUI</option>
-          <option value="openai">OpenAI</option>
-          <option value="ollama">Ollama</option>
-          <option value="lm-studio">LM Studio</option>
-          <option value="vllm">vLLM</option>
-          <option value="openrouter">OpenRouter</option>
-          <option value="anthropic">Anthropic</option>
-        </select>
-      </label>
+      <!-- Auth method tabs -->
+      <div class="auth-tabs" id="auth-tabs">
+        <button type="button" class="auth-tab active" data-method="apikey">API key</button>
+        <button type="button" class="auth-tab" data-method="password">Username</button>
+      </div>
 
-      <label class="field">
-        <span class="field-label">Base URL</span>
-        <input id="login-base-url" type="url" required
-               value="http://localhost:3000/api"
-               placeholder="http://localhost:3000/api">
-        <span class="field-hint" id="login-base-hint">
-          Open-WebUI: include the <code>/api</code> prefix.
-        </span>
-      </label>
+      <!-- API key method -->
+      <div id="login-apikey" class="auth-panel">
+        <p class="muted">
+          Sign in with the API key for your own model provider. There is no
+          separate password — your provider key identifies you.
+        </p>
 
-      <label class="field">
-        <span class="field-label">API key</span>
-        <input id="login-api-key" type="password" required
-               placeholder="sk-…" autocomplete="off">
-        <span class="field-hint">
-          Open-WebUI → Settings → Account → API keys.
-          Stored encrypted; never shown again.
-        </span>
-      </label>
+        <label class="field">
+          <span class="field-label">Provider</span>
+          <select id="login-provider">
+            <option value="open-webui" selected>Open-WebUI</option>
+            <option value="openai">OpenAI</option>
+            <option value="ollama">Ollama</option>
+            <option value="lm-studio">LM Studio</option>
+            <option value="vllm">vLLM</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
+        </label>
 
-      <label class="field">
-        <span class="field-label">Display name <span class="muted">(optional)</span></span>
-        <input id="login-name" type="text" placeholder="How should we address you?">
-      </label>
+        <label class="field">
+          <span class="field-label">Base URL</span>
+          <input id="login-base-url" type="url" required
+                 value="http://localhost:3000/api"
+                 placeholder="http://localhost:3000/api">
+          <span class="field-hint" id="login-base-hint">
+            Open-WebUI: include the <code>/api</code> prefix.
+          </span>
+        </label>
+
+        <label class="field">
+          <span class="field-label">API key</span>
+          <input id="login-api-key" type="password" required
+                 placeholder="sk-…" autocomplete="off">
+          <span class="field-hint">
+            Open-WebUI → Settings → Account → API keys.
+            Stored encrypted; never shown again.
+          </span>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Display name <span class="muted">(optional)</span></span>
+          <input id="login-name" type="text" placeholder="How should we address you?">
+        </label>
+      </div>
+
+      <!-- Username/password method -->
+      <div id="login-password" class="auth-panel" hidden>
+        <p class="muted" id="password-panel-hint">
+          Sign in with your username and password.
+        </p>
+
+        <label class="field">
+          <span class="field-label">Username</span>
+          <input id="login-username" type="text" autocomplete="username"
+                 placeholder="your-username">
+        </label>
+
+        <label class="field">
+          <span class="field-label">Password</span>
+          <input id="login-pw" type="password" autocomplete="current-password"
+                 placeholder="••••••••">
+        </label>
+
+        <!-- Register-only fields (hidden in login mode) -->
+        <div id="register-fields" hidden>
+          <label class="field">
+            <span class="field-label">Confirm password</span>
+            <input id="login-pw2" type="password" autocomplete="new-password"
+                   placeholder="••••••••">
+          </label>
+          <label class="field">
+            <span class="field-label">Display name <span class="muted">(optional)</span></span>
+            <input id="login-pw-name" type="text"
+                   placeholder="How should we address you?">
+          </label>
+        </div>
+
+        <button type="button" class="btn btn-ghost btn-small" id="btn-toggle-register">
+          Need an account? Register
+        </button>
+      </div>
 
       <button class="btn btn-primary btn-block" type="submit" id="btn-login">
         Sign in

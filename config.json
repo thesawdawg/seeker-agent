@@ -1395,12 +1395,19 @@
   },
 
   "auth": {
-    "_description": "Authentication backend configuration. Backends are pluggable — see web/auth/backends/. The 'simple' backend (provider API key) is always enabled. Set SEEKER_SAML_ENABLED=1 in the environment to activate the SAML backend.",
-    "backends": ["simple"],
-    "_backends_note": "List of enabled auth backend names. Currently supported: 'simple' (provider API key), 'saml' (SAML 2.0 SSO — wireframe). SAML also requires SEEKER_SAML_* environment variables to be set.",
+    "_description": "Authentication backend configuration. Backends are pluggable — see web/auth/backends/. The 'simple' (provider API key) and 'password' (username/password) backends are always enabled. Set SEEKER_SAML_ENABLED=1 in the environment to activate the SAML backend.",
+    "backends": ["simple", "password"],
+    "_backends_note": "List of enabled auth backend names. Currently supported: 'simple' (provider API key), 'password' (username/password), 'saml' (SAML 2.0 SSO — wireframe). SAML also requires SEEKER_SAML_* environment variables to be set.",
     "simple": {
       "_description": "Provider API key authentication. No config needed — the user's provider key IS their credential.",
       "enabled": true
+    },
+    "password": {
+      "_description": "Username/password authentication. Users register with a username and password, then add provider API keys via the credentials endpoints. A user may have multiple provider keys associated with the same account. Passwords are hashed with PBKDF2-HMAC-SHA256 (310k iterations). No config needed.",
+      "enabled": true,
+      "min_password_length": 8,
+      "min_username_length": 3,
+      "max_username_length": 64
     },
     "saml": {
       "_description": "SAML 2.0 Web Browser SSO. This is a wireframe — the protocol logic (request generation, assertion validation, signature verification) is stubbed. Configure via environment variables: SEEKER_SAML_IDP_ENTITY_ID, SEEKER_SAML_IDP_SSO_URL, SEEKER_SAML_SP_ENTITY_ID, SEEKER_SAML_SP_ACS_URL, SEEKER_SAML_CERT, SEEKER_SAML_KEY, SEEKER_SAML_IDP_CERT. Enable with SEEKER_SAML_ENABLED=1.",

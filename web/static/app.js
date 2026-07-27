@@ -277,40 +277,121 @@ const BASE_URL_DEFAULTS = {
 };
 
 function wireLogin() {
-  $('#login-provider').addEventListener('change', ev => {
-    const preset = BASE_URL_DEFAULTS[ev.target.value];
-    if (preset) $('#login-base-url').value = preset;
-    $('#login-base-hint').innerHTML = ev.target.value === 'open-webui'
-      ? 'Open-WebUI: include the <code>/api</code> prefix.'
-      : 'The endpoint root, without <code>/chat/completions</code>.';
+  // --- Auth state: which method tab is active, and whether we're registering ---
+  let loginMethod = 'apikey';   // 'apikey' | 'password'
+  let isRegistering = false;
+
+  const providerSelect = $('#login-provider');
+  if (providerSelect) {
+    providerSelect.addEventListener('change', ev => {
+      const preset = BASE_URL_DEFAULTS[ev.target.value];
+      if (preset) $('#login-base-url').value = preset;
+      $('#login-base-hint').innerHTML = ev.target.value === 'open-webui'
+        ? 'Open-WebUI: include the <code>/api</code> prefix.'
+        : 'The endpoint root, without <code>/chat/completions</code>.';
+    });
+  }
+
+  // --- Tab switching (API key ↔ Username) ---
+  document.querySelectorAll('.auth-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const method = tab.dataset.method;
+      loginMethod = method;
+      document.querySelectorAll('.auth-tab').forEach(t =>
+        t.classList.toggle('active', t === tab));
+      $('#login-apikey').hidden = (method !== 'apikey');
+      $('#login-password').hidden = (method !== 'password');
+      // Reset register mode when switching tabs
+      if (method !== 'password') setRegisterMode(false);
+      // Update submit button label
+      $('#btn-login').textContent = 'Sign in';
+      $('#login-error').hidden = true;
+    });
   });
 
+  // --- Register / login toggle (password method only) ---
+  function setRegisterMode(on) {
+    isRegistering = on;
+    $('#register-fields').hidden = !on;
+    $('#password-panel-hint').textContent = on
+      ? 'Create a new account with a username and password.'
+      : 'Sign in with your username and password.';
+    $('#btn-login').textContent = on ? 'Register' : 'Sign in';
+    $('#btn-toggle-register').textContent = on
+      ? 'Already have an account? Sign in'
+      : 'Need an account? Register';
+    $('#login-error').hidden = true;
+  }
+
+  const toggleBtn = $('#btn-toggle-register');
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', () =>
+      setRegisterMode(!isRegistering));
+  }
+
+  // --- Form submit — dispatches to the right endpoint ---
   $('#form-login').addEventListener('submit', async ev => {
     ev.preventDefault();
     const button = $('#btn-login');
     const error = $('#login-error');
     error.hidden = true;
     button.disabled = true;
-    button.textContent = 'Checking your key…';
 
     try {
-      await api('/api/auth/login', {
-        method: 'POST',
-        body: {
-          provider:     $('#login-provider').value,
-          base_url:     $('#login-base-url').value.trim(),
-          api_key:      $('#login-api-key').value.trim(),
-          display_name: $('#login-name').value.trim(),
-        },
-      });
-      $('#login-api-key').value = '';
+      if (loginMethod === 'apikey') {
+        button.textContent = 'Checking your key…';
+        await api('/api/auth/login', {
+          method: 'POST',
+          body: {
+            provider:     $('#login-provider').value,
+            base_url:     $('#login-base-url').value.trim(),
+            api_key:      $('#login-api-key').value.trim(),
+            display_name: $('#login-name').value.trim(),
+          },
+        });
+        $('#login-api-key').value = '';
+      } else {
+        // Password method
+        const username = $('#login-username').value.trim();
+        const password = $('#login-pw').value;
+        if (!username || !password) {
+          throw new Error('Username and password are required');
+        }
+        if (isRegistering) {
+          const pw2 = $('#login-pw2').value;
+          if (password !== pw2) {
+            throw new Error('Passwords do not match');
+          }
+          if (password.length < 8) {
+            throw new Error('Password must be at least 8 characters');
+          }
+          button.textContent = 'Creating account…';
+          await api('/api/auth/password/register', {
+            method: 'POST',
+            body: {
+              username,
+              password,
+              display_name: $('#login-pw-name').value.trim(),
+            },
+          });
+          $('#login-pw').value = '';
+          $('#login-pw2').value = '';
+        } else {
+          button.textContent = 'Signing in…';
+          await api('/api/auth/password/login', {
+            method: 'POST',
+            body: { username, password },
+          });
+          $('#login-pw').value = '';
+        }
+      }
       await afterSignIn();
     } catch (err) {
       error.textContent = err.message;
       error.hidden = false;
     } finally {
       button.disabled = false;
-      button.textContent = 'Sign in';
+      button.textContent = isRegistering ? 'Register' : 'Sign in';
     }
   });
 
@@ -348,20 +429,29 @@ function wireLogin() {
 }
 
 /**
- * Discover available auth methods and show the SSO button if SAML is enabled.
+ * Discover available auth methods and show/hide UI accordingly.
  * Called on page load before the user signs in.
  */
 async function discoverAuthMethods() {
   try {
     const body = await api('/api/auth/methods');
     const methods = body.methods || [];
+
+    // Show SSO button if SAML is enabled
     const saml = methods.find(m => m.name === 'saml' && m.enabled);
     if (saml) {
       const section = $('#sso-section');
       if (section) section.hidden = false;
     }
+
+    // Hide the Username tab if the password backend is not available
+    const password = methods.find(m => m.name === 'password' && m.enabled);
+    if (!password) {
+      const tab = document.querySelector('.auth-tab[data-method="password"]');
+      if (tab) tab.hidden = true;
+    }
   } catch {
-    // If the endpoint isn't available (older server), just hide SSO.
+    // If the endpoint isn't available (older server), defaults are fine.
   }
 }
 
