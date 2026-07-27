@@ -531,6 +531,7 @@ function showNewRun() {
   buildSourceGrid();
   buildSourceKeys();
   buildTemplateBar();
+  refreshEstimate();
   buildPreviousRunPicker();
   buildBlacklist();
   $('#new-error').hidden = true;
@@ -737,6 +738,10 @@ async function buildSourceGrid() {
       el('span', { class: 'muted small', text: note }),
     ));
   }
+  // Any change to the selection changes the estimate above.
+  container.addEventListener('change', scheduleEstimate);
+  container.addEventListener('input', scheduleEstimate);
+
   // Per-source result limit control (review U5)
   container.append(el('div', { class: 'source-limit-row' },
     el('label', { for: 'src-limit', text: 'Results per source',
@@ -759,6 +764,57 @@ function collectSourceOverrides(container) {
     overrides.limit_per_source = parseInt(lim.value, 10);
   }
   return overrides;
+}
+
+/* ── Pre-run estimate (review X2) ────────────────────────────────────────
+ * A run is a long, expensive, human-blocking commitment and this screen used
+ * to give no sense of its scale before the Start button. Refreshed whenever
+ * the source selection changes, so turning sources off visibly shrinks it.  */
+
+let estimateTimer = null;
+
+function scheduleEstimate() {
+  clearTimeout(estimateTimer);
+  estimateTimer = setTimeout(refreshEstimate, 250);
+}
+
+async function refreshEstimate() {
+  const box = $('#new-estimate');
+  if (!box) return;
+  const grid = $('#new-source-grid');
+  const overrides = grid ? collectSourceOverrides(grid) : {};
+  try {
+    const params = new URLSearchParams({
+      source_overrides: JSON.stringify(overrides),
+    });
+    const est = await api(`/api/runs/estimate?${params}`);
+    clear(box);
+    box.hidden = false;
+
+    const mins = Math.max(1, Math.round(est.estimated_seconds / 60));
+    box.append(
+      el('h3', { class: 'estimate-title', text: 'Before you start' }),
+      el('ul', { class: 'estimate-list' },
+        el('li', {}, `${est.themes} theme(s) × ${est.sources.length} source(s) `
+                   + `× ${est.results_per_source} results — `,
+          el('strong', { text: `${est.source_lookups.toLocaleString()} source lookups` })),
+        el('li', {}, 'Roughly ',
+          el('strong', { text: `${est.estimated_calls.toLocaleString()} model calls` }),
+          ` · ~${est.estimated_tokens.toLocaleString()} tokens`),
+        el('li', {}, 'Roughly ', el('strong', { text: `${mins} minutes` }),
+          ' of compute, plus ',
+          el('strong', { text: `${est.breaks} breaks` }),
+          ' that wait for you'),
+      ),
+      el('p', { class: 'muted small estimate-basis',
+                text: est.is_measured
+                  ? `Based on ${est.basis}. A rough guide, not a quote.`
+                  : `Based on ${est.basis}. Expect this to be well off until `
+                    + `you have run the pipeline once.` }),
+    );
+  } catch {
+    box.hidden = true;      // non-essential; never block starting a run
+  }
 }
 
 // Per-user academic source API keys (review U2). Lets a researcher add a
@@ -1094,7 +1150,10 @@ function ensureOverviewSkeleton() {
   if ($('#live-card', panel)) return panel;
   clear(panel);
   panel.append(
-    el('div', { id: 'live-card' }),
+    // aria-live on the live card: during a twenty-minute run this is the one
+    // thing a screen-reader user most needs, and without it the page appears
+    // frozen. 'polite' so it waits for a pause rather than interrupting.
+    el('div', { id: 'live-card', role: 'status', 'aria-live': 'polite' }),
     el('div', { id: 'stat-grid', class: 'stat-grid' }),
     el('div', { id: 'routing-note' }),
     el('div', { class: 'review-group' },
@@ -1103,6 +1162,8 @@ function ensureOverviewSkeleton() {
         el('span', { class: 'muted small', id: 'activity-count' })),
       el('p', { class: 'muted small',
                 text: 'Every service the pipeline contacts, newest last.' }),
+      // Not a live region: it appends a line per source call and would
+      // narrate the entire run. The live card above carries the summary.
       el('div', { class: 'activity-log', id: 'activity-log' },
         el('p', { class: 'muted small', text: 'Waiting for the first step…' })),
     ),
@@ -2625,9 +2686,22 @@ function showNodeDetail(node, sources, container) {
   }
 }
 
+/* Keep aria-selected in step with the visual is-active class. A screen
+ * reader announces the tab state from aria-selected, not from a CSS class,
+ * so without this the tab strip reads as five identical buttons. */
+function markSelectedTab(tabs, isSelected) {
+  tabs.forEach(t => {
+    const on = isSelected(t);
+    t.classList.toggle('is-active', on);
+    t.setAttribute('aria-selected', on ? 'true' : 'false');
+    // Roving tabindex: one stop for the strip, arrows move within it.
+    t.tabIndex = on ? 0 : -1;
+  });
+}
+
 function switchTab(name) {
   state.tab = name;
-  $$('.tab').forEach(t => t.classList.toggle('is-active', t.dataset.tab === name));
+  markSelectedTab($$('#run-tabs .tab'), t => t.dataset.tab === name);
   $('#panel-overview').hidden  = name !== 'overview';
   $('#panel-break').hidden     = name !== 'break';
   $('#panel-sources').hidden   = name !== 'sources';
@@ -2730,9 +2804,7 @@ async function showAdmin() {
 }
 
 function switchAdminTab(tab) {
-  $$('#admin-tabs .tab').forEach(t => {
-    t.classList.toggle('is-active', t.dataset.adminTab === tab);
-  });
+  markSelectedTab($$('#admin-tabs .tab'), t => t.dataset.adminTab === tab);
   $$('#view-admin .tab-panel').forEach(p => { p.hidden = true; });
   const panel = $(`#panel-admin-${tab}`);
   if (panel) { panel.hidden = false; renderAdminTab(tab, panel); }
@@ -2978,21 +3050,55 @@ function renderAdminTemplates(panel) {
   }
 }
 
+/* Arrow-key navigation within a tablist. Expected of anything using the tab
+ * role, and the reason the roving tabindex in markSelectedTab exists: Tab
+ * moves past the whole strip, arrows move between the tabs in it. */
+function wireTablistKeys(nav, onSelect, attr) {
+  nav.addEventListener('keydown', ev => {
+    const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
+    if (!keys.includes(ev.key)) return;
+    const tabs = Array.from(nav.querySelectorAll('.tab')).filter(t => !t.hidden);
+    if (!tabs.length) return;
+    const current = tabs.indexOf(document.activeElement);
+    let next;
+    if (ev.key === 'Home') next = 0;
+    else if (ev.key === 'End') next = tabs.length - 1;
+    else {
+      const step = ev.key === 'ArrowRight' ? 1 : -1;
+      next = ((current < 0 ? 0 : current) + step + tabs.length) % tabs.length;
+    }
+    ev.preventDefault();
+    tabs[next].focus();
+    onSelect(tabs[next].dataset[attr]);
+  });
+}
+
 function wireChrome() {
-  $('#run-tabs').addEventListener('click', ev => {
+  const runTabs = $('#run-tabs');
+  runTabs.addEventListener('click', ev => {
     const tab = ev.target.closest('.tab');
     if (tab) switchTab(tab.dataset.tab);
   });
+  wireTablistKeys(runTabs, switchTab, 'tab');
   $$('[data-nav="runs"]').forEach(node => {
     node.addEventListener('click', () => showRuns().catch(err => toast(err.message, 'error')));
+    // The brand is a div with role="button"; a real button responds to Enter
+    // and Space, so one carrying the role has to as well.
+    if (node.getAttribute('role') === 'button') {
+      node.addEventListener('keydown', ev => {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); node.click(); }
+      });
+    }
   });
   // F12: admin button + admin tab switching
   $('#btn-admin')?.addEventListener('click', () => showAdmin().catch(err => toast(err.message, 'error')));
   $('#btn-guide')?.addEventListener('click', () => showView('guide'));
-  $('#admin-tabs')?.addEventListener('click', ev => {
+  const adminTabs = $('#admin-tabs');
+  adminTabs?.addEventListener('click', ev => {
     const tab = ev.target.closest('[data-admin-tab]');
     if (tab) switchAdminTab(tab.dataset.adminTab);
   });
+  if (adminTabs) wireTablistKeys(adminTabs, switchAdminTab, 'adminTab');
   $('#modal-cancel').addEventListener('click', () => { $('#modal').hidden = true; });
   $('#modal').addEventListener('click', ev => {
     if (ev.target.id === 'modal') $('#modal').hidden = true;

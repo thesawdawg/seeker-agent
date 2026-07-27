@@ -329,7 +329,13 @@ def run(context: str, run_id: str, output_type: str = "research_brief",
             f"\\end{{document}}\n"
         )
     else:
-        full_content = content
+        # Markdown artifacts carry their evidence base too (review V6). The
+        # LaTeX path is left alone: markdown inside a .tex document would not
+        # compile, and the Understanding Map is the artifact that matters
+        # most for provenance.
+        from core import provenance
+        prov_md = provenance.render_markdown(run_id)
+        full_content = content + ("\n\n---\n\n" + prov_md if prov_md else "")
 
     # Save file
     filename = f"{run_id}_{output_type}.{fmt}"
@@ -476,7 +482,16 @@ def _run_understanding_map(context: str, run_id: str, problem: str,
     refs_md = references.render_references_markdown(cited_sources)
     refs_tex = references.render_references_tex(cited_sources)
 
+    # The map states its own evidence base: what was collected, what was
+    # skipped, what could not be verified, what was truncated out of the
+    # agents' context. Without it "every claim traces to verifiable evidence"
+    # is a promise the reader has to take on faith (review V6).
+    from core import provenance
+    prov_md = provenance.render_markdown(run_id, cited=cited_sources)
+
     full_md = content + "\n\n---\n\n" + refs_md
+    if prov_md:
+        full_md += "\n\n---\n\n" + prov_md
 
     # --- Stage 7: write artifacts + persist ---------------------------------
     md_path = ARTIFACTS_DIR / f"{run_id}_understanding_map.md"

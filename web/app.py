@@ -361,6 +361,44 @@ def create_run(body: CreateRunRequest, user: dict = Depends(auth.resolve_user)):
             "state": pipeline.get_state(run_id)}
 
 
+# Declared before /api/runs/{run_id}: FastAPI matches in declaration
+# order, so a literal segment under a parameterised prefix has to come
+# first or the parameterised route captures it as a run_id.
+@app.get("/api/runs/estimate")
+def estimate_run(user: dict = Depends(auth.resolve_user),
+                 source_overrides: str = "", themes: int = 0):
+    """
+    Roughly what a run will cost, before committing to it (review X2).
+
+    A run is a long, expensive, human-blocking commitment and the New Run
+    screen previously gave no sense of its scale. This learns from the
+    caller's own completed runs where there are any, and says so when there
+    are not — an estimate labelled as a guess is useful; one that looks like
+    a measurement is not.
+
+    source_overrides is an optional JSON object, the same shape the New Run
+    form posts, so the estimate tracks the sources actually selected.
+    """
+    from core import provenance
+
+    overrides = {}
+    if source_overrides:
+        try:
+            parsed = json.loads(source_overrides)
+            if isinstance(parsed, dict):
+                overrides = parsed
+        except (json.JSONDecodeError, TypeError):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "source_overrides must be a JSON object")
+    try:
+        config = load_config()
+    except FileNotFoundError:
+        config = {}
+    return provenance.estimate_run(
+        user["user_id"], config, overrides,
+        theme_count=themes if themes > 0 else None)
+
+
 @app.get("/api/runs/{run_id}")
 def get_run(run_id: str, user: dict = Depends(auth.resolve_user)):
     auth.require_run_access(user, run_id)
