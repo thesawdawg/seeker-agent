@@ -35,8 +35,6 @@ jobs:
 
       - name: Run tests
         run: pytest -q
-        env:
-          SEEKER_DB_BACKEND: sqlite
 
   mysql:
     # The MySQL dialect is what the Docker deployment runs on, and its tests
@@ -72,14 +70,14 @@ jobs:
           pip install -e '.[dev]'
 
       - name: Run tests
-        run: pytest -q
+        # SEEKER_TEST_MYSQL_URL is the variable tests/test_mysql_backend.py
+        # actually gates on. SEEKER_DB_BACKEND is deliberately *not* forced to
+        # mysql: the rest of the suite builds throwaway SQLite databases and
+        # expects that to be the ambient default, so forcing it here would
+        # break those tests without exercising anything extra.
+        run: pytest -q -rs
         env:
-          SEEKER_DB_BACKEND: mysql
-          MYSQL_HOST: 127.0.0.1
-          MYSQL_PORT: "3306"
-          MYSQL_USER: seeker
-          MYSQL_PASSWORD: seeker
-          MYSQL_DATABASE: seeker_test
+          SEEKER_TEST_MYSQL_URL: mysql://seeker:seeker@127.0.0.1:3306/seeker_test
 
   docker:
     name: docker build
