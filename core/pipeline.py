@@ -25,6 +25,7 @@ Status values
   skipped         deliberately bypassed
 """
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -205,6 +206,29 @@ def set_step_status(run_id: str, step_name: str, status: str,
     db.update("run_steps", data, {"run_id": run_id, "step_name": step_name})
 
 
+def claim_step(run_id: str, step_name: str, from_statuses=("pending", "failed")) -> bool:
+    """
+    Take ownership of a step, atomically.
+
+    A conditional UPDATE, so the database decides the winner: if two drivers
+    reach the same pending step — which the job queue should prevent but
+    cannot guarantee across a reap, a forced stop, or a manual advance — only
+    the one whose UPDATE matches a row proceeds. Without this both would set
+    the step running and both would execute the agent, doubling its output
+    into the same run (review C5).
+
+    Returns True if this caller now owns the step.
+    """
+    init_steps_table()
+    ph = ", ".join("?" for _ in from_statuses)
+    changed = db.execute_rowcount(
+        f"UPDATE run_steps SET status = 'running', started_at = ?, error = NULL "
+        f"WHERE run_id = ? AND step_name = ? AND status IN ({ph})",
+        (_now(), run_id, step_name, *from_statuses),
+    )
+    return changed > 0
+
+
 def record_step_warning(run_id: str, step_name: str, warning: str) -> None:
     """
     Record a non-fatal warning on a step (review E7).
@@ -234,15 +258,18 @@ def record_step_warning(run_id: str, step_name: str, warning: str) -> None:
 INCOMPLETE = ("pending", "running", "awaiting_input", "failed")
 
 
-def next_step(run_id: str) -> Optional[dict]:
+def next_step(run_id: str, steps: list[dict] = None) -> Optional[dict]:
     """
     The first step that still needs work.
 
     A step already `awaiting_input` is returned so the caller can see the run
     is parked at a break; `running` is returned so a crashed step is visible
     rather than silently skipped; `failed` is returned so a resume retries it.
+
+    Pass `steps` when the caller already has them — get_state does — to save
+    a second read of the same rows (review O6).
     """
-    for step in get_steps(run_id):
+    for step in (steps if steps is not None else get_steps(run_id)):
         if step["status"] in INCOMPLETE:
             return step
     return None
@@ -252,18 +279,15 @@ def next_step(run_id: str) -> Optional[dict]:
 # Run state — what the CLI prints and the API serves
 # ---------------------------------------------------------------------------
 
-def get_run_summary(run_id: str) -> dict:
-    """Lightweight run status for list views (review O6).
-
-    Returns only progress.done, progress.total, and awaiting_break —
-    the three fields /api/runs needs — without building the full step-state
-    objects that get_state() assembles. Avoids N+1 full-state lookups when
-    listing runs.
+def summarise_steps(steps: list[dict]) -> dict:
     """
-    init_steps_table()
-    steps = db.fetch("run_steps", {"run_id": run_id})
+    progress + awaiting_break from step rows the caller already has.
+
+    Split out from get_run_summary so a list view can read every run's steps
+    in one grouped query and summarise them here, instead of querying per run
+    (review O2).
+    """
     done = sum(1 for s in steps if s.get("status") in ("done", "skipped"))
-    # Find the current step (first non-terminal) to check for awaiting_input
     awaiting = None
     for s in sorted(steps, key=lambda x: x.get("ordinal", 0)):
         if s.get("status") == "awaiting_input":
@@ -279,6 +303,16 @@ def get_run_summary(run_id: str) -> dict:
     }
 
 
+def get_run_summary(run_id: str) -> dict:
+    """Lightweight run status for a single run (review O6).
+
+    Returns only progress.done, progress.total, and awaiting_break —
+    without building the full step-state objects that get_state() assembles.
+    """
+    init_steps_table()
+    return summarise_steps(db.fetch("run_steps", {"run_id": run_id}))
+
+
 def get_state(run_id: str) -> dict:
     """A complete picture of a run: status, per-step progress, current break."""
     run = db.get_run(run_id)
@@ -286,7 +320,7 @@ def get_state(run_id: str) -> dict:
         return {"run_id": run_id, "exists": False}
 
     steps = get_steps(run_id)
-    current = next_step(run_id)
+    current = next_step(run_id, steps)
 
     awaiting = None
     if current and current["status"] == "awaiting_input":
@@ -715,7 +749,6 @@ def advance(run_id: str, problem: str = None, config: dict = None,
     problem = problem or run.get("problem", "")
 
     ensure_steps(run_id)
-    executed = 0
 
     # Bind LLM calls to this run for the duration. Agents call
     # llm.call(prompt, system, agent_name=...) without a run_id, so without
@@ -763,13 +796,20 @@ def _advance_loop(run_id: str, problem: str, config: dict,
                 logger.info(f"[{run_id}] Parked at {name} — awaiting human input")
             break
 
-        # A step left `running` means a previous driver died mid-step
-        if step["status"] == "running":
-            logger.warning(f"[{run_id}] Step {name} was left running — retrying")
+        # `running` is deliberately *not* claimable: a step in that state
+        # belongs to a live driver, and claiming it is exactly the
+        # double-execution this guards against. A step left running by a
+        # crashed worker is recovered one layer up — jobs.reap_stale resets
+        # it when it reaps the dead worker's job, and resume() resets it when
+        # a human restarts the run.
+        if not claim_step(run_id, name):
+            logger.info(
+                f"[{run_id}] {name} is {step['status']} and could not be "
+                f"claimed — another driver holds it. Leaving it to them.")
+            break
 
         db.update("run_steps", {"attempt": (step.get("attempt") or 0) + 1},
                   {"run_id": run_id, "step_name": name})
-        set_step_status(run_id, name, "running")
         db.update_run_status(run_id, "active")
         logger.info(f"[{run_id}] ▶ {step_def.label}")
 
@@ -960,20 +1000,53 @@ def create_run(problem: str, run_id: str = None, previous_run_id: str = None) ->
 # step after the branch point, with the cloned context already in place.
 # ---------------------------------------------------------------------------
 
-# Tables whose rows are scoped by run_id and need cloning. Each entry is
-# (table, id_column, extra_where) — extra_where filters by type/agent_origin
-# where a single table holds outputs from multiple steps.
-_CLONE_TABLES = [
-    ("sources",              "source_id",   None),
-    ("concept_expansions",   "expansion_id", None),
-    ("gaps",                 "gap_id",      None),
-    ("implications",         "implication_id", None),
-    ("proposals",            "proposal_id", None),
-    ("evaluations",          "evaluation_id", None),
-    ("syntheses",            "synthesis_id", None),
-    ("directions",           "direction_id", None),
-    ("break_instructions",   "instruction_id", None),
-]
+# The primary-key column for each run-scoped table, so a cloned row can be
+# given a fresh id.
+#
+# Which tables get cloned is *not* a fixed list: it is derived from the
+# StepDef.outputs of the steps in the branch prefix. Cloning a fixed list
+# copied a run's gaps, proposals, evaluations and syntheses into a branch
+# taken before those steps ran — and since the steps were then marked pending
+# and nothing purged the rows, the branch re-ran them on top of the parent's
+# conclusions (review C4). Deriving from STEP_DEFS keeps one source of truth
+# for "what does this step produce".
+_TABLE_ID_COL = {
+    "sources":             "source_id",
+    "concept_expansions":  "expansion_id",
+    "gaps":                "gap_id",
+    "implications":        "implication_id",
+    "proposals":           "proposal_id",
+    "evaluations":         "evaluation_id",
+    "syntheses":           "synthesis_id",
+    "directions":          "direction_id",
+    "artifacts":           "artifact_id",
+}
+
+# Handled by dedicated cloners rather than the generic row copy.
+_CLONE_SPECIAL = {"argument_tree", "break_instructions"}
+
+
+def _clone_plan(clone_step_names: list[str]) -> list[tuple[str, str, dict]]:
+    """(table, id_column, extra_where) for exactly the prefix's outputs."""
+    plan: list[tuple[str, str, dict]] = []
+    seen: set[tuple[str, str]] = set()
+    for name in clone_step_names:
+        step = STEP_BY_NAME.get(name)
+        if not step:
+            continue
+        for table, extra in step.outputs:
+            if table in _CLONE_SPECIAL:
+                continue
+            id_col = _TABLE_ID_COL.get(table)
+            if not id_col:
+                logger.debug(f"[F11] No id column known for {table} — skipped")
+                continue
+            key = (table, json.dumps(extra or {}, sort_keys=True))
+            if key in seen:
+                continue
+            seen.add(key)
+            plan.append((table, id_col, dict(extra or {})))
+    return plan
 
 
 def branch_run(source_run_id: str, branch_after_step: str,
@@ -1024,9 +1097,9 @@ def branch_run(source_run_id: str, branch_after_step: str,
     logger.info(f"[F11] Branching {source_run_id} after {branch_after_step} "
                 f"into {new_run_id}")
 
-    # 1. Clone output tables. Each table is run-scoped; we copy rows from
-    #    the source run, generating new IDs where needed.
-    for table, id_col, extra_where in _CLONE_TABLES:
+    # 1. Clone the outputs of the prefix steps only — never the outputs of
+    #    steps this branch is about to re-run (review C4).
+    for table, id_col, extra_where in _clone_plan(clone_step_names):
         _clone_table(table, id_col, source_run_id, new_run_id, extra_where)
 
     # 2. Clone the argument tree. This needs special handling because

@@ -5,11 +5,27 @@ Thank you for your interest in contributing. SEEKER is an open research tool and
 ## Getting Started
 
 1. **Fork and clone** the repository
-2. **Set up the environment** (see README.md)
-3. **Run the tests** to make sure everything works:
+2. **Install the dependencies, including the test extras.** The suite needs
+   `pytest` and `httpx`, and several modules degrade to opaque failures when
+   an optional dependency is half-installed — a broken `cryptography` shows
+   up as dozens of `RuntimeError: This portal is not running`, which says
+   nothing about the real cause. Install everything:
+
    ```bash
-   python3 -m pytest tests/ -v
+   pip install -e '.[dev,web,mysql]'
+   pip install -r requirements.txt
    ```
+
+3. **Set up the rest of the environment** (see README.md)
+4. **Run the tests** to make sure everything works:
+
+   ```bash
+   python3 -m pytest -q
+   ```
+
+   You should see all tests pass, with the MySQL suite skipped unless a
+   server is configured. If you get a wall of errors instead, check the
+   install above before looking at the code.
 
 ## Project Structure
 
@@ -113,14 +129,30 @@ Add themes to `config.json` with keywords and source lists:
 
 ```bash
 # Run all tests
-python3 -m pytest tests/ -v
+python3 -m pytest -q
 
-# Run a specific test
-python3 tests/test_grounder_tree.py
+# Run one module
+python3 -m pytest tests/test_pipeline_state.py -v
 
-# Test a source handler
+# Test a source handler against the live API
 python3 main.py test --source openalex --query "neural networks"
 ```
+
+CI runs the suite on Python 3.11 and 3.12, against both SQLite and MySQL,
+and builds the Docker image (`.github/workflows/tests.yml`).
+
+### A note on threads
+
+Per-run state — the run binding, the credential owner, the live step — is
+carried in `contextvars`. A new thread starts with an **empty** context, so
+anything handed to a `threading.Thread` or a `ThreadPoolExecutor` must be
+wrapped with `core.runctx.run_in_thread` or `core.runctx.propagate`. Nothing
+raises if you forget: the run silently falls back to config.json credentials
+and env-var keys.
+
+If you add threaded work, add a test that asserts **from inside the worker
+thread**. A same-thread assertion passes either way, which is how this class
+of bug last shipped.
 
 ## Pull Request Process
 

@@ -98,18 +98,45 @@ def init_users_tables():
     _schema_ready = True
 
 
+AUTO_PROMOTE_ENV = "SEEKER_AUTO_PROMOTE_FIRST_USER"
+
+
 def _maybe_auto_promote_first_user():
-    """If no admin exists yet, promote the first registered user."""
-    rows = db.fetch("users", {}, limit=1)
-    if not rows:
+    """
+    Promote the sole user to admin on a single-researcher install.
+
+    Two things were wrong before (review S2). The candidate came from an
+    unordered `SELECT * FROM users` and was taken as `[0]`, which on MySQL is
+    primary-key order over random `USR-<hex>` ids — so the promoted account
+    was arbitrary, not the first to register, while the log line claimed
+    otherwise. And it re-ran on every process start, so deleting the admin
+    handed admin to another arbitrary user at the next boot.
+
+    Now: only ever when there is exactly one account, ordered explicitly, and
+    switchable off. Beyond one user an operator must name the admin with
+    SEEKER_ADMIN_USER_ID — a config-write privilege should not be assigned by
+    accident of registration order.
+    """
+    import os
+    if os.environ.get(AUTO_PROMOTE_ENV, "1").strip().lower() in (
+            "0", "false", "no", "off"):
         return
-    # Check if any user is already an admin
-    all_users = db.fetch("users", {})
-    if any(u.get("is_admin") for u in all_users):
+    if db.fetch("users", {"is_admin": 1}, limit=1):
         return
-    first = all_users[0]
+
+    total = db.count("users")
+    if total == 0:
+        return
+    if total > 1:
+        logger.warning(
+            f"[F12] {total} users exist and none is an admin. Refusing to "
+            f"pick one — set {AUTO_PROMOTE_ENV.replace('AUTO_PROMOTE_FIRST_USER', 'ADMIN_USER_ID')} "
+            f"to the account that should administer this deployment.")
+        return
+
+    first = db.fetch("users", {}, limit=1, order_by="created_at ASC")[0]
     db.update("users", {"is_admin": 1}, {"user_id": first["user_id"]})
-    logger.info(f"[F12] Auto-promoted first user {first['user_id']} to admin")
+    logger.info(f"[F12] Promoted the only user {first['user_id']} to admin")
 
 
 def _maybe_promote_env_admin():
@@ -293,11 +320,24 @@ def provider_config(user_id: str, provider: str):
     except (json.JSONDecodeError, TypeError):
         models = {}
 
+    # Re-check the stored URL before the worker starts sending this user's
+    # prompts and API key to it. It was validated when it was stored, but a
+    # row predating that check — or a policy tightened since — should not
+    # become a live outbound destination (review S1).
+    from core import urlguard
+    base_url = (row.get("base_url") or "").rstrip("/")
+    try:
+        base_url = urlguard.validate(base_url)
+    except urlguard.UnsafeURL as e:
+        logger.error(f"Refusing stored provider endpoint for {user_id}/"
+                     f"{provider}: {e}")
+        return None
+
     kind = "anthropic" if provider == "anthropic" else "openai"
     return llm.ProviderConfig(
         name=provider,
         kind=kind,
-        base_url=(row.get("base_url") or "").rstrip("/"),
+        base_url=base_url,
         api_key=api_key,
         models=models,
     )
@@ -359,6 +399,60 @@ def runs_for_user(user_id: str) -> list[str]:
     init_run_owners()
     rows = db.fetch("run_owners", {"user_id": user_id})
     return [r["run_id"] for r in rows]
+
+
+def runs_page(user_id: str, limit: int = 50, offset: int = 0,
+              status: str = "", search: str = "") -> tuple[list[dict], int]:
+    """
+    One page of a user's runs, newest first, with per-run step progress.
+
+    Three queries regardless of how many runs the user owns. The previous
+    shape was two queries *per run* plus a Python-side sort, so a researcher
+    with 34 runs paid ~69 round-trips to open the list (review O2), and it
+    returned all of them with no way to page or filter (review X6).
+
+    Returns (rows, total_matching).
+    """
+    init_run_owners()
+    where = ["o.user_id = ?"]
+    params: list = [user_id]
+    if status:
+        where.append("r.status = ?")
+        params.append(status)
+    if search:
+        where.append("LOWER(r.problem) LIKE ?")
+        params.append(f"%{search.lower()}%")
+    clause = " AND ".join(where)
+
+    total_rows = db.query(
+        f"SELECT COUNT(*) AS n FROM runs r "
+        f"JOIN run_owners o ON o.run_id = r.run_id WHERE {clause}",
+        tuple(params))
+    total = int(total_rows[0]["n"]) if total_rows else 0
+
+    runs = db.query(
+        f"SELECT r.run_id, r.problem, r.status, r.created_at, r.completed_at "
+        f"FROM runs r JOIN run_owners o ON o.run_id = r.run_id "
+        f"WHERE {clause} ORDER BY r.created_at DESC "
+        f"LIMIT {int(limit)} OFFSET {int(offset)}",
+        tuple(params))
+    if not runs:
+        return [], total
+
+    # Step progress for the whole page in one grouped read.
+    run_ids = [r["run_id"] for r in runs]
+    marks = ", ".join("?" for _ in run_ids)
+    step_rows = db.query(
+        f"SELECT run_id, step_name, status, ordinal FROM run_steps "
+        f"WHERE run_id IN ({marks})", tuple(run_ids))
+    by_run: dict[str, list[dict]] = {}
+    for row in step_rows:
+        by_run.setdefault(row["run_id"], []).append(row)
+
+    from core.pipeline import summarise_steps
+    for run in runs:
+        run.update(summarise_steps(by_run.get(run["run_id"], [])))
+    return runs, total
 
 
 # ---------------------------------------------------------------------------

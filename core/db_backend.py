@@ -103,6 +103,36 @@ class Backend:
     def init_schema(self, schema: str) -> None:
         raise NotImplementedError
 
+    def insert_sql(self, table: str, columns: list[str]) -> str:
+        """Plain INSERT — lets a UNIQUE violation surface instead of replacing."""
+        cols = ", ".join(columns)
+        marks = ", ".join([self.placeholder] * len(columns))
+        return f"INSERT INTO {table} ({cols}) VALUES ({marks})"
+
+    def accumulate_sql(self, table: str, columns: list[str],
+                       conflict_cols: list[str], add_columns: list[str] = (),
+                       expr_columns: dict = None) -> str:
+        """
+        Upsert that *adds* to counters instead of overwriting them.
+
+        Read-modify-write over two statements loses updates whenever two
+        workers touch the same counter, which is exactly the case the daily
+        call log and the source-health tallies exist to handle (review C6).
+        This pushes the arithmetic into the one statement the database can
+        serialise for us.
+
+        expr_columns maps a column to a SQL template using ``{new}`` for the
+        proposed value and ``{old}`` for the stored one, so a caller can
+        express something richer than addition — keeping the worse of two
+        statuses, for instance.
+        """
+        raise NotImplementedError
+
+    @property
+    def target(self) -> str:
+        """Human-readable description of where the data lives."""
+        return self.name
+
 
 class SQLiteBackend(Backend):
     name = "sqlite"
@@ -130,9 +160,33 @@ class SQLiteBackend(Backend):
         marks = ", ".join(["?"] * len(columns))
         return f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({marks})"
 
+    def accumulate_sql(self, table: str, columns: list[str],
+                       conflict_cols: list[str], add_columns: list[str] = (),
+                       expr_columns: dict = None) -> str:
+        cols = ", ".join(columns)
+        marks = ", ".join(["?"] * len(columns))
+        sets = []
+        for col in columns:
+            if col in conflict_cols:
+                continue
+            if expr_columns and col in expr_columns:
+                sets.append(f"{col} = " + expr_columns[col].format(
+                    new=f"excluded.{col}", old=f"{table}.{col}"))
+            elif col in add_columns:
+                sets.append(f"{col} = {table}.{col} + excluded.{col}")
+            else:
+                sets.append(f"{col} = excluded.{col}")
+        return (f"INSERT INTO {table} ({cols}) VALUES ({marks}) "
+                f"ON CONFLICT ({', '.join(conflict_cols)}) DO UPDATE SET "
+                + ", ".join(sets))
+
     def init_schema(self, schema: str) -> None:
         with connection() as conn:
             conn.executescript(render_schema(schema, "sqlite"))
+
+    @property
+    def target(self) -> str:
+        return str(self.path)
 
 
 class MySQLBackend(Backend):
@@ -191,6 +245,30 @@ class MySQLBackend(Backend):
         updates = ", ".join(f"{c} = VALUES({c})" for c in columns)
         return (f"INSERT INTO {table} ({cols}) VALUES ({marks}) "
                 f"ON DUPLICATE KEY UPDATE {updates}")
+
+    def accumulate_sql(self, table: str, columns: list[str],
+                       conflict_cols: list[str], add_columns: list[str] = (),
+                       expr_columns: dict = None) -> str:
+        cols = ", ".join(columns)
+        marks = ", ".join(["%s"] * len(columns))
+        sets = []
+        for col in columns:
+            if col in conflict_cols:
+                continue
+            if expr_columns and col in expr_columns:
+                sets.append(f"{col} = " + expr_columns[col].format(
+                    new=f"VALUES({col})", old=f"{table}.{col}"))
+            elif col in add_columns:
+                sets.append(f"{col} = {table}.{col} + VALUES({col})")
+            else:
+                sets.append(f"{col} = VALUES({col})")
+        return (f"INSERT INTO {table} ({cols}) VALUES ({marks}) "
+                f"ON DUPLICATE KEY UPDATE " + ", ".join(sets))
+
+    @property
+    def target(self) -> str:
+        s = self._settings
+        return f"{s['user']}@{s['host']}:{s['port']}/{s['database']}"
 
     def init_schema(self, schema: str) -> None:
         # MySQL has no CREATE INDEX IF NOT EXISTS, so duplicate-index errors
@@ -369,6 +447,34 @@ def ensure_columns(table: str, columns: dict) -> list:
             if "duplicate" not in str(e).lower():
                 logger.warning(f"[DB] could not add {table}.{name}: {e}")
     return added
+
+
+def ensure_unique_index(table: str, name: str, columns: list[str]) -> bool:
+    """
+    Create a unique index if it is not already there.
+
+    Separate from init_schema because the index may depend on a column that
+    ensure_columns adds to an already-created table — the index has to be
+    attempted after that reconciliation, not inside the CREATE TABLE script.
+    """
+    present = existing_columns(table)
+    if not present or any(c not in present for c in columns):
+        return False
+    backend = get_backend()
+    cols = ", ".join(columns)
+    if backend.name == "sqlite":
+        sql = f"CREATE UNIQUE INDEX IF NOT EXISTS {name} ON {table} ({cols})"
+    else:
+        sql = f"CREATE UNIQUE INDEX {name} ON {table} ({cols})"
+    try:
+        with cursor() as cur:
+            cur.execute(sql)
+        return True
+    except Exception as e:
+        msg = str(e).lower()
+        if "duplicate" not in msg and "already exists" not in msg:
+            logger.warning(f"[DB] could not create unique index {name}: {e}")
+        return False
 
 
 def rows_to_dicts(rows) -> list[dict]:

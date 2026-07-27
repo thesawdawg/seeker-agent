@@ -8,8 +8,9 @@ import uuid
 import json
 import logging
 import logging.handlers
+import threading
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 LOGS_DIR  = Path(__file__).parent.parent / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -39,19 +40,60 @@ def generate_id(prefix: str) -> str:
 
 
 def generate_run_id() -> str:
-    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    # datetime.utcnow() is deprecated and slated for removal; everywhere else
+    # in the codebase already uses an aware UTC now (review C8).
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return f"RUN-{ts}-{uuid.uuid4().hex[:4].upper()}"
 
 
+_config_cache: tuple = None       # ((path, mtime_ns, size), raw_text)
+_config_lock = threading.Lock()
+
+
 def load_config() -> dict:
-    """Load config.json — theme bank and source stack."""
+    """
+    Load config.json — theme bank and source stack.
+
+    The file's *text* is cached, keyed on (path, mtime, size), and parsed per
+    call. Two reasons it is done that way round:
+
+    - Callers mutate the dict they are handed, so they each need their own.
+      Caching the parsed object and deep-copying it is the obvious
+      alternative and is measurably *slower* than simply parsing again —
+      deepcopy of this structure costs more than json.loads does.
+    - Keying on mtime is what lets the worker pick up an operator's edit
+      without a restart (review C7). save_config goes through os.replace, so
+      the mtime always moves.
+
+    The saving is the file read, not the parse (review O4). Modest, but it is
+    on request paths that run several times per page load.
+    """
+    global _config_cache
     if not CONFIG_PATH.exists():
         raise FileNotFoundError(
             f"config.json not found at {CONFIG_PATH}. "
             f"Please create it with your theme bank and source configuration."
         )
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
+    stat = CONFIG_PATH.stat()
+    # The path is part of the key: CONFIG_PATH is redirected in tests, and a
+    # copy that preserves mtime would otherwise look identical to the original.
+    stamp = (str(CONFIG_PATH), stat.st_mtime_ns, stat.st_size)
+    with _config_lock:
+        cached = _config_cache
+    if cached and cached[0] == stamp:
+        return json.loads(cached[1])
+
+    raw = CONFIG_PATH.read_text()
+    with _config_lock:
+        _config_cache = (stamp, raw)
+    return json.loads(raw)
+
+
+def invalidate_config_cache() -> None:
+    """Drop the cached config — for tests and for an explicit reload."""
+    global _config_cache
+    with _config_lock:
+        _config_cache = None
 
 
 def save_config(config: dict) -> None:
@@ -77,6 +119,7 @@ def save_config(config: dict) -> None:
             f.write(serialized)
             f.write("\n")
         os.replace(tmp_path, str(CONFIG_PATH))
+        invalidate_config_cache()
     except Exception:
         # Clean up the temp file on any failure
         try:

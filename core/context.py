@@ -18,69 +18,158 @@ def _fmt(label: str, content: str) -> str:
     return f"\n\n=== {label.upper()} ===\n{content}"
 
 
-def _sources_summary(sources: list[dict], max_items: int = 20) -> str:
-    """Format a list of sources into readable text."""
+# ---------------------------------------------------------------------------
+# Truncation
+#
+# Every list below is capped, because a whole run's evidence does not fit in
+# a model's context. What matters is *which* items survive the cap and
+# whether anyone is told. Previously these were bare slices of an unordered
+# query, so the surviving subset was arbitrary — and with ~90% of rated
+# sources coming back Low, an arbitrary subset is mostly noise (review V1).
+#
+# Two rules now:
+#   1. Read ranked (see database.RELEVANCE_ORDER and friends), so the cap
+#      keeps the best rather than the first.
+#   2. Say what was left out, in the prompt itself and on the step card, so
+#      neither the agent nor the researcher mistakes a slice for the whole.
+# ---------------------------------------------------------------------------
+
+def _tail_note(kind: str, shown: int, total: int, breakdown: dict = None) -> str:
+    """One line telling the reader the list above is partial."""
+    if total <= shown:
+        return ""
+    hidden = total - shown
+    detail = ""
+    if breakdown:
+        parts = [f"{n} {label}" for label, n in breakdown.items() if n]
+        if parts:
+            detail = f" — full set: {', '.join(parts)}"
+    return (f"\n… and {hidden} further {kind} not shown "
+            f"(showing the top {shown} of {total} by rank){detail}.")
+
+
+def _note_truncation(kind: str, shown: int, total: int) -> None:
+    """Record a visible warning when a cap actually bit."""
+    if total <= shown:
+        return
+    try:
+        from core import progress
+        progress.warn(f"Context truncated: the agent saw the top {shown} of "
+                      f"{total} {kind}; {total - shown} were not shown")
+    except Exception:
+        pass
+
+
+def _sources_summary(sources: list[dict], max_items: int = 20,
+                     kind: str = "sources") -> str:
+    """Format a list of sources into readable text, flagging what was cut."""
     if not sources:
         return "None available."
     lines = []
     for s in sources[:max_items]:
         authors = json.loads(s.get("authors") or "[]") if s.get("authors") else []
         author_str = ", ".join(authors[:3]) + ("..." if len(authors) > 3 else "")
+        rating = s.get("relevance_rating")
+        rating_tag = f"[{rating}] " if rating else ("[unrated] " if "relevance_rating" in s else "")
         lines.append(
-            f"- [{s.get('year', 'n.d.')}] {s.get('title', 'Untitled')} "
+            f"- {rating_tag}[{s.get('year', 'n.d.')}] {s.get('title', 'Untitled')} "
             f"({author_str}) | {s.get('source_name', '')} | "
             f"{s.get('seminal_reason') or s.get('historical_reason') or s.get('relevance_reason', '')}"
         )
-    return "\n".join(lines)
+    out = "\n".join(lines)
+    _note_truncation(kind, min(max_items, len(sources)), len(sources))
+    return out + _tail_note(kind, min(max_items, len(sources)), len(sources))
 
 
-def _gaps_summary(gaps: list[dict]) -> str:
+# Caps for the unbounded summaries. These lists were previously rendered in
+# full, which on a real run means 356 gaps in one prompt — past the context
+# window of the local models this ships against (review V4). Ranked reads
+# make a cap safe: the best survive it.
+MAX_GAPS_IN_CONTEXT         = 40
+MAX_IMPLICATIONS_IN_CONTEXT = 30
+MAX_PROPOSALS_IN_CONTEXT    = 25
+MAX_EVALUATIONS_IN_CONTEXT  = 25
+
+# The Understanding Map is the deliverable, so it gets a wider view than the
+# intermediate agents — but it is still a cap, and it is still reported.
+MAP_SEMINAL      = 25
+MAP_HISTORICAL   = 20
+MAP_GAPS         = 25
+MAP_IMPLICATIONS = 20
+
+
+def _gaps_summary(gaps: list[dict], max_items: int = MAX_GAPS_IN_CONTEXT) -> str:
     if not gaps:
         return "No gaps identified yet."
     lines = []
-    for g in gaps:
+    for g in gaps[:max_items]:
         lines.append(
             f"- [{g.get('gap_id')}] [{g.get('significance')}] "
             f"[{g.get('gap_type')}] {g.get('description')} "
             f"| Primary eval: {g.get('primary_evaluation')}"
         )
-    return "\n".join(lines)
+    shown = min(max_items, len(gaps))
+    _note_truncation("gaps", shown, len(gaps))
+    return "\n".join(lines) + _tail_note(
+        "gaps", shown, len(gaps), _tally(gaps, "significance"))
 
 
-def _implications_summary(implications: list[dict]) -> str:
+def _implications_summary(implications: list[dict],
+                          max_items: int = MAX_IMPLICATIONS_IN_CONTEXT) -> str:
     if not implications:
         return "No implications identified yet."
     lines = []
-    for i in implications:
+    for i in implications[:max_items]:
         lines.append(
             f"- [{i.get('implication_id')}] [{i.get('strength')}] "
             f"[{i.get('implication_type')}] {i.get('implication')}"
         )
-    return "\n".join(lines)
+    shown = min(max_items, len(implications))
+    _note_truncation("implications", shown, len(implications))
+    return "\n".join(lines) + _tail_note(
+        "implications", shown, len(implications),
+        _tally(implications, "strength"))
 
 
-def _proposals_summary(proposals: list[dict]) -> str:
+def _proposals_summary(proposals: list[dict],
+                       max_items: int = MAX_PROPOSALS_IN_CONTEXT) -> str:
     if not proposals:
         return "No proposals yet."
     lines = []
-    for p in proposals:
+    for p in proposals[:max_items]:
         lines.append(
             f"- [{p.get('proposal_id')}] [{p.get('promise_rating')}] "
-            f"[{p.get('proposal_type')}] {p.get('proposal')[:200]}..."
+            f"[{p.get('proposal_type')}] {(p.get('proposal') or '')[:200]}..."
         )
-    return "\n".join(lines)
+    shown = min(max_items, len(proposals))
+    _note_truncation("proposals", shown, len(proposals))
+    return "\n".join(lines) + _tail_note(
+        "proposals", shown, len(proposals), _tally(proposals, "promise_rating"))
 
 
-def _evaluations_summary(evaluations: list[dict]) -> str:
+def _evaluations_summary(evaluations: list[dict],
+                         max_items: int = MAX_EVALUATIONS_IN_CONTEXT) -> str:
     if not evaluations:
         return "No evaluations yet."
     lines = []
-    for e in evaluations:
+    for e in evaluations[:max_items]:
         lines.append(
             f"- [{e.get('evaluation_id')}] Proposal {e.get('proposal_id')} → "
             f"[{e.get('verdict')}] {e.get('verdict_reason', '')}"
         )
-    return "\n".join(lines)
+    shown = min(max_items, len(evaluations))
+    _note_truncation("evaluations", shown, len(evaluations))
+    return "\n".join(lines) + _tail_note(
+        "evaluations", shown, len(evaluations), _tally(evaluations, "verdict"))
+
+
+def _tally(rows: list[dict], column: str) -> dict:
+    """Count rows by one column, so a tail note can say what was left out."""
+    out: dict = {}
+    for r in rows:
+        key = r.get(column) or "unrated"
+        out[key] = out.get(key, 0) + 1
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +185,8 @@ def for_grounder(run_id: str, problem: str, social_sources: list[dict]) -> str:
 
 def for_historian(run_id: str, problem: str) -> str:
     """Context for Historian — problem + seminal works from Grounder."""
-    seminal = db.get_sources_by_type("seminal", run_id)
-    social  = db.get_sources_by_type("current", run_id)
+    seminal = db.get_sources_by_type("seminal", run_id, ranked=True)
+    social  = db.get_sources_by_type("current", run_id, ranked=True)
     ctx  = f"PROBLEM:\n{problem}"
     ctx += _fmt("Seminal Works (from Grounder)", _sources_summary(seminal))
     ctx += _fmt("Social Intelligence (current sources)", _sources_summary(social))
@@ -131,10 +220,10 @@ def _tree_context(run_id: str, max_depth: int = 3, include_evidence: bool = True
 
 def for_vision(run_id: str, problem: str, break1_instructions: str = None) -> str:
     """Context for Vision — tree + gaps + social + Break 1."""
-    seminal    = db.get_sources_by_type("seminal",    run_id)
-    historical = db.get_sources_by_type("historical", run_id)
-    social     = db.get_sources_by_type("current",    run_id)
-    gaps       = db.get_gaps(run_id)
+    seminal    = db.get_sources_by_type("seminal",    run_id, ranked=True)
+    historical = db.get_sources_by_type("historical", run_id, ranked=True)
+    social     = db.get_sources_by_type("current",    run_id, ranked=True)
+    gaps       = db.get_gaps(run_id, ranked=True)
     ctx  = f"PROBLEM:\n{problem}"
     tree_ctx = _tree_context(run_id, max_depth=3)
     if tree_ctx:
@@ -150,11 +239,11 @@ def for_vision(run_id: str, problem: str, break1_instructions: str = None) -> st
 
 def for_theorist(run_id: str, problem: str, break1_instructions: str = None) -> str:
     """Context for Theorist — tree + all prior outputs."""
-    seminal     = db.get_sources_by_type("seminal",    run_id)
-    historical  = db.get_sources_by_type("historical", run_id)
-    social      = db.get_sources_by_type("current",    run_id)
-    gaps        = db.get_gaps(run_id)
-    implications = db.get_implications(run_id)
+    seminal     = db.get_sources_by_type("seminal",    run_id, ranked=True)
+    historical  = db.get_sources_by_type("historical", run_id, ranked=True)
+    social      = db.get_sources_by_type("current",    run_id, ranked=True)
+    gaps        = db.get_gaps(run_id, ranked=True)
+    implications = db.get_implications(run_id, ranked=True)
     ctx  = f"PROBLEM:\n{problem}"
     tree_ctx = _tree_context(run_id, max_depth=3)
     if tree_ctx:
@@ -171,10 +260,10 @@ def for_theorist(run_id: str, problem: str, break1_instructions: str = None) -> 
 
 def for_rude(run_id: str, problem: str, break1_instructions: str = None) -> str:
     """Context for Rude — tree + proposals + dead ends + social."""
-    historical = db.get_sources_by_type("historical", run_id)
-    social     = db.get_sources_by_type("current",    run_id)
-    proposals  = db.get_proposals(run_id)
-    gaps       = db.get_gaps(run_id)
+    historical = db.get_sources_by_type("historical", run_id, ranked=True)
+    social     = db.get_sources_by_type("current",    run_id, ranked=True)
+    proposals  = db.get_proposals(run_id, ranked=True)
+    gaps       = db.get_gaps(run_id, ranked=True)
     ctx  = f"PROBLEM:\n{problem}"
     tree_ctx = _tree_context(run_id, max_depth=2, include_evidence=False)
     if tree_ctx:
@@ -192,12 +281,12 @@ def for_rude(run_id: str, problem: str, break1_instructions: str = None) -> str:
 
 def for_synthesizer(run_id: str, problem: str, break1_instructions: str = None) -> str:
     """Context for Synthesizer — tree + everything."""
-    seminal     = db.get_sources_by_type("seminal",    run_id)
-    historical  = db.get_sources_by_type("historical", run_id)
-    social      = db.get_sources_by_type("current",    run_id)
-    gaps        = db.get_gaps(run_id)
-    implications = db.get_implications(run_id)
-    proposals   = db.get_proposals(run_id)
+    seminal     = db.get_sources_by_type("seminal",    run_id, ranked=True)
+    historical  = db.get_sources_by_type("historical", run_id, ranked=True)
+    social      = db.get_sources_by_type("current",    run_id, ranked=True)
+    gaps        = db.get_gaps(run_id, ranked=True)
+    implications = db.get_implications(run_id, ranked=True)
+    proposals   = db.get_proposals(run_id, ranked=True)
     evaluations = db.get_evaluations(run_id)
     ctx  = f"PROBLEM:\n{problem}"
     tree_ctx = _tree_context(run_id, max_depth=4)
@@ -218,9 +307,9 @@ def for_synthesizer(run_id: str, problem: str, break1_instructions: str = None) 
 def for_thinker(run_id: str, problem: str, break2_instructions: str = None) -> str:
     """Context for Thinker — tree + synthesis + pipeline."""
     synthesis   = db.get_synthesis(run_id)
-    gaps        = db.get_gaps(run_id)
-    implications = db.get_implications(run_id)
-    proposals   = db.get_proposals(run_id, status="feasible")
+    gaps        = db.get_gaps(run_id, ranked=True)
+    implications = db.get_implications(run_id, ranked=True)
+    proposals   = db.get_proposals(run_id, status="feasible", ranked=True)
     evaluations = db.get_evaluations(run_id)
     ctx  = f"PROBLEM:\n{problem}"
     tree_ctx = _tree_context(run_id, max_depth=2, include_evidence=False)
@@ -244,11 +333,11 @@ def for_understanding_map(run_id: str, problem: str) -> str:
     Provides the richest possible context: seminal works, historical timeline,
     gaps, implications, proposals, synthesis, and directions.
     """
-    seminal     = db.get_sources_by_type("seminal",    run_id)
-    historical  = db.get_sources_by_type("historical", run_id)
-    gaps        = db.get_gaps(run_id)
-    implications = db.get_implications(run_id)
-    proposals   = db.get_proposals(run_id)
+    seminal     = db.get_sources_by_type("seminal",    run_id, ranked=True)
+    historical  = db.get_sources_by_type("historical", run_id, ranked=True)
+    gaps        = db.get_gaps(run_id, ranked=True)
+    implications = db.get_implications(run_id, ranked=True)
+    proposals   = db.get_proposals(run_id, ranked=True)
     evaluations = db.get_evaluations(run_id)
     synthesis   = db.get_synthesis(run_id)
     directions  = db.get_directions(run_id)
@@ -261,10 +350,12 @@ def for_understanding_map(run_id: str, problem: str) -> str:
     if tree_ctx:
         ctx += f"\n=== ARGUMENT TREE (full structure for reading curriculum) ===\n{tree_ctx}\n"
 
-    # Seminal works — the core of the reading curriculum
+    # Seminal works — the core of the reading curriculum. Read ranked, so the
+    # cap keeps the works the pipeline judged most relevant rather than
+    # whichever rows the storage engine happened to return first (review V1).
     if seminal:
         ctx += "\n=== SEMINAL WORKS (for reading curriculum) ===\n"
-        for s in seminal[:25]:
+        for s in seminal[:MAP_SEMINAL]:
             authors = json.loads(s.get("authors") or "[]") if s.get("authors") else []
             author_str = ", ".join(authors[:3])
             ctx += (
@@ -273,35 +364,47 @@ def for_understanding_map(run_id: str, problem: str) -> str:
                 f"\n  Reason: {s.get('seminal_reason','')}"
                 f"\n  Abstract: {(s.get('abstract','') or '')[:400]}"
             )
+        ctx += _tail_note("seminal works", min(MAP_SEMINAL, len(seminal)),
+                          len(seminal))
+        _note_truncation("seminal works", min(MAP_SEMINAL, len(seminal)),
+                         len(seminal))
 
-    # Historical timeline — for the intellectual genealogy section
+    # Historical timeline — for the intellectual genealogy section. Ordered by
+    # year here rather than by rank: a genealogy is a chronology.
     if historical:
         ctx += "\n\n=== HISTORICAL SOURCES (for genealogy narrative) ===\n"
-        for s in sorted(historical, key=lambda x: x.get('year') or 9999)[:20]:
+        for s in sorted(historical, key=lambda x: x.get('year') or 9999)[:MAP_HISTORICAL]:
             authors = json.loads(s.get("authors") or "[]") if s.get("authors") else []
             ctx += (
                 f"\n- [{s.get('year','n.d.')}] {s.get('title','')}"
                 f" — {', '.join(authors[:2])}"
                 f"\n  {s.get('historical_reason','')}"
             )
+        ctx += _tail_note("historical sources",
+                          min(MAP_HISTORICAL, len(historical)), len(historical))
 
     # Gaps — for unresolved core section and assessment questions
     if gaps:
         ctx += "\n\n=== GAPS (for unresolved core and assessment) ===\n"
-        for g in gaps[:15]:
+        for g in gaps[:MAP_GAPS]:
             ctx += (
                 f"\n- [{g.get('significance','')}] [{g.get('gap_type','')}]"
                 f" {g.get('description','')}"
             )
+        ctx += _tail_note("gaps", min(MAP_GAPS, len(gaps)), len(gaps),
+                          _tally(gaps, "significance"))
+        _note_truncation("gaps", min(MAP_GAPS, len(gaps)), len(gaps))
 
     # Implications — for conceptual map section
     if implications:
         ctx += "\n\n=== IMPLICATIONS (for conceptual map) ===\n"
-        for i in implications[:12]:
+        for i in implications[:MAP_IMPLICATIONS]:
             ctx += (
                 f"\n- [{i.get('strength','')}] {i.get('implication','')}"
                 f"\n  Hidden assumption: {i.get('assumption_note','') if i.get('hidden_assumption') else 'none flagged'}"
             )
+        ctx += _tail_note("implications", min(MAP_IMPLICATIONS, len(implications)),
+                          len(implications), _tally(implications, "strength"))
 
     # Synthesis — for territory overview and trajectory
     if synthesis:
@@ -342,8 +445,8 @@ def for_scribe(
     """Context for Scribe — synthesis + directions + output spec."""
     synthesis  = db.get_synthesis(run_id)
     directions = db.get_directions(run_id)
-    proposals  = db.get_proposals(run_id, status="feasible")
-    gaps       = db.get_gaps(run_id, significance="High")
+    proposals  = db.get_proposals(run_id, status="feasible", ranked=True)
+    gaps       = db.get_gaps(run_id, significance="High", ranked=True)
     ctx  = f"PROBLEM:\n{problem}"
     ctx += _fmt("Requested Output Type", output_type)
     ctx += _fmt("Intended Audience", audience)

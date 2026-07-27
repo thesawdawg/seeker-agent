@@ -49,6 +49,14 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_run ON jobs(run_id);
 """
 
+# Set to the run_id while a job is queued or running, and NULL once it
+# finishes. A unique index over it is what actually makes "one live job per
+# run" true — NULLs do not collide on either backend, so any number of
+# finished jobs coexist while a second live one cannot be inserted. Checking
+# first and then inserting is not enough on its own: two requests can both
+# pass the check before either writes (review C5).
+ACTIVE_KEY_INDEX = "idx_jobs_active_run"
+
 _schema_ready = False
 
 # A job whose worker died stays 'running' until it is reaped. Workers beat
@@ -63,8 +71,36 @@ def init_jobs_table():
         return
     db_backend.get_backend().init_schema(JOBS_SCHEMA)
     # Added after jobs first shipped — see db_backend.ensure_columns
-    db_backend.ensure_columns("jobs", {"heartbeat_at": "{TEXT}"})
+    db_backend.ensure_columns("jobs", {"heartbeat_at": "{TEXT}",
+                                       "active_key": "{ID}"})
+    # An existing deployment may already hold duplicate live jobs for a run;
+    # backfill so the unique index can be created rather than failing forever.
+    _backfill_active_keys()
+    db_backend.ensure_unique_index("jobs", ACTIVE_KEY_INDEX, ["active_key"])
     _schema_ready = True
+
+
+def _backfill_active_keys() -> None:
+    """Give existing live jobs an active_key, keeping only the oldest per run."""
+    try:
+        rows = db.query(
+            "SELECT job_id, run_id, created_at FROM jobs "
+            "WHERE status IN ('queued', 'running') ORDER BY created_at")
+    except Exception:
+        return
+    claimed: set[str] = set()
+    for row in rows:
+        run_id = row.get("run_id")
+        if run_id in claimed:
+            # A duplicate live job from before the unique index existed.
+            db.update("jobs", {"status": "done", "active_key": None,
+                               "error": "superseded — duplicate job for run"},
+                      {"job_id": row["job_id"]})
+            logger.warning(f"[jobs] retired duplicate live job {row['job_id']} "
+                           f"for {run_id}")
+            continue
+        claimed.add(run_id)
+        db.update("jobs", {"active_key": run_id}, {"job_id": row["job_id"]})
 
 
 def _now() -> str:
@@ -90,12 +126,14 @@ def enqueue(run_id: str, job_type: str = "advance",
     """
     init_jobs_table()
 
-    for existing in db.fetch("jobs", {"run_id": run_id}):
-        if existing.get("status") in ("queued", "running"):
-            return existing["job_id"]
+    live = _live_job(run_id)
+    if live:
+        return live["job_id"]
 
     job_id = generate_id("JOB")
-    db.insert("jobs", {
+    # insert_unique, not insert: an upsert on the active_key collision would
+    # *replace* the job another process just queued instead of losing to it.
+    queued = db.insert_unique("jobs", {
         "job_id":       job_id,
         "run_id":       run_id,
         "job_type":     job_type,
@@ -103,9 +141,27 @@ def enqueue(run_id: str, job_type: str = "advance",
         "attempts":     0,
         "max_attempts": max_attempts,
         "created_at":   _now(),
+        "active_key":   run_id,
     })
+    if not queued:
+        # Lost the race between the check above and this insert — whoever won
+        # queued equivalent work, so return theirs.
+        live = _live_job(run_id)
+        if live:
+            logger.debug(f"[jobs] {run_id} already queued as {live['job_id']}")
+            return live["job_id"]
+        logger.error(f"[jobs] could not queue work for {run_id}")
+        return None
     logger.info(f"[jobs] queued {job_id} for {run_id}")
     return job_id
+
+
+def _live_job(run_id: str) -> Optional[dict]:
+    """The queued or running job for a run, if there is one."""
+    for existing in db.fetch("jobs", {"run_id": run_id}):
+        if existing.get("status") in ("queued", "running"):
+            return existing
+    return None
 
 
 def get_job(job_id: str) -> Optional[dict]:
@@ -206,7 +262,9 @@ def heartbeat(job_id: str) -> None:
 
 
 def finish(job_id: str, status: str = "done", error: str = None) -> None:
-    data = {"status": status, "finished_at": _now()}
+    # Clearing active_key is what releases the run for the next enqueue; a
+    # finished job must not keep holding the unique slot.
+    data = {"status": status, "finished_at": _now(), "active_key": None}
     if error:
         data["error"] = error[:4000]
     db.update("jobs", data, {"job_id": job_id})
@@ -249,11 +307,40 @@ def reap_stale(minutes: int = STALE_AFTER_MINUTES) -> int:
     for job in stale:
         logger.warning(f"[jobs] reaping stale job {job['job_id']} "
                        f"(claimed by {job.get('claimed_by')})")
+        _release_dead_steps(job["run_id"])
         release(job["job_id"], error="worker went away")
     return len(stale)
 
 
+def _release_dead_steps(run_id: str) -> None:
+    """
+    Make a dead worker's in-flight step runnable again.
+
+    Step claiming refuses to take a step that is already `running`, because
+    that is how two drivers are kept off the same work. The cost of that
+    strictness is that a step abandoned by a killed worker would stay
+    `running` forever and stall the run — so recovery belongs here, where
+    the worker has actually been established as gone.
+    """
+    from core import pipeline
+    for step in pipeline.get_steps(run_id):
+        if step["status"] != "running":
+            continue
+        logger.warning(f"[jobs] releasing {run_id}/{step['step_name']} — "
+                       f"its worker went away")
+        # Discard whatever the dead attempt wrote; the retry starts clean.
+        pipeline.reset_step(run_id, step["step_name"], cascade=False)
+
+
 def queue_depth() -> dict:
+    """Job counts by status — one grouped query, not one COUNT per status.
+
+    /api/health is also the container healthcheck, firing every 30s per
+    container, so four round-trips for four numbers was worth collapsing
+    (review O6).
+    """
     init_jobs_table()
-    return {status: db.count("jobs", {"status": status})
-            for status in ("queued", "running", "done", "failed")}
+    depth = {status: 0 for status in ("queued", "running", "done", "failed")}
+    for row in db.query("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status"):
+        depth[row.get("status") or "unknown"] = int(row.get("n") or 0)
+    return depth

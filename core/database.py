@@ -27,6 +27,8 @@ Tables:
 
 import json
 import logging
+import re
+import threading as _threading
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Any
@@ -386,8 +388,7 @@ def init_db():
     from core.pipeline import init_steps_table
     init_tree_table()
     init_steps_table()
-    target = DB_PATH if backend.name == "sqlite" else backend._settings["database"]
-    logger.info(f"Database initialized ({backend.name}) at {target}")
+    logger.info(f"Database initialized ({backend.name}) at {backend.target}")
 
 
 # ---------------------------------------------------------------------------
@@ -426,16 +427,46 @@ def insert(table: str, data: dict) -> bool:
         return False
 
 
-def fetch(table: str, where: dict = None, limit: int = None) -> list[dict]:
-    """Generic fetch from any table."""
+_ORDER_TERM = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\s+(ASC|DESC))?$", re.IGNORECASE)
+
+
+def order_clause(order_by: Optional[str]) -> str:
+    """
+    Render a validated ORDER BY.
+
+    Column names cannot be parameterised, so each comma-separated term must
+    match a plain identifier with an optional ASC/DESC. Anything else raises
+    rather than reaching the database.
+    """
+    if not order_by:
+        return ""
+    terms = [t.strip() for t in order_by.split(",") if t.strip()]
+    for term in terms:
+        if not _ORDER_TERM.match(term):
+            raise ValueError(f"Unsafe order_by term: {term!r}")
+    return " ORDER BY " + ", ".join(terms)
+
+
+def fetch(table: str, where: dict = None, limit: int = None,
+          order_by: str = None, offset: int = None) -> list[dict]:
+    """
+    Generic fetch from any table.
+
+    order_by matters more than it looks: without it the storage engine picks
+    the order, and callers that slice the result (the context builder, admin
+    promotion) end up selecting an arbitrary subset. See review V1 and S2.
+    """
     ph = db_backend.placeholder()
     sql = f"SELECT * FROM {table}"
     params = []
     if where:
         sql += " WHERE " + " AND ".join(f"{k} = {ph}" for k in where)
         params = list(where.values())
+    sql += order_clause(order_by)
     if limit:
         sql += f" LIMIT {int(limit)}"
+        if offset:
+            sql += f" OFFSET {int(offset)}"
     try:
         with db_backend.cursor() as cur:
             cur.execute(sql, params)
@@ -443,6 +474,66 @@ def fetch(table: str, where: dict = None, limit: int = None) -> list[dict]:
     except Exception as e:
         logger.error(f"Fetch from {table} failed: {e}")
         return []
+
+
+def insert_unique(table: str, data: dict) -> bool:
+    """
+    Plain INSERT — returns False if a UNIQUE constraint rejects the row.
+
+    `insert()` upserts, which is right for records keyed by their own
+    identity but wrong when the constraint is the point: an upsert on a
+    conflict silently *replaces* the row that was already there. Used by the
+    job queue, where a duplicate insert must lose rather than clobber the
+    job another process just queued (review C5).
+    """
+    backend = db_backend.get_backend()
+    sql = backend.insert_sql(table, list(data.keys()))
+    try:
+        with db_backend.cursor() as cur:
+            cur.execute(sql, list(data.values()))
+        return True
+    except Exception as e:
+        logger.debug(f"Unique insert into {table} rejected: {e}")
+        return False
+
+
+def accumulate(table: str, data: dict, conflict_cols: list[str],
+               add_columns: list[str] = (), expr_columns: dict = None) -> bool:
+    """
+    Upsert that adds to counter columns rather than overwriting them.
+
+    One statement, so two workers incrementing the same row cannot lose each
+    other's update the way a read-then-write pair does (review C6).
+    """
+    backend = db_backend.get_backend()
+    sql = backend.accumulate_sql(table, list(data.keys()), conflict_cols,
+                                 add_columns, expr_columns)
+    try:
+        with db_backend.cursor() as cur:
+            cur.execute(sql, list(data.values()))
+        return True
+    except Exception as e:
+        logger.error(f"Accumulate into {table} failed: {e}")
+        return False
+
+
+def execute_rowcount(sql: str, params: tuple = ()) -> int:
+    """
+    Run a write statement and report how many rows it touched.
+
+    Lets a caller use an UPDATE as a compare-and-swap: zero rows means
+    somebody else got there first.
+    """
+    ph = db_backend.placeholder()
+    if ph != "?":
+        sql = sql.replace("?", ph)
+    try:
+        with db_backend.cursor() as cur:
+            cur.execute(sql, params)
+            return int(cur.rowcount or 0)
+    except Exception as e:
+        logger.error(f"Execute failed: {e}\n  SQL: {sql}")
+        return 0
 
 
 def update(table: str, data: dict, where: dict) -> bool:
@@ -691,11 +782,78 @@ def upsert_source(source: dict) -> bool:
     return insert("sources", source)
 
 
-def get_sources_by_type(source_type: str, run_id: str = None) -> list[dict]:
+# ---------------------------------------------------------------------------
+# Ranked reads (review V1)
+#
+# Every one of these columns is a judgement the pipeline spent a model call
+# to produce. Reading them back without an ORDER BY and then slicing — which
+# is what the context builder used to do — throws that judgement away and
+# hands the writing agents an arbitrary subset. The rankings below are the
+# orders those slices should be taken in.
+#
+# NULL sorts last everywhere: an unrated source is not a mid-ranked one
+# (review V5).
+# ---------------------------------------------------------------------------
+
+RELEVANCE_ORDER = ("CASE relevance_rating WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 "
+                   "WHEN 'Low' THEN 3 ELSE 4 END, year DESC")
+SIGNIFICANCE_ORDER = ("CASE significance WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 "
+                      "WHEN 'Low' THEN 3 ELSE 4 END")
+STRENGTH_ORDER = ("CASE strength WHEN 'Strong' THEN 1 WHEN 'Moderate' THEN 2 "
+                  "WHEN 'Speculative' THEN 3 ELSE 4 END")
+PROMISE_ORDER = ("CASE promise_rating WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 "
+                 "WHEN 'Low' THEN 3 ELSE 4 END")
+
+
+def _ranked(table: str, where: dict, order_sql: str,
+            limit: int = None) -> list[dict]:
+    """Fetch rows in a fixed ranking. order_sql is module-controlled, never
+    caller input."""
+    ph = db_backend.placeholder()
+    sql = f"SELECT * FROM {table}"
+    params: list = []
+    if where:
+        sql += " WHERE " + " AND ".join(f"{k} = {ph}" for k in where)
+        params = list(where.values())
+    sql += f" ORDER BY {order_sql}"
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    try:
+        with db_backend.cursor() as cur:
+            cur.execute(sql, params)
+            return db_backend.rows_to_dicts(cur.fetchall())
+    except Exception as e:
+        logger.error(f"Ranked fetch from {table} failed: {e}")
+        return []
+
+
+def get_sources_by_type(source_type: str, run_id: str = None,
+                        ranked: bool = False, limit: int = None) -> list[dict]:
     where = {"type": source_type}
     if run_id:
         where["run_id"] = run_id
-    return fetch("sources", where)
+    if ranked:
+        return _ranked("sources", where, RELEVANCE_ORDER, limit)
+    return fetch("sources", where, limit=limit)
+
+
+def count_by(table: str, column: str, where: dict) -> dict:
+    """
+    Group-count one column — for "of 356 gaps, 12 High / 88 Medium".
+
+    `column` is module-controlled, never caller input.
+    """
+    ph = db_backend.placeholder()
+    sql = f"SELECT {column} AS k, COUNT(*) AS n FROM {table}"
+    params: list = []
+    if where:
+        sql += " WHERE " + " AND ".join(f"{k} = {ph}" for k in where)
+        params = list(where.values())
+    sql += f" GROUP BY {column}"
+    out: dict = {}
+    for row in query(sql.replace(ph, "?"), tuple(params)):
+        out[row.get("k") or "unrated"] = int(row.get("n") or 0)
+    return out
 
 
 def archive_dead_link(source: dict) -> bool:
@@ -730,11 +888,14 @@ def insert_gap(gap: dict) -> bool:
     return insert("gaps", gap)
 
 
-def get_gaps(run_id: str, significance: str = None) -> list[dict]:
+def get_gaps(run_id: str, significance: str = None,
+             ranked: bool = False, limit: int = None) -> list[dict]:
     where = {"run_id": run_id}
     if significance:
         where["significance"] = significance
-    return fetch("gaps", where)
+    if ranked:
+        return _ranked("gaps", where, SIGNIFICANCE_ORDER, limit)
+    return fetch("gaps", where, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -750,11 +911,14 @@ def insert_implication(imp: dict) -> bool:
     return insert("implications", imp)
 
 
-def get_implications(run_id: str, strength: str = None) -> list[dict]:
+def get_implications(run_id: str, strength: str = None,
+                     ranked: bool = False, limit: int = None) -> list[dict]:
     where = {"run_id": run_id}
     if strength:
         where["strength"] = strength
-    return fetch("implications", where)
+    if ranked:
+        return _ranked("implications", where, STRENGTH_ORDER, limit)
+    return fetch("implications", where, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -771,11 +935,14 @@ def insert_proposal(proposal: dict) -> bool:
     return insert("proposals", proposal)
 
 
-def get_proposals(run_id: str, status: str = None) -> list[dict]:
+def get_proposals(run_id: str, status: str = None,
+                  ranked: bool = False, limit: int = None) -> list[dict]:
     where = {"run_id": run_id}
     if status:
         where["status"] = status
-    return fetch("proposals", where)
+    if ranked:
+        return _ranked("proposals", where, PROMISE_ORDER, limit)
+    return fetch("proposals", where, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -964,7 +1131,7 @@ def add_to_blacklist(user_id: str, match_type: str, match_value: str,
     value = match_value.strip().lower()
     if match_type == "doi":
         value = _normalize_doi(value)
-    return insert("source_blacklist", {
+    ok = insert("source_blacklist", {
         "blacklist_id": generate_id("BLK"),
         "user_id":      user_id or "anon",
         "match_type":   match_type,
@@ -972,6 +1139,8 @@ def add_to_blacklist(user_id: str, match_type: str, match_value: str,
         "reason":       reason or "",
         "created_at":   _now(),
     })
+    invalidate_blacklist_cache(user_id)
+    return ok
 
 
 def remove_from_blacklist(user_id: str, match_type: str, match_value: str) -> bool:
@@ -979,10 +1148,12 @@ def remove_from_blacklist(user_id: str, match_type: str, match_value: str) -> bo
     value = (match_value or "").strip().lower()
     if match_type == "doi":
         value = _normalize_doi(value)
-    return execute(
+    ok = execute(
         "DELETE FROM source_blacklist WHERE user_id = ? AND match_type = ? AND match_value = ?",
         (user_id or "anon", match_type, value),
     )
+    invalidate_blacklist_cache(user_id)
+    return ok
 
 
 def list_blacklist(user_id: str) -> list[dict]:
@@ -1000,6 +1171,40 @@ def _normalize_doi(doi: str) -> str:
     return d
 
 
+# The blacklist is read once per source insert, and Social inserts hundreds
+# of sources per run — that was 3-4 extra queries per source for a table that
+# changes at human speed (review O5). Cached per user and dropped whenever an
+# entry is added or removed.
+_blacklist_cache: dict[str, list[dict]] = {}
+_blacklist_lock = _threading.Lock()
+
+
+def _blacklist_for(user_id: str) -> list[dict]:
+    key = user_id or "anon"
+    with _blacklist_lock:
+        cached = _blacklist_cache.get(key)
+    if cached is not None:
+        return cached
+    rows = fetch("source_blacklist", {"user_id": key})
+    if not rows and key != "anon":
+        # Fall back to the shared 'anon' blacklist if a specific user was given
+        rows = fetch("source_blacklist", {"user_id": "anon"})
+    with _blacklist_lock:
+        _blacklist_cache[key] = rows
+    return rows
+
+
+def invalidate_blacklist_cache(user_id: str = None) -> None:
+    with _blacklist_lock:
+        if user_id is None:
+            _blacklist_cache.clear()
+        else:
+            # An edit to the shared 'anon' list can affect any user's view.
+            _blacklist_cache.pop(user_id or "anon", None)
+            if (user_id or "anon") == "anon":
+                _blacklist_cache.clear()
+
+
 def is_source_blacklisted(user_id: str, doi: str = "", url: str = "",
                           title: str = "") -> tuple[bool, Optional[str]]:
     """
@@ -1008,11 +1213,7 @@ def is_source_blacklisted(user_id: str, doi: str = "", url: str = "",
     Returns (matched, reason). 'anon' user_id is shared across all runs
     when no specific user is bound.
     """
-    rows = fetch("source_blacklist", {"user_id": user_id or "anon"})
-    if not rows:
-        # Fall back to the shared 'anon' blacklist if a specific user was given
-        if user_id and user_id != "anon":
-            rows = fetch("source_blacklist", {"user_id": "anon"})
+    rows = _blacklist_for(user_id)
     if not rows:
         return False, None
 
@@ -1061,11 +1262,30 @@ def get_seminal_bank(status: str = "pending_review") -> list[dict]:
 # Understanding Map at the end is trustworthy.
 # ---------------------------------------------------------------------------
 
+_HEALTH_SEVERITY = {"ok": 0, "degraded": 1, "failed": 2, "skipped": 3}
+
+# Rank a status string inside SQL, so "keep the worse of the two" can be
+# decided in the same statement that does the accumulation rather than in a
+# read-then-write pair that races (review C6).
+_SEVERITY_CASE = ("CASE {expr} " +
+                  " ".join(f"WHEN '{name}' THEN {rank}"
+                           for name, rank in _HEALTH_SEVERITY.items()) +
+                  " ELSE 1 END")
+
+
 def record_source_health(run_id: str, source_id: str, agent: str,
                          status: str, *, results_returned: int = 0,
                          calls_made: int = 0, retries: int = 0,
                          last_error: str = "") -> bool:
-    """Upsert one source_health row. status: ok / degraded / failed / skipped."""
+    """
+    Upsert one source_health row. status: ok / degraded / failed / skipped.
+
+    Counters accumulate across the run and a status is never downgraded — a
+    source that failed once stays failed even if a later query succeeds,
+    because the researcher needs to know coverage was interrupted. Both rules
+    are expressed in the statement so Social's parallel fan-out cannot lose
+    tallies.
+    """
     from core.utils import generate_id
     row = {
         "health_id":        generate_id("HLTH"),
@@ -1079,22 +1299,22 @@ def record_source_health(run_id: str, source_id: str, agent: str,
         "last_error":       last_error,
         "checked_at":       _now(),
     }
-    # The UNIQUE (run_id, source_id, agent) constraint + upsert_sql means a
-    # second report for the same triple overwrites the first. We accumulate
-    # results/calls across the run by reading the existing row first.
-    existing = fetch("source_health",
-                     {"run_id": run_id, "source_id": source_id, "agent": agent})
-    if existing:
-        ex = existing[0]
-        row["health_id"] = ex["health_id"]
-        row["results_returned"] = ex.get("results_returned", 0) + results_returned
-        row["calls_made"] = ex.get("calls_made", 0) + calls_made
-        row["retries"] = ex.get("retries", 0) + retries
-        # Don't downgrade a failed source back to degraded on a later call.
-        severity = {"ok": 0, "degraded": 1, "failed": 2, "skipped": 3}
-        if severity.get(status, 1) < severity.get(ex.get("status", "ok"), 0):
-            row["status"] = ex["status"]
-    return insert("source_health", row)
+    keep_worse = (
+        "CASE WHEN " + _SEVERITY_CASE.format(expr="{new}") +
+        " >= " + _SEVERITY_CASE.format(expr="{old}") +
+        " THEN {new} ELSE {old} END"
+    )
+    return accumulate(
+        "source_health", row,
+        conflict_cols=["run_id", "source_id", "agent"],
+        add_columns=["results_returned", "calls_made", "retries"],
+        expr_columns={
+            "health_id": "{old}",
+            "status":    keep_worse,
+            # Don't blank a recorded error with a later empty one.
+            "last_error": "CASE WHEN {new} = '' THEN {old} ELSE {new} END",
+        },
+    )
 
 
 def get_source_health(run_id: str) -> list[dict]:
@@ -1113,25 +1333,31 @@ def _today_utc() -> str:
 
 def increment_daily_calls(source_id: str, user_id: str = "anon",
                           n: int = 1) -> int:
-    """Add n to today's call count for (source, user). Returns the new total."""
+    """
+    Add n to today's call count for (source, user). Returns the new total.
+
+    A single accumulating upsert, not a read followed by a write: the whole
+    point of this table is that the daily budget is shared across workers,
+    and a read-modify-write pair loses increments exactly when more than one
+    worker is running (review C6).
+    """
     from core.utils import generate_id
     date = _today_utc()
-    # Read current, then upsert — the UNIQUE constraint makes this safe.
-    existing = fetch("source_call_log",
-                     {"log_date": date, "source_id": source_id, "user_id": user_id})
-    if existing:
-        new_total = int(existing[0].get("calls", 0)) + n
-        update("source_call_log", {"calls": new_total},
-               {"log_date": date, "source_id": source_id, "user_id": user_id})
-        return new_total
-    insert("source_call_log", {
-        "log_id":    generate_id("SCL"),
-        "log_date":  date,
-        "source_id": source_id,
-        "user_id":   user_id,
-        "calls":     n,
-    })
-    return n
+    accumulate(
+        "source_call_log",
+        {
+            "log_id":    generate_id("SCL"),
+            "log_date":  date,
+            "source_id": source_id,
+            "user_id":   user_id,
+            "calls":     n,
+        },
+        conflict_cols=["log_date", "source_id", "user_id"],
+        add_columns=["calls"],
+        # Keep the existing log_id on conflict; only the counter moves.
+        expr_columns={"log_id": "{old}"},
+    )
+    return daily_call_count(source_id, user_id)
 
 def daily_call_count(source_id: str, user_id: str = "anon") -> int:
     rows = fetch("source_call_log",

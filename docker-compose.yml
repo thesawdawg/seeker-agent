@@ -32,6 +32,15 @@ x-app: &app
     SEEKER_SECRET_KEY: ${SEEKER_SECRET_KEY:?set SEEKER_SECRET_KEY in .env — see README}
     SEEKER_SESSION_TTL: ${SEEKER_SESSION_TTL:-86400}
     SEEKER_CORS_ORIGINS: ${SEEKER_CORS_ORIGINS:-}
+    # Where users' provider endpoints may point. Defaults to permitting
+    # private addresses, because the documented providers are local
+    # (Open-WebUI, Ollama). Set to 0 in .env if this stack is reachable by
+    # anyone you do not trust with outbound requests from inside the network.
+    SEEKER_PROVIDER_ALLOW_PRIVATE: ${SEEKER_PROVIDER_ALLOW_PRIVATE:-1}
+    SEEKER_PROVIDER_ALLOWLIST: ${SEEKER_PROVIDER_ALLOWLIST:-}
+    SEEKER_LOGIN_MAX_ATTEMPTS: ${SEEKER_LOGIN_MAX_ATTEMPTS:-10}
+    SEEKER_ADMIN_USER_ID: ${SEEKER_ADMIN_USER_ID:-}
+    SEEKER_AUTO_PROMOTE_FIRST_USER: ${SEEKER_AUTO_PROMOTE_FIRST_USER:-1}
     # Academic source keys are optional; pass through whatever is set.
     OPENALEX_EMAIL: ${OPENALEX_EMAIL:-}
     NCBI_API_KEY: ${NCBI_API_KEY:-}
