@@ -358,3 +358,24 @@ def for_scribe(
     if break2_instructions:
         ctx += _fmt("Break 2 Instructions (Human)", break2_instructions)
     return ctx
+
+
+def for_reporter(run_id: str, problem: str) -> str:
+    """Context for the Reporter agent — the final step that bundles all
+    Scribe artifacts into a single combined HTML report.
+
+    The Reporter reads most of its data directly from the database (every
+    artifact file, source, gap, proposal, evaluation, synthesis, direction,
+    and implication), so this context only carries the problem statement and
+    a manifest of what artifacts exist. The agent does the heavy lifting
+    itself to avoid bloating the LLM prompt with full file contents.
+    """
+    artifacts = db.get_artifacts(run_id)
+    ctx = f"PROBLEM:\n{problem}"
+    ctx += _fmt("Artifacts to Bundle", "\n".join(
+        f"- {a.get('output_type')} ({a.get('format')}): {a.get('title', '')} "
+        f"— {a.get('word_count', 0)} words"
+        for a in artifacts
+        if a.get("output_type") != "combined_report"
+    ) or "No artifacts found.")
+    return ctx

@@ -128,6 +128,7 @@ def test_full_run_stops_at_each_break_in_order(env, stub_agents):
     assert stub_agents == [
         "concept_mapper", "grounder", "social", "historian", "gaper",
         "vision", "theorist", "rude", "synthesizer", "thinker", "scribe",
+        "reporter",
     ]
 
 
@@ -268,7 +269,7 @@ def test_downstream_steps_ordering(env):
     _, pipeline, _ = env
     downstream = pipeline.downstream_steps("gaper")
     assert downstream[0] == "break1"
-    assert downstream[-1] == "scribe"
+    assert downstream[-1] == "reporter"
     assert "grounder" not in downstream
 
 

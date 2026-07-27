@@ -1385,6 +1385,10 @@
       "scribe": {
         "model_role": "light",
         "max_tokens": 12000
+      },
+      "reporter": {
+        "model_role": "primary",
+        "max_tokens": 16000
       }
     },
     "_agents_note": "model_role picks 'primary' or 'light' from the active provider's models. Set an explicit 'model' or 'provider' on an agent to pin it."

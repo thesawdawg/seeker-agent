@@ -1254,7 +1254,7 @@ function renderLiveCard(status) {
     card.append(el('div', { class: 'live-card is-done' },
       el('div', { class: 'live-head' }, el('h2', { text: 'Pipeline complete' })),
       el('p', { class: 'live-activity',
-                text: 'All 14 steps finished. Your outputs are under Artifacts.' }),
+                text: 'All 15 steps finished. Your outputs are under Artifacts.' }),
     ));
     return;
   }
@@ -2191,11 +2191,70 @@ async function renderArtifacts() {
 
   // Scribe's curated artifacts (the original Artifacts tab content).
   if (artifacts.length) {
+    // Surface the combined report at the top — it is the headline output.
+    const sorted = [...artifacts].sort((a, b) => {
+      if (a.output_type === 'combined_report') return -1;
+      if (b.output_type === 'combined_report') return 1;
+      return 0;
+    });
+    const combined = sorted.find(a => a.output_type === 'combined_report');
+    if (combined) {
+      panel.append(el('div', { class: 'combined-report-callout' },
+        el('h3', {}, 'Combined Report'),
+        el('p', { class: 'muted small' },
+          'A single self-contained HTML file bundling every artifact below ' +
+          'with charts, a cover page, and a table of contents. Opens in any ' +
+          'browser and can be saved to PDF via Print.'),
+        el('div', { class: 'item-actions' },
+          el('button', { class: 'btn btn-primary btn-small', type: 'button',
+            onClick: async ev => {
+              ev.target.disabled = true;
+              try {
+                const full = await api(
+                  `/api/runs/${state.runId}/artifacts/${combined.artifact_id}`);
+                if (!full.content) { toast('Report file is missing', 'error'); return; }
+                const blob = new Blob([full.content], { type: 'text/html' });
+                const url = URL.createObjectURL(blob);
+                window.open(url, '_blank');
+                // Revoke after a delay so the tab can load
+                setTimeout(() => URL.revokeObjectURL(url), 60000);
+              } catch (err) {
+                toast(err.message, 'error');
+              } finally { ev.target.disabled = false; }
+            },
+          }, 'Open report'),
+          el('button', { class: 'btn btn-small', type: 'button',
+            onClick: async ev => {
+              ev.target.disabled = true;
+              try {
+                const full = await api(
+                  `/api/runs/${state.runId}/artifacts/${combined.artifact_id}`);
+                if (!full.content) { toast('Report file is missing', 'error'); return; }
+                const blob = new Blob([full.content], { type: 'text/html' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${state.runId}_combined_report.html`;
+                document.body.append(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 10000);
+              } catch (err) {
+                toast(err.message, 'error');
+              } finally { ev.target.disabled = false; }
+            },
+          }, 'Download'),
+        ),
+      ));
+      panel.append(el('hr', {}));
+    }
     panel.append(el('h3', {}, 'Scribe artifacts'),
       el('p', { class: 'muted small' },
         'Final outputs produced by Scribe at the end of the run.'));
-    for (const artifact of artifacts) {
+    for (const artifact of sorted) {
+      if (artifact.output_type === 'combined_report') continue;  // shown above
       const body = el('div', { hidden: true });
+      const isHtml = artifact.format === 'html';
       panel.append(el('div', { class: 'item' },
         el('div', { class: 'item-title',
                     text: artifact.title || artifact.output_type }),
@@ -2212,7 +2271,21 @@ async function renderArtifacts() {
                 const full = await api(
                   `/api/runs/${state.runId}/artifacts/${artifact.artifact_id}`);
                 clear(body);
-                body.append(mdToElement(full.content || '(the file is missing on disk)'));
+                if (isHtml && full.content) {
+                  // Render HTML artifacts in a sandboxed iframe via blob URL
+                  const blob = new Blob([full.content], { type: 'text/html' });
+                  const url = URL.createObjectURL(blob);
+                  const frame = el('iframe', {
+                    src: url,
+                    sandbox: 'allow-same-origin',
+                    class: 'html-artifact-frame',
+                  });
+                  body.append(frame);
+                  body.append(el('p', { class: 'muted small' },
+                    'Rendered in a sandboxed iframe. Right-click → Reload if it appears blank.'));
+                } else {
+                  body.append(mdToElement(full.content || '(the file is missing on disk)'));
+                }
                 body.hidden = false;
                 ev.target.textContent = 'Hide';
               } catch (err) {
@@ -2220,6 +2293,22 @@ async function renderArtifacts() {
               } finally { ev.target.disabled = false; }
             },
           }, 'View'),
+          isHtml && el('button', { class: 'btn btn-small', type: 'button',
+            onClick: async ev => {
+              ev.target.disabled = true;
+              try {
+                const full = await api(
+                  `/api/runs/${state.runId}/artifacts/${artifact.artifact_id}`);
+                if (!full.content) { toast('File is missing', 'error'); return; }
+                const blob = new Blob([full.content], { type: 'text/html' });
+                const url = URL.createObjectURL(blob);
+                window.open(url, '_blank');
+                setTimeout(() => URL.revokeObjectURL(url), 60000);
+              } catch (err) {
+                toast(err.message, 'error');
+              } finally { ev.target.disabled = false; }
+            },
+          }, 'Open in tab'),
         ),
         body,
       ));

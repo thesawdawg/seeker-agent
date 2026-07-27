@@ -287,6 +287,21 @@ input:focus, select:focus, textarea:focus {
 .item-actions { display: flex; gap: .4rem; margin-top: .5rem; flex-wrap: wrap; }
 .item textarea { margin-top: .5rem; font-size: .88rem; }
 
+/* Combined report callout — headline output of the Reporter agent */
+.combined-report-callout {
+  border: 1px solid var(--accent); border-radius: 8px;
+  padding: .9rem 1rem; margin-bottom: .8rem;
+  background: linear-gradient(135deg, rgba(79,124,255,0.06), rgba(79,124,255,0.02));
+}
+.combined-report-callout h3 { margin: 0 0 .3rem 0; color: var(--accent); }
+.combined-report-callout .item-actions { margin-top: .7rem; }
+
+/* Sandboxed iframe for HTML artifacts */
+.html-artifact-frame {
+  width: 100%; height: 75vh; border: 1px solid var(--border);
+  border-radius: 6px; margin-top: .5rem; background: #fff;
+}
+
 .theme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: .4rem; }
 .add-theme-row { display: flex; gap: .4rem; margin-top: .6rem; }
 .add-theme-row input { flex: 1; }

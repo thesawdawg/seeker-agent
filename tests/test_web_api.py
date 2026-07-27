@@ -341,7 +341,7 @@ def test_status_reports_step_level_progress(client, provider, stub_agents):
     drain()
 
     status = client.get(f"/api/runs/{run_id}/status").json()
-    assert status["progress"]["total"] == 14
+    assert status["progress"]["total"] == 15
     names = [s["name"] for s in status["steps"]]
     assert names[:3] == ["concept_mapper", "break0", "grounder"]
     by_name = {s["name"]: s for s in status["steps"]}
@@ -1344,7 +1344,7 @@ def test_rerun_impact_is_reported_before_acting(client, provider, stub_agents):
 
     impact = client.get(f"/api/runs/{run_id}/steps/grounder/impact").json()
     names = [c["name"] for c in impact["cascade"]]
-    assert names[0] == "grounder" and names[-1] == "scribe"
+    assert names[0] == "grounder" and names[-1] == "reporter"
     assert impact["discard_count"] >= 1
 
 
