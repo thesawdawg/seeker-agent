@@ -293,26 +293,45 @@ function wireLogin() {
   }
 
   // --- Tab switching (API key ↔ Username) ---
-  document.querySelectorAll('.auth-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      const method = tab.dataset.method;
-      loginMethod = method;
-      document.querySelectorAll('.auth-tab').forEach(t =>
-        t.classList.toggle('active', t === tab));
-      $('#login-apikey').hidden = (method !== 'apikey');
-      $('#login-password').hidden = (method !== 'password');
-      // Reset register mode when switching tabs
-      if (method !== 'password') setRegisterMode(false);
-      // Update submit button label
-      $('#btn-login').textContent = 'Sign in';
-      $('#login-error').hidden = true;
+  // Toggling `disabled` on inputs in hidden panels is critical: the API key
+  // panel has `required` fields, and the browser blocks form submission if
+  // those are still active when the panel is hidden. Disabled inputs are
+  // excluded from native form validation.
+  function setPanelEnabled(panel, enabled) {
+    if (!panel) return;
+    panel.querySelectorAll('input, select, textarea').forEach(el => {
+      el.disabled = !enabled;
     });
+  }
+
+  function switchMethod(method) {
+    loginMethod = method;
+    document.querySelectorAll('.auth-tab').forEach(t =>
+      t.classList.toggle('active', t.dataset.method === method));
+    const apikeyPanel = $('#login-apikey');
+    const passwordPanel = $('#login-password');
+    const showApikey = (method === 'apikey');
+    apikeyPanel.hidden = !showApikey;
+    passwordPanel.hidden = showApikey;
+    setPanelEnabled(apikeyPanel, showApikey);
+    setPanelEnabled(passwordPanel, !showApikey);
+    // Reset register mode when switching tabs
+    if (method !== 'password') setRegisterMode(false);
+    // Update submit button label
+    $('#btn-login').textContent = 'Sign in';
+    $('#login-error').hidden = true;
+  }
+
+  document.querySelectorAll('.auth-tab').forEach(tab => {
+    tab.addEventListener('click', () => switchMethod(tab.dataset.method));
   });
 
   // --- Register / login toggle (password method only) ---
   function setRegisterMode(on) {
     isRegistering = on;
-    $('#register-fields').hidden = !on;
+    const regFields = $('#register-fields');
+    regFields.hidden = !on;
+    setPanelEnabled(regFields, on);
     $('#password-panel-hint').textContent = on
       ? 'Create a new account with a username and password.'
       : 'Sign in with your username and password.';
@@ -426,6 +445,9 @@ function wireLogin() {
     document.documentElement.setAttribute('data-theme', next);
     localStorage.setItem('seeker-theme', next);
   });
+
+  // Set initial panel disabled state (password panel starts hidden)
+  switchMethod('apikey');
 }
 
 /**
