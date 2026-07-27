@@ -35,7 +35,7 @@ from core.keys import _load_env
 _load_env()
 
 from core import database as db
-from core import jobs, llm, pipeline, users
+from core import jobs, llm, pipeline, runctx, users
 from core import rate_limiter
 from core.utils import load_config, setup_logging
 
@@ -128,7 +128,11 @@ def _advance_with_stop_deadline(run_id: str, config: dict):
         except BaseException as e:            # reported to the caller below
             outcome["error"] = e
 
-    thread = threading.Thread(target=run_it, daemon=True,
+    # The pipeline runs on its own thread, and a new thread starts with an
+    # empty contextvars Context. Without this the run binding, the credential
+    # owner and the live-step binding set by process_job would all be lost
+    # here — silently, since every consumer has a fallback. See core/runctx.py.
+    thread = threading.Thread(target=runctx.run_in_thread(run_it), daemon=True,
                               name=f"advance-{run_id}")
     thread.start()
 
@@ -148,10 +152,16 @@ def _advance_with_stop_deadline(run_id: str, config: dict):
     return outcome.get("state")
 
 
-def process_job(job: dict, config: dict) -> None:
+def process_job(job: dict, config: dict = None) -> None:
     run_id = job["run_id"]
     job_id = job["job_id"]
     logger.info(f"[{job_id}] claimed — advancing {run_id}")
+
+    # Re-read config per job rather than reusing the boot-time copy, so an
+    # operator's edit through the admin editor reaches the worker without a
+    # restart. load_config() caches on mtime, so this is a stat() in the
+    # common case.
+    config = load_config() if config is None else config
 
     jobs.heartbeat(job_id)
     stop_beat = _start_heartbeat(job_id)
@@ -257,6 +267,11 @@ def main():
 
         job = jobs.claim_next()
         if job:
+            # Pass no config so process_job re-reads it — an operator's edit
+            # through the admin editor then applies to the next job rather
+            # than waiting for a worker restart.
+            config = load_config()
+            rate_limiter.configure(config)
             process_job(job, config)
             continue
 

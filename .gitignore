@@ -40,3 +40,7 @@ Thumbs.db
 
 # Web frontend build output (M5)
 web/static/*.map
+
+# These were tracked before the ignore rules above existed, and .gitignore
+# does not untrack. Removed from the index in the review-fix branch; the
+# files stay on disk for anyone who already had them.

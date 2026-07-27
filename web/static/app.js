@@ -1131,6 +1131,44 @@ function stepElapsed(step) {
 /* Per-source progress for Grounder/Social steps (review U8). Fetches the
  * /api/runs/{id}/sources endpoint and renders a compact list of which
  * sources have been searched so far and their result counts. */
+/* What the evidence base actually looks like, not just how many rows landed.
+ * Sources whose landing page did not answer are kept and flagged rather than
+ * discarded, and sources the model could not rate are counted separately from
+ * ones it rated Medium — both of those need to be visible to be worth
+ * anything (review X3, V2, V5). */
+function coverageLine(data) {
+  const link = data.link_status || {};
+  const rel = data.relevance || {};
+  const total = Object.values(link).reduce((a, b) => a + b, 0);
+  if (!total) return el('span');
+
+  const bits = [];
+  const high = rel.High || 0, medium = rel.Medium || 0, low = rel.Low || 0;
+  if (high || medium || low) {
+    bits.push(el('span', { class: 'src-ok',
+      text: `${high} high · ${medium} medium · ${low} low` }));
+  }
+  if (rel.unrated) {
+    bits.push(el('span', { class: 'src-warn',
+      title: 'The model could not rate these — check the provider. They are '
+           + 'stored unrated and rank last, not as "Medium".',
+      text: `${rel.unrated} unrated` }));
+  }
+  if (link.unreachable) {
+    bits.push(el('span', { class: 'src-warn',
+      title: 'The landing page did not answer. These sources are kept and '
+           + 'flagged, not discarded — a DOI resolves independently.',
+      text: `${link.unreachable} unreachable link(s)` }));
+  }
+  if (link.dead) {
+    bits.push(el('span', { class: 'src-warn',
+      title: 'The publisher returned 404/410. Kept, with the DOI as the link.',
+      text: `${link.dead} dead link(s)` }));
+  }
+  return el('div', { class: 'source-progress-summary' },
+    el('span', { text: `${total} source(s) retained` }), ...bits);
+}
+
 async function refreshSourceProgress() {
   const container = $('#source-progress');
   if (!container || !state.runId) return;
@@ -1152,6 +1190,7 @@ async function refreshSourceProgress() {
       degraded ? el('span', { class: 'src-warn', text: `${degraded} partial` }) : null,
       failed ? el('span', { class: 'src-fail', text: `${failed} failed` }) : null,
     ));
+    container.append(coverageLine(data));
     const list = el('div', { class: 'source-progress-list' });
     for (const h of health.slice(-12)) {
       list.append(el('div', { class: `source-progress-row src-${h.status}` },

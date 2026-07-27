@@ -109,6 +109,10 @@ def client(tmp_path, monkeypatch):
             if hasattr(module, flag):
                 setattr(module, flag, False)
     auth.reset_sessions()
+    # The login throttle (review S7) is per-process and keyed by client
+    # address; every test signs in from the same one.
+    auth.reset_login_rate()
+    utils.invalidate_config_cache()
 
     from web.app import app
     with TestClient(app) as c:
@@ -116,6 +120,8 @@ def client(tmp_path, monkeypatch):
 
     db_backend.reset_backend()
     auth.reset_sessions()
+    auth.reset_login_rate()
+    utils.invalidate_config_cache()
 
 
 def sign_in(client, provider, key=None, name="Sawyer"):

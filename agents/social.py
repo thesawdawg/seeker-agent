@@ -89,22 +89,32 @@ class SourceHandler:
         return None
 
     def _check_link(self, url: str) -> str:
-        """Check if a URL is alive. Returns: active / dead / redirected."""
+        """
+        Check whether a URL resolves.
+
+        Returns: active / redirected / dead / unreachable / unchecked.
+
+        `dead` means the server answered and said the resource is gone (404 /
+        410). `unreachable` means we could not get an answer — a timeout, a
+        TLS failure, a reset, a publisher that refuses HEAD. Those are two
+        different facts and only the first is evidence about the source
+        (review V2). Previously every exception became `dead`, and `dead`
+        caused the source to be discarded, so a network wobble permanently
+        removed real papers from the run.
+        """
         if not url:
-            return "dead"
+            return "unchecked"
         try:
             resp = requests.head(url, timeout=10, allow_redirects=True,
                                  headers={"User-Agent": "PipelineResearchBot/1.0"})
-            if resp.status_code == 200:
-                if str(resp.url) != url:
-                    return "redirected"
-                return "active"
-            elif resp.status_code == 404:
+            if resp.status_code in (404, 410):
                 return "dead"
-            else:
-                return "active"  # treat other codes as live
-        except Exception:
-            return "dead"
+            if resp.status_code == 200 and str(resp.url) != url:
+                return "redirected"
+            return "active"      # any other answer means something is there
+        except Exception as e:
+            logger.debug(f"[{self.SOURCE_ID}] link check could not reach {url}: {e}")
+            return "unreachable"
 
 
 # ---------------------------------------------------------------------------
@@ -902,8 +912,26 @@ rate the paper's relevance as High, Medium, or Low.
 Respond with ONLY a JSON object: {"rating": "High|Medium|Low", "reason": "one sentence"}
 Do not include any other text."""
 
-def rate_relevance(title: str, abstract: str, problem: str, theme_label: str) -> tuple[str, str]:
-    """Use LLM to rate relevance. Returns (rating, reason)."""
+def _doi_link(doi: str) -> str:
+    """A durable link for a source, independent of the publisher's URL."""
+    d = (doi or "").strip()
+    if not d:
+        return ""
+    if d.lower().startswith(("http://", "https://")):
+        return d
+    return f"https://doi.org/{d.lstrip('/')}"
+
+
+def rate_relevance(title: str, abstract: str, problem: str,
+                   theme_label: str) -> tuple[Optional[str], str]:
+    """
+    Use the model to rate relevance. Returns (rating, reason).
+
+    On failure the rating is None, not "Medium". Writing a fallback value
+    into relevance_rating made an unreachable router indistinguishable from a
+    real judgement of Medium, and downstream ranking then treated the two
+    the same (review V5). None sorts last and is reported as unrated.
+    """
     prompt = (
         f"Research problem: {problem}\n"
         f"Theme: {theme_label}\n"
@@ -913,15 +941,18 @@ def rate_relevance(title: str, abstract: str, problem: str, theme_label: str) ->
     )
     try:
         response = llm.call(prompt, RATING_SYSTEM, agent_name="social")
-        # Extract JSON
         import json
         match = re.search(r'\{.*?\}', response, re.DOTALL)
         if match:
             data = json.loads(match.group())
-            return data.get("rating", "Medium"), data.get("reason", "")
+            rating = data.get("rating")
+            if rating in ("High", "Medium", "Low"):
+                return rating, data.get("reason", "")
+            return None, f"not assessed: model returned an unusable rating {rating!r}"
+        return None, "not assessed: model returned no JSON object"
     except Exception as e:
         logger.warning(f"Relevance rating failed: {e}")
-    return "Medium", "Could not assess relevance"
+        return None, f"not assessed: {str(e)[:150]}"
 
 
 # ---------------------------------------------------------------------------
@@ -1019,6 +1050,14 @@ def _collect_for_theme(
     theme_id = theme.get("theme_id", "")
     theme_label = theme.get("label", theme_id)
     collected = []
+    unreachable_count = 0
+    unrated_count = 0
+
+    # Liveness checking costs one HTTP round-trip per result. It is on by
+    # default so behaviour is unchanged, but an operator running against
+    # publishers that refuse HEAD can turn it off wholesale (review V2).
+    verify_links = bool(
+        config.get("sources", {}).get("_defaults", {}).get("verify_links", True))
 
     limiter = get_limiter(run_id)
 
@@ -1067,6 +1106,11 @@ def _collect_for_theme(
 
     max_workers = min(4, len(tasks)) if tasks else 1
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from core import runctx
+    # Pool threads start with an empty contextvars Context, so without this
+    # the handlers would lose the run binding (no per-run provider, no model
+    # overrides) and the credential owner (no per-user source API keys).
+    search_in_context = runctx.propagate(_search_one)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {}
         for src_id, handler in tasks:
@@ -1075,7 +1119,7 @@ def _collect_for_theme(
             # live activity indicator; call it from the main thread so the
             # ContextVar is bound (review O2).
             progress.note(src_id, f"searching ({theme_id})", query)
-            futures[pool.submit(_search_one, src_id, handler)] = src_id
+            futures[pool.submit(search_in_context, src_id, handler)] = src_id
         for fut in as_completed(futures):
             src_id = futures[fut]
             fut.result()  # re-raise if _search_one itself blew up unexpectedly
@@ -1103,23 +1147,31 @@ def _collect_for_theme(
             )
 
         # Rate relevance AND check links in parallel — both are independent
-        # per-result operations. The LLM router holds no per-call state
-        # (review O3), and HEAD requests to different publishers are I/O-bound
-        # so they parallelize well (review O4). DB inserts stay serial.
+        # per-result operations. HEAD requests to different publishers are
+        # I/O-bound so they parallelize well (review O4). DB inserts stay
+        # serial.
+        #
+        # The router holds no per-*call* state, but it does hold per-*run*
+        # state in a ContextVar, and a pool thread starts with an empty
+        # context. Without runctx.propagate these rating calls would ignore
+        # the user's own provider credentials and this run's model overrides,
+        # and would fall back to config.json — silently.
         titled = [r for r in results if r.get("title")]
-        ratings: list[tuple[str, str]] = []
+        ratings: list[tuple[Optional[str], str]] = []
         link_statuses: list[str] = []
         if titled:
-            from concurrent.futures import ThreadPoolExecutor
             ctx_problem = problem or theme_label
             def _rate(r):
                 return rate_relevance(r.get("title", ""), r.get("abstract", ""),
                                       ctx_problem, theme_label)
             def _link(r):
                 return handler._check_link(r.get("active_link", ""))
+            rate_in_context = runctx.propagate(_rate)
+            link_in_context = runctx.propagate(_link)
             with ThreadPoolExecutor(max_workers=min(8, len(titled) * 2)) as pool:
-                ratings = list(pool.map(_rate, titled))
-                link_statuses = list(pool.map(_link, titled))
+                ratings = list(pool.map(rate_in_context, titled))
+                link_statuses = (list(pool.map(link_in_context, titled))
+                                 if verify_links else ["unchecked"] * len(titled))
 
         for r, (rating, reason), link_status in zip(titled, ratings, link_statuses):
 
@@ -1142,7 +1194,13 @@ def _collect_for_theme(
                 "link_status":     link_status,
             }
 
-            # Archive dead links immediately
+            # A confirmed-gone landing page is worth recording, but it is not
+            # a reason to erase the paper: the title, authors, abstract and
+            # DOI are already in hand, and a DOI resolves independently of
+            # whatever the publisher is serving today. Previously a `dead`
+            # verdict dropped the source entirely, and every unreachable host
+            # counted as dead — which discarded 17% of everything collected
+            # (review V2). The status travels with the source instead.
             if link_status == "dead":
                 db.insert("dead_links", {
                     "dead_id":              generate_id("DEAD"),
@@ -1155,10 +1213,31 @@ def _collect_for_theme(
                     "date_confirmed_dead":  source_entry["date_collected"],
                     "last_active":          None
                 })
-                logger.warning(f"[Social] Dead link archived: {source_entry['title'][:60]}")
-                continue  # Don't save dead links to active database
+                logger.info(f"[Social] Link is gone (kept, flagged): "
+                            f"{source_entry['title'][:60]}")
+                # A DOI outlives the publisher's URL — prefer it as the link.
+                if r.get("doi"):
+                    source_entry["active_link"] = _doi_link(r["doi"])
+            elif link_status == "unreachable":
+                unreachable_count += 1
+            if rating is None:
+                unrated_count += 1
 
             collected.append(source_entry)
+
+    if unrated_count:
+        progress.warn(
+            f"{unrated_count} source(s) for theme '{theme_label}' could not be "
+            f"relevance-rated — check the model provider. They are stored "
+            f"unrated and will rank last, not as 'Medium'")
+
+    if unreachable_count:
+        # Visible to the researcher on the step card rather than log-only:
+        # these sources are kept, but their landing pages did not answer.
+        progress.warn(
+            f"{unreachable_count} source link(s) for theme '{theme_label}' "
+            f"could not be reached — the sources are kept and flagged "
+            f"'unreachable', not discarded")
 
     return collected
 
@@ -1382,11 +1461,13 @@ def produce_intelligence_package(run_id: str, selected_themes: list, problem: st
         lines.append(f"## {theme_id}")
         lines.append("")
 
-        # High relevance first
-        for rating in ["High", "Medium", "Low"]:
-            rated = [s for s in theme_sources if s.get("relevance_rating") == rating]
+        # High relevance first; unrated sources are listed, not hidden, so a
+        # run whose rating calls failed is visibly partial (review V5).
+        for rating in ["High", "Medium", "Low", None]:
+            rated = [s for s in theme_sources
+                     if (s.get("relevance_rating") or None) == rating]
             if rated:
-                lines.append(f"### {rating} Relevance")
+                lines.append(f"### {rating or 'Unrated'} Relevance")
                 for s in rated[:10]:
                     authors = s.get("authors", "[]")
                     if isinstance(authors, str):

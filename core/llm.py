@@ -180,7 +180,7 @@ class LLMError(RuntimeError):
 # for every agent that routes past them. Reset per run (review O10) so a
 # config fix mid-pipeline is noticed on the next attempt rather than silenced
 # by a stale entry from a previous run.
-_warned_missing_model: set = set()
+_warned_missing_model: set[tuple[str, str]] = set()
 
 
 def reset_model_warnings() -> None:

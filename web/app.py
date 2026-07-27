@@ -167,8 +167,9 @@ def health():
 # ---------------------------------------------------------------------------
 
 @app.post("/api/auth/login")
-def login(body: LoginRequest, response: Response):
+def login(body: LoginRequest, request: Request, response: Response):
     """Validate a provider key, identify the user, and start a session."""
+    auth.check_login_rate(request.client.host if request.client else "unknown")
     result = auth.login(body.base_url, body.api_key, body.provider,
                         body.display_name, body.models)
     response.set_cookie(
@@ -277,8 +278,15 @@ def list_models(provider: str = "open-webui",
 
 
 @app.get("/api/agents")
-def list_agents():
-    """Agent names and default routing, so the UI can offer per-agent models."""
+def list_agents(user: dict = Depends(auth.resolve_user)):
+    """
+    Agent names and default routing, so the UI can offer per-agent models.
+
+    Authenticated: unlike /api/steps, which publishes the pipeline's shape,
+    this exposes configured model names and token limits — deployment
+    configuration rather than public structure (review S5). The UI only calls
+    it after sign-in.
+    """
     client = llm.get_client()
     return {"agents": [
         {"name": name,
@@ -294,29 +302,38 @@ def list_agents():
 # ---------------------------------------------------------------------------
 
 @app.get("/api/runs")
-def list_runs(user: dict = Depends(auth.resolve_user)):
-    """The caller's runs, newest first.
-
-    Uses get_run_summary (review O6) instead of get_state to avoid building
-    full step-state objects for every run when only progress and
-    awaiting_break are needed.
+def list_runs(user: dict = Depends(auth.resolve_user),
+              limit: int = 50, offset: int = 0,
+              status: str = "", q: str = ""):
     """
-    out = []
-    for run_id in users.runs_for_user(user["user_id"]):
-        run = db.get_run(run_id)
-        if not run:
-            continue
-        summary = pipeline.get_run_summary(run_id)
-        out.append({
-            "run_id":         run_id,
-            "problem":        run.get("problem", ""),
-            "status":         run.get("status", ""),
-            "created_at":     run.get("created_at"),
-            "progress":       summary["progress"],
-            "awaiting_break": summary["awaiting_break"],
-        })
-    out.sort(key=lambda r: r.get("created_at") or "", reverse=True)
-    return {"runs": out}
+    The caller's runs, newest first, paged and filterable.
+
+    Three queries regardless of how many runs the user owns — the ordering,
+    the filtering and the paging all happen in SQL (review O2, X6).
+
+    limit/offset page the list; status filters exactly; q matches the problem
+    text case-insensitively.
+    """
+    limit = max(1, min(int(limit or 50), 200))
+    offset = max(0, int(offset or 0))
+    rows, total = users.runs_page(user["user_id"], limit=limit, offset=offset,
+                                  status=status, search=q)
+    return {
+        "runs": [
+            {
+                "run_id":         r["run_id"],
+                "problem":        r.get("problem", ""),
+                "status":         r.get("status", ""),
+                "created_at":     r.get("created_at"),
+                "progress":       r["progress"],
+                "awaiting_break": r["awaiting_break"],
+            }
+            for r in rows
+        ],
+        "total":  total,
+        "limit":  limit,
+        "offset": offset,
+    }
 
 
 @app.post("/api/runs", status_code=status.HTTP_201_CREATED)
@@ -498,7 +515,7 @@ async def run_events(run_id: str, request: Request,
 
         # Send an initial event immediately so the client doesn't wait 1s
         # for its first status.
-        snap = _run_status_snapshot(run_id)
+        snap = await asyncio.to_thread(_run_status_snapshot, run_id)
         if snap is None:
             yield _sse_event("error", {"message": "Run not found"})
             return
@@ -526,7 +543,11 @@ async def run_events(run_id: str, request: Request,
             # so other requests can be served.
             await asyncio.sleep(_SSE_POLL_SECONDS)
 
-            snap = _run_status_snapshot(run_id)
+            # Offload to a thread: the snapshot is synchronous DB work, and
+            # this is an `async def` generator, so doing it inline blocks the
+            # event loop — every other request and every other SSE stream —
+            # once per second per viewer (review O1).
+            snap = await asyncio.to_thread(_run_status_snapshot, run_id)
             if snap is None:
                 yield _sse_event("error", {"message": "Run not found"})
                 return
@@ -598,12 +619,21 @@ def run_sources(run_id: str, user: dict = Depends(auth.resolve_user)):
     )
     previously_seen = int(prev_rows[0]["n"]) if prev_rows else 0
     previous_run_id = db.get_previous_run_id(run_id)
+
+    # Link and rating coverage, so the researcher can see what the evidence
+    # base actually looks like rather than only how many rows landed
+    # (review X3). A source whose landing page did not answer is kept and
+    # flagged now, not discarded — this is where that shows up.
+    link_status = db.count_by("sources", "link_status", {"run_id": run_id})
+    relevance = db.count_by("sources", "relevance_rating", {"run_id": run_id})
     return {
         "run_id": run_id,
         "health": health,
         "inserted": inserted,
         "previously_seen": previously_seen,
         "previous_run_id": previous_run_id,
+        "link_status": link_status,
+        "relevance": relevance,
     }
 
 
@@ -661,22 +691,37 @@ def sources_health(user: dict = Depends(auth.resolve_user)):
         env_var = key_env.get(source_id)
         has_key = False
         note = ""
+        detail = ""
         if source_id in keyless:
             has_key = True
             note = "keyless"
+            detail = "no key needed"
         elif env_var:
             env_set = bool(os.environ.get(env_var, "").strip())
             stored = bool(users.get_source_api_key(user["user_id"], source_id))
             has_key = env_set or stored
-            note = "env" if env_set else ("stored" if stored else "no key — will skip")
+            # core.keys.get() checks the user's stored key *before* the env
+            # var, so when both exist the stored one is what the run will
+            # use. The pre-flight said "env" in that case — reporting a key
+            # other than the one that will actually be sent (review X1).
+            note = "stored" if stored else ("env" if env_set
+                                            else "no key — will skip")
+            detail = {
+                "stored": "your stored key will be used",
+                "env":    "the server's key will be used",
+            }.get(note, "no key configured — this source will be skipped")
         else:
             note = "no key check defined"
+            detail = "this source has no key requirement recorded"
         exhausted_until = db.source_exhausted_until(source_id, user["user_id"])
         out.append({
             "source_id": source_id,
             "enabled": enabled,
             "has_key": has_key,
+            # `note` is a stable token the UI switches on; `detail` is the
+            # sentence to show a human.
             "note": note,
+            "detail": detail,
             "exhausted_until": exhausted_until,
         })
     return {"sources": out}
@@ -763,6 +808,9 @@ def remove_blacklist_entry(body: BlacklistEntry,
 # Sections an operator can edit. Each is validated before writing.
 _EDITABLE_SECTIONS = ("themes", "sources", "agent_sources", "run_templates")
 
+# Upper bound on one section's serialised size (review S8).
+_MAX_CONFIG_SECTION_BYTES = 256 * 1024
+
 
 @app.get("/api/config")
 def get_config(user: dict = Depends(auth.resolve_user)):
@@ -813,6 +861,19 @@ def update_config_section(section: str, body: dict,
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             f"Section '{section}' is not editable. "
                             f"Editable: {', '.join(_EDITABLE_SECTIONS)}")
+
+    # config.json is re-read (though now cached) on request paths, so an
+    # unbounded section makes every later request more expensive (review S8).
+    try:
+        incoming_size = len(json.dumps(body))
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"Section value is not valid JSON: {e}")
+    if incoming_size > _MAX_CONFIG_SECTION_BYTES:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            f"Section is {incoming_size} bytes; the limit is "
+            f"{_MAX_CONFIG_SECTION_BYTES}.")
 
     from core.utils import load_config, save_config
     try:

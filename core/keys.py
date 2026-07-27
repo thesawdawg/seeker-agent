@@ -50,9 +50,26 @@ def _load_env():
 _load_env()
 
 
-def set_current_user(user_id: str) -> None:
-    """Bind subsequent key lookups to a user (worker-side, per run)."""
-    _current_user.set(user_id or "")
+def set_current_user(user_id: str):
+    """
+    Bind subsequent key lookups to a user (worker-side, per run).
+
+    Returns a token for reset_current_user(). Note that this binding does not
+    cross a thread boundary on its own — see core/runctx.py.
+    """
+    return _current_user.set(user_id or "")
+
+
+def current_user() -> str:
+    """The user whose stored source keys apply to this context, or ''."""
+    return _current_user.get()
+
+
+def reset_current_user(token) -> None:
+    try:
+        _current_user.reset(token)
+    except (ValueError, LookupError, RuntimeError):
+        _current_user.set("")
 
 
 def clear_current_user() -> None:

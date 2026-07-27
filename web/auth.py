@@ -116,10 +116,14 @@ def validate_provider_key(base_url: str, api_key: str,
     """
     import requests
 
-    base_url = (base_url or "").rstrip("/")
-    if not base_url:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                            "A provider base_url is required")
+    from core import urlguard
+
+    # This runs before authentication, so an unguarded fetch here is an
+    # anonymous SSRF primitive (review S1).
+    try:
+        base_url = urlguard.validate(base_url)
+    except urlguard.UnsafeURL as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
     headers = ({"x-api-key": api_key, "anthropic-version": "2023-06-01"}
                if kind == "anthropic"
@@ -128,26 +132,74 @@ def validate_provider_key(base_url: str, api_key: str,
     try:
         resp = requests.get(f"{base_url}/models", headers=headers, timeout=15)
     except Exception as e:
+        # The reason is deliberately not echoed: "connection refused" versus
+        # "timed out" is exactly the oracle that turns this endpoint into a
+        # port scanner. It goes to the log, where the operator can see it.
+        logger.info(f"Provider probe failed for {base_url}: {e}")
         raise HTTPException(status.HTTP_502_BAD_GATEWAY,
-                            f"Could not reach the provider at {base_url}: {e}")
+                            f"Could not reach a provider at {base_url}")
 
     if resp.status_code in (401, 403):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED,
                             "The provider rejected that API key")
     if resp.status_code >= 400:
+        logger.info(f"Provider probe for {base_url} returned "
+                    f"HTTP {resp.status_code}")
         raise HTTPException(status.HTTP_502_BAD_GATEWAY,
-                            f"Provider returned HTTP {resp.status_code}")
+                            f"Could not reach a provider at {base_url}")
 
     try:
         payload = resp.json()
     except Exception:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY,
-                            "Provider did not return JSON")
+                            f"Could not reach a provider at {base_url}")
 
     items = payload.get("data") if isinstance(payload, dict) else payload
     models = sorted({m.get("id") or m.get("name")
                      for m in (items or []) if isinstance(m, dict)} - {None})
     return models
+
+
+# ---------------------------------------------------------------------------
+# Login throttling
+#
+# /api/auth/login is unauthenticated and makes the server fetch a
+# caller-supplied URL. urlguard bounds *where* it can point; this bounds how
+# fast it can be asked, so the endpoint is not a comfortable scanning or
+# credential-stuffing engine (review S7).
+# ---------------------------------------------------------------------------
+
+LOGIN_MAX_ATTEMPTS = int(os.environ.get("SEEKER_LOGIN_MAX_ATTEMPTS", "10"))
+LOGIN_WINDOW_SECONDS = int(os.environ.get("SEEKER_LOGIN_WINDOW_SECONDS", "60"))
+
+_login_attempts: dict[str, list[float]] = {}
+
+
+def check_login_rate(client_ip: str) -> None:
+    """Raise 429 when one address has tried too often in the window."""
+    if LOGIN_MAX_ATTEMPTS <= 0:
+        return
+    now = time.time()
+    cutoff = now - LOGIN_WINDOW_SECONDS
+    recent = [t for t in _login_attempts.get(client_ip, []) if t > cutoff]
+    if len(recent) >= LOGIN_MAX_ATTEMPTS:
+        _login_attempts[client_ip] = recent
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Too many sign-in attempts. Try again in "
+            f"{LOGIN_WINDOW_SECONDS} seconds.")
+    recent.append(now)
+    _login_attempts[client_ip] = recent
+    # Keep the table from growing without bound on a busy or hostile host.
+    if len(_login_attempts) > 4096:
+        for ip in [k for k, v in _login_attempts.items()
+                   if not any(t > cutoff for t in v)]:
+            _login_attempts.pop(ip, None)
+
+
+def reset_login_rate() -> None:
+    """Test hook."""
+    _login_attempts.clear()
 
 
 # ---------------------------------------------------------------------------
