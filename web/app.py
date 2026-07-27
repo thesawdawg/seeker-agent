@@ -252,6 +252,68 @@ def delete_source_credentials(source_id: str, user: dict = Depends(auth.resolve_
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Admin — user management (F12)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/admin/users")
+def admin_list_users(user: dict = Depends(auth.resolve_user)):
+    """List all users — admin only."""
+    auth.require_admin(user)
+    return {"users": users.list_all_users()}
+
+
+@app.get("/api/admin/users/{user_id}/credentials")
+def admin_get_user_credentials(user_id: str,
+                               user: dict = Depends(auth.resolve_user)):
+    """List another user's provider credentials — admin only."""
+    auth.require_admin(user)
+    target = users.get_user(user_id)
+    if not target:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    return {"credentials": users.list_credentials(user_id),
+            "user": {"user_id": user_id,
+                     "display_name": target.get("display_name") or "",
+                     "auth_kind": target.get("auth_kind") or ""}}
+
+
+@app.put("/api/admin/users/{user_id}/credentials")
+def admin_set_user_credentials(user_id: str, body: CredentialRequest,
+                               user: dict = Depends(auth.resolve_user)):
+    """Add or replace provider credentials for another user — admin only."""
+    auth.require_admin(user)
+    target = users.get_user(user_id)
+    if not target:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    kind = "anthropic" if body.provider == "anthropic" else "openai"
+    models = auth.validate_provider_key(body.base_url, body.api_key, kind)
+    stored = users.set_credentials(user_id, body.provider,
+                                   body.base_url, body.api_key, body.models)
+    return {"credential": stored, "available_models": models}
+
+
+@app.patch("/api/admin/users/{user_id}/credentials/{provider}/models")
+def admin_patch_user_credential_models(user_id: str, provider: str,
+                                       body: ModelRolesRequest,
+                                       user: dict = Depends(auth.resolve_user)):
+    """Set model roles for another user's provider — admin only."""
+    auth.require_admin(user)
+    updated = users.set_models(user_id, provider, body.models)
+    if not updated:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"No credentials stored for provider '{provider}'")
+    return {"credential": updated}
+
+
+@app.delete("/api/admin/users/{user_id}/credentials/{provider}")
+def admin_delete_user_credentials(user_id: str, provider: str,
+                                  user: dict = Depends(auth.resolve_user)):
+    """Delete a provider credential from another user — admin only."""
+    auth.require_admin(user)
+    users.delete_credentials(user_id, provider)
+    return {"ok": True}
+
+
 @app.get("/api/models")
 def list_models(provider: str = "open-webui",
                 user: dict = Depends(auth.resolve_user)):

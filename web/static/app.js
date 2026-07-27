@@ -2959,6 +2959,7 @@ async function renderAdminTab(tab, panel) {
   else if (tab === 'agent_sources') renderAdminAgentSources(panel);
   else if (tab === 'themes')     renderAdminThemes(panel);
   else if (tab === 'run_templates') renderAdminTemplates(panel);
+  else if (tab === 'users')      renderAdminUsers(panel);
 }
 
 // ── Sources tab: toggle enabled/disabled, edit api_url ──
@@ -3190,6 +3191,182 @@ function renderAdminTemplates(panel) {
       el('div', { class: 'muted small',
         text: `${Object.keys(spec.source_overrides || {}).length} source overrides` }),
     ));
+  }
+}
+
+// ── Users tab: list users, manage provider connections ──
+async function renderAdminUsers(panel) {
+  let userList = [];
+  try {
+    const res = await api('/api/admin/users');
+    userList = res.users || [];
+  } catch (err) {
+    panel.append(el('p', { class: 'error', text: err.message }));
+    return;
+  }
+
+  if (!userList.length) {
+    panel.append(el('p', { class: 'muted', text: 'No users registered yet.' }));
+    return;
+  }
+
+  // User list table
+  const table = el('table', { class: 'admin-user-table' },
+    el('thead', {},
+      el('tr', {},
+        el('th', { text: 'Name' }),
+        el('th', { text: 'Auth' }),
+        el('th', { text: 'Admin' }),
+        el('th', { text: 'Last seen' }),
+        el('th', { text: '' }),
+      ),
+    ),
+    el('tbody', {},
+      ...userList.map(u => el('tr', {},
+        el('td', { text: u.display_name || u.user_id }),
+        el('td', { class: 'muted small', text: u.auth_kind }),
+        el('td', { text: u.is_admin ? '✓' : '' }),
+        el('td', { class: 'muted small',
+          text: u.last_seen_at ? u.last_seen_at.slice(0, 10) : '' }),
+        el('td', {},
+          el('button', {
+            class: 'btn btn-small',
+            type: 'button',
+            onClick: () => showUserCredentials(panel, u),
+          }, 'Manage connections')),
+      )),
+    ),
+  );
+  panel.append(table);
+
+  // Container for the credential management sub-panel
+  panel.append(el('div', { id: 'admin-user-credentials', class: 'admin-cred-panel' }));
+}
+
+async function showUserCredentials(panel, user) {
+  const container = $('#admin-user-credentials');
+  if (!container) return;
+  clear(container);
+
+  // Header
+  container.append(el('h3', {},
+    `Provider connections: ${user.display_name || user.user_id}`,
+    el('button', {
+      class: 'btn btn-ghost btn-small',
+      type: 'button',
+      style: 'margin-left: 1rem;',
+      onClick: () => { clear(container); },
+    }, 'Close'),
+  ));
+
+  // Load existing credentials
+  let creds = [];
+  try {
+    const res = await api(`/api/admin/users/${encodeURIComponent(user.user_id)}/credentials`);
+    creds = res.credentials || [];
+  } catch (err) {
+    container.append(el('p', { class: 'error', text: err.message }));
+    return;
+  }
+
+  // Existing credentials list
+  if (creds.length) {
+    const list = el('div', { class: 'cred-list' });
+    for (const c of creds) {
+      list.append(el('div', { class: 'cred-item' },
+        el('span', { class: 'cred-provider', text: c.provider }),
+        el('span', { class: 'muted small', text: c.key_hint || '••••' }),
+        el('span', { class: 'muted small',
+          text: c.base_url ? c.base_url.slice(0, 40) : '' }),
+        el('button', {
+          class: 'btn btn-ghost btn-small',
+          type: 'button',
+          onClick: () => deleteAdminCredential(user, c.provider, container),
+        }, 'Remove'),
+      ));
+    }
+    container.append(list);
+  } else {
+    container.append(el('p', { class: 'muted',
+      text: 'No provider connections configured. Add one below.' }));
+  }
+
+  // Add credential form
+  container.append(el('div', { class: 'divider' }, el('span', { text: 'Add provider' })));
+
+  const providerSelect = el('select', { id: 'admin-cred-provider' },
+    ...Object.keys(BASE_URL_DEFAULTS).map(p =>
+      el('option', { value: p, text: p })),
+  );
+  const baseUrlInput = el('input', {
+    type: 'url', id: 'admin-cred-base-url',
+    value: BASE_URL_DEFAULTS['open-webui'] || '',
+    placeholder: 'http://localhost:3000/api',
+  });
+  const apiKeyInput = el('input', {
+    type: 'password', id: 'admin-cred-api-key',
+    placeholder: 'sk-…', autocomplete: 'off',
+  });
+
+  providerSelect.addEventListener('change', () => {
+    const preset = BASE_URL_DEFAULTS[providerSelect.value];
+    if (preset) baseUrlInput.value = preset;
+  });
+
+  const addBtn = el('button', {
+    class: 'btn btn-primary btn-small', type: 'button',
+  }, 'Add connection');
+  addBtn.addEventListener('click', async () => {
+    addBtn.disabled = true;
+    addBtn.textContent = 'Validating…';
+    try {
+      await api(`/api/admin/users/${encodeURIComponent(user.user_id)}/credentials`, {
+        method: 'PUT',
+        body: {
+          provider: providerSelect.value,
+          base_url: baseUrlInput.value.trim(),
+          api_key: apiKeyInput.value.trim(),
+          models: {},
+        },
+      });
+      apiKeyInput.value = '';
+      toast(`Provider connection added for ${user.display_name || user.user_id}`, 'ok');
+      showUserCredentials(panel, user);  // refresh
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      addBtn.disabled = false;
+      addBtn.textContent = 'Add connection';
+    }
+  });
+
+  container.append(
+    el('div', { class: 'admin-cred-form' },
+      el('label', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Provider'),
+        providerSelect),
+      el('label', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Base URL'),
+        baseUrlInput),
+      el('label', { class: 'field' },
+        el('span', { class: 'field-label' }, 'API key'),
+        apiKeyInput),
+      addBtn,
+    ),
+  );
+}
+
+async function deleteAdminCredential(user, provider, container) {
+  try {
+    await api(
+      `/api/admin/users/${encodeURIComponent(user.user_id)}/credentials/${encodeURIComponent(provider)}`,
+      { method: 'DELETE' });
+    toast(`Removed ${provider} connection`, 'ok');
+    // Re-render the credentials panel
+    const panel = $('#panel-admin-users');
+    if (panel) showUserCredentials(panel, user);
+  } catch (err) {
+    toast(err.message, 'error');
   }
 }
 

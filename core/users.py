@@ -214,6 +214,21 @@ def set_display_name(user_id: str, name: str) -> bool:
     return db.update("users", {"display_name": name}, {"user_id": user_id})
 
 
+def list_all_users() -> list[dict]:
+    """List all users — admin only. Returns safe fields (no password hashes)."""
+    init_users_tables()
+    rows = db.fetch("users", {}, order_by="created_at ASC")
+    return [{
+        "user_id":      r.get("user_id"),
+        "display_name": r.get("display_name") or "",
+        "auth_kind":    r.get("auth_kind") or "",
+        "auth_ref":     r.get("auth_ref") or "",
+        "is_admin":     bool(r.get("is_admin")),
+        "created_at":   r.get("created_at") or "",
+        "last_seen_at": r.get("last_seen_at") or "",
+    } for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Password auth (auth_kind="password")
 # ---------------------------------------------------------------------------

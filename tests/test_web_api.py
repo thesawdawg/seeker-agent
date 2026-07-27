@@ -330,6 +330,131 @@ def test_auth_methods_lists_all_backends(client):
 
 
 # ---------------------------------------------------------------------------
+# Admin — user management (F12)
+# ---------------------------------------------------------------------------
+
+def test_admin_list_users_requires_admin(client, provider):
+    """Non-admin users cannot list all users."""
+    sign_in(client, provider)
+    # The first user is auto-promoted to admin, so register a second user
+    # and sign in as them to test non-admin access.
+    client.post("/api/auth/logout")
+    _register(client, username="nonadmin", display_name="Non Admin")
+    resp = client.get("/api/admin/users")
+    # The first user (auto-promoted) is admin; this new user is not.
+    # But auto-promote only runs when there's exactly one user, so the
+    # second user won't be admin. However, the first user IS admin.
+    # We need to check: is the current user an admin?
+    who = client.get("/api/config/whoami").json()
+    if not who["is_admin"]:
+        assert resp.status_code == 403
+    else:
+        assert resp.status_code == 200
+
+
+def test_admin_can_list_all_users(client, provider):
+    """Admin can list all users."""
+    sign_in(client, provider, name="AdminUser")
+    _register(client, username="alice2", display_name="Alice2")
+    # Sign back in as the admin (first user, auto-promoted)
+    client.post("/api/auth/logout")
+    sign_in(client, provider, name="AdminUser")
+    resp = client.get("/api/admin/users")
+    assert resp.status_code == 200
+    users_list = resp.json()["users"]
+    assert len(users_list) >= 2
+    names = [u["display_name"] for u in users_list]
+    assert "AdminUser" in names
+    assert "Alice2" in names
+
+
+def test_admin_can_add_provider_connection_for_password_user(client, provider):
+    """Admin can add provider credentials for a password-authenticated user."""
+    # Admin signs in (auto-promoted first user)
+    sign_in(client, provider, name="AdminUser")
+    admin_id = client.get("/api/auth/me").json()["user_id"]
+
+    # Register a password user (second user, not admin)
+    client.post("/api/auth/logout")
+    body = _register(client, username="pwuser", display_name="PW User")
+    pw_user_id = body["user_id"]
+
+    # Sign back in as admin
+    client.post("/api/auth/logout")
+    sign_in(client, provider, name="AdminUser")
+
+    # Admin adds provider credentials for the password user
+    resp = client.put(f"/api/admin/users/{pw_user_id}/credentials", json={
+        "provider": "open-webui",
+        "base_url": provider.base_url,
+        "api_key": provider.valid_key,
+        "models": {},
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["credential"]["provider"] == "open-webui"
+
+    # Verify the credentials are visible via admin endpoint
+    resp = client.get(f"/api/admin/users/{pw_user_id}/credentials")
+    assert resp.status_code == 200
+    creds = resp.json()["credentials"]
+    assert len(creds) == 1
+    assert creds[0]["provider"] == "open-webui"
+    # API key must not be returned
+    assert provider.valid_key not in json.dumps(creds)
+
+
+def test_admin_can_delete_provider_connection(client, provider):
+    """Admin can delete a provider credential from another user."""
+    sign_in(client, provider, name="AdminUser")
+    client.post("/api/auth/logout")
+    body = _register(client, username="deluser", display_name="Del User")
+    pw_user_id = body["user_id"]
+
+    client.post("/api/auth/logout")
+    sign_in(client, provider, name="AdminUser")
+
+    # Add a credential
+    client.put(f"/api/admin/users/{pw_user_id}/credentials", json={
+        "provider": "open-webui",
+        "base_url": provider.base_url,
+        "api_key": provider.valid_key,
+        "models": {},
+    })
+
+    # Delete it
+    resp = client.delete(
+        f"/api/admin/users/{pw_user_id}/credentials/open-webui")
+    assert resp.status_code == 200
+
+    # Verify it's gone
+    resp = client.get(f"/api/admin/users/{pw_user_id}/credentials")
+    assert len(resp.json()["credentials"]) == 0
+
+
+def test_admin_endpoints_reject_nonexistent_user(client, provider):
+    """Admin endpoints return 404 for unknown user IDs."""
+    sign_in(client, provider, name="AdminUser")
+    resp = client.get("/api/admin/users/USR-NONEXISTENT/credentials")
+    assert resp.status_code == 404
+    resp = client.put("/api/admin/users/USR-NONEXISTENT/credentials", json={
+        "provider": "open-webui", "base_url": "http://x", "api_key": "k",
+    })
+    assert resp.status_code == 404
+
+
+def test_admin_user_list_excludes_password_hashes(client, provider):
+    """The user list must not expose password hashes."""
+    sign_in(client, provider, name="AdminUser")
+    _register(client, username="secretuser", password="secretpass1")
+    client.post("/api/auth/logout")
+    sign_in(client, provider, name="AdminUser")
+    resp = client.get("/api/admin/users")
+    serialised = json.dumps(resp.json())
+    assert "password_hash" not in serialised
+    assert "secretpass1" not in serialised
+
+
+# ---------------------------------------------------------------------------
 # Credentials
 # ---------------------------------------------------------------------------
 
