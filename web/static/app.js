@@ -2720,7 +2720,8 @@ async function renderTree() {
     el('h3', {}, 'Argument Tree'),
     el('p', { class: 'muted small' },
       'Every claim traces to evidence. Click a node to inspect its source and metadata. ' +
-      'Nodes are color-coded by type; claims carry an audit status badge.'),
+      'Nodes are color-coded by type; claims carry an audit status badge. ' +
+      'Content wraps fully — no truncation. Use Expand all to see every branch.'),
     statRow,
   ));
 
@@ -2732,9 +2733,51 @@ async function renderTree() {
   }
   panel.append(legend);
 
+  // Toolbar: expand/collapse all + breadcrumb container
+  const breadcrumbEl = el('div', { class: 'tree-breadcrumb', id: 'tree-breadcrumb' });
+  const toolbar = el('div', { class: 'tree-toolbar' },
+    el('button', { class: 'btn', type: 'button', text: '▸ Expand all',
+      onClick: () => {
+        panel.querySelectorAll('.tree-children').forEach(c => c.hidden = false);
+        panel.querySelectorAll('.tree-toggle:not(.tree-toggle-leaf)').forEach(t => t.textContent = '▾');
+      },
+    }),
+    el('button', { class: 'btn', type: 'button', text: '▾ Collapse all',
+      onClick: () => {
+        // Collapse all .tree-children except the root's immediate children
+        panel.querySelectorAll('.tree-children').forEach(c => {
+          const wrapper = c.parentElement;  // .tree-node-wrapper
+          const grandparent = wrapper && wrapper.parentElement;
+          // Root wrapper is a direct child of the panel — keep its children open
+          const isRootLevel = grandparent === panel;
+          c.hidden = !isRootLevel;
+        });
+        panel.querySelectorAll('.tree-toggle:not(.tree-toggle-leaf)').forEach(t => {
+          const wrapper = t.closest('.tree-node-wrapper');
+          const childContainer = wrapper && wrapper.querySelector(':scope > .tree-children');
+          if (childContainer) t.textContent = childContainer.hidden ? '▸' : '▾';
+        });
+      },
+    }),
+  );
+  panel.append(toolbar);
+  panel.append(breadcrumbEl);
+
   // Detail panel (shown when a node is clicked)
   const detail = el('div', { class: 'tree-detail', id: 'tree-detail' });
   panel.append(detail);
+
+  // Build a parent map for breadcrumb navigation
+  const parentMap = new Map();
+  const buildParentMap = (node, parent = null) => {
+    if (!node) return;
+    if (parent) parentMap.set(node.node_id, parent);
+    for (const child of (node.children || [])) buildParentMap(child, node);
+  };
+  buildParentMap(tree);
+
+  // Track currently selected node for visual highlight
+  let selectedNodeEl = null;
 
   // Recursive tree renderer
   const renderNode = (node, depth = 0) => {
@@ -2743,7 +2786,7 @@ async function renderTree() {
     const colorClass = TREE_NODE_COLORS[type] || '';
     const hasChildren = node.children && node.children.length > 0;
 
-    const childContainer = el('div', { class: 'tree-children', hidden: depth > 1 });
+    const childContainer = el('div', { class: 'tree-children', hidden: depth > 0 });
 
     const toggle = hasChildren
       ? el('span', {
@@ -2753,7 +2796,7 @@ async function renderTree() {
             childContainer.hidden = !childContainer.hidden;
             toggle.textContent = childContainer.hidden ? '▸' : '▾';
           },
-        }, depth > 1 ? '▸' : '▾')
+        }, depth > 0 ? '▸' : '▾')
       : el('span', { class: 'tree-toggle tree-toggle-leaf' }, '·');
 
     const statusBadge = (type === 'claim' && node.status && TREE_STATUS_BADGE[node.status])
@@ -2769,17 +2812,40 @@ async function renderTree() {
     const typeLabel = el('span', { class: `tree-type-label ${colorClass}`,
       text: TREE_TYPE_LABEL[type] || type });
 
-    const content = (node.content || '').slice(0, 200);
+    const childrenCount = hasChildren
+      ? el('span', { class: 'tree-node-children-count',
+                     text: `${node.children.length} child${node.children.length > 1 ? 'ren' : ''}` })
+      : null;
+
+    // Header line: toggle + type + badges + child count
+    const header = el('div', { class: 'tree-node-header' },
+      toggle, typeLabel, statusBadge, confidenceBadge, childrenCount);
+
+    // Content line — full text, line-clamped via CSS (3 lines), click to expand
+    const contentText = node.content || '';
+    const contentEl = el('div', { class: 'tree-node-content', text: contentText });
+    if (contentText.length > 200) {
+      contentEl.title = 'Click to expand/collapse full text';
+      contentEl.style.cursor = 'pointer';
+      contentEl.addEventListener('click', ev => {
+        ev.stopPropagation();
+        contentEl.classList.toggle('is-expanded');
+      });
+    }
 
     const nodeEl = el('div', {
       class: `tree-node ${colorClass}`,
-      onClick: () => showNodeDetail(node, sources, detail),
+      'data-node-id': node.node_id || '',
+      onClick: () => {
+        // Highlight selected node
+        if (selectedNodeEl) selectedNodeEl.classList.remove('is-selected');
+        nodeEl.classList.add('is-selected');
+        selectedNodeEl = nodeEl;
+        showNodeDetail(node, sources, detail, tree, parentMap, breadcrumbEl);
+      },
     },
-      toggle,
-      typeLabel,
-      el('span', { class: 'tree-node-content', text: content }),
-      statusBadge,
-      confidenceBadge,
+      header,
+      contentEl,
     );
 
     const wrapper = el('div', { class: 'tree-node-wrapper' }, nodeEl, childContainer);
@@ -2798,13 +2864,46 @@ async function renderTree() {
   if (treeRoot) panel.append(treeRoot);
 }
 
-function showNodeDetail(node, sources, container) {
+function showNodeDetail(node, sources, container, root, parentMap, breadcrumbEl) {
   clear(container);
   const type = node.node_type || 'unknown';
   const meta = node.metadata || {};
 
+  // Build breadcrumb path: root → ... → this node
+  if (breadcrumbEl) {
+    clear(breadcrumbEl);
+    const path = [];
+    let cur = node;
+    while (cur) {
+      path.unshift(cur);
+      cur = parentMap.get(cur.node_id) || null;
+    }
+    for (let i = 0; i < path.length; i++) {
+      const n = path[i];
+      const nType = n.node_type || 'unknown';
+      const label = (n.content || '').slice(0, 60) + ((n.content || '').length > 60 ? '…' : '');
+      breadcrumbEl.append(el('span', {
+        class: 'tree-breadcrumb-item',
+        text: `${TREE_TYPE_LABEL[nType] || nType}: ${label || '(no content)'}`,
+        title: n.content || '',
+        onClick: () => {
+          // Scroll to and highlight the clicked breadcrumb target
+          const target = document.querySelector(`[data-node-id="${n.node_id}"]`);
+          if (target) {
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            target.click();
+          }
+        },
+      }));
+      if (i < path.length - 1) {
+        breadcrumbEl.append(el('span', { class: 'tree-breadcrumb-sep', text: '›' }));
+      }
+    }
+  }
+
   const rows = [
     ['Type', TREE_TYPE_LABEL[type] || type],
+    ['Node ID', node.node_id || '—'],
     ['Status', node.status || '—'],
     ['Confidence', node.confidence != null ? `${Math.round(node.confidence * 100)}%` : '—'],
     ['Agent', node.agent_origin || '—'],
@@ -2833,8 +2932,8 @@ function showNodeDetail(node, sources, container) {
     table,
   );
 
-  // Content (full)
-  if (node.content && node.content.length > 200) {
+  // Full content — always shown, not just when > 200 chars
+  if (node.content) {
     container.append(el('div', { class: 'tree-detail-content' },
       el('strong', {}, 'Full content:'),
       el('p', { text: node.content }),

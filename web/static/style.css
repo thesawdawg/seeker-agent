@@ -669,26 +669,56 @@ summary:focus-visible,
   background: var(--surface);
 }
 
-.tree-node-wrapper { margin-left: 1.2rem; }
-.tree-children { margin-left: .8rem; border-left: 1px solid var(--border); padding-left: .4rem; }
+/* Tree toolbar — expand/collapse all controls */
+.tree-toolbar {
+  display: flex; gap: .4rem; margin-bottom: .6rem;
+}
+.tree-toolbar .btn { font-size: .78rem; }
 
+/* Breadcrumb path — shows root → ... → selected node */
+.tree-breadcrumb {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .2rem;
+  margin-bottom: .6rem; font-size: .75rem; color: var(--text-dim);
+}
+.tree-breadcrumb-item {
+  cursor: pointer; padding: .1rem .3rem; border-radius: 3px;
+}
+.tree-breadcrumb-item:hover { background: var(--surface); color: var(--text); }
+.tree-breadcrumb-sep { color: var(--border); }
+
+/* Tree structure — indentation with guide lines */
+.tree-node-wrapper { margin-left: 1.2rem; }
+.tree-children {
+  margin-left: .8rem; border-left: 2px solid var(--border);
+  padding-left: .5rem; margin-top: .15rem;
+}
+
+/* Node card — multi-line layout so content wraps naturally */
 .tree-node {
-  display: flex; align-items: baseline; gap: .35rem;
-  padding: .2rem .35rem; border-radius: 4px; cursor: pointer;
-  border: 1px solid transparent; margin: .1rem 0;
-  font-size: .82rem;
+  padding: .3rem .5rem; border-radius: 6px; cursor: pointer;
+  border: 1px solid transparent; margin: .15rem 0;
+  font-size: .82rem; transition: border-color .15s, background .15s;
 }
 .tree-node:hover { background: var(--surface); border-color: var(--border); }
+.tree-node.is-selected {
+  border-color: var(--accent); background: var(--surface);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* First line: toggle + type label + badges */
+.tree-node-header {
+  display: flex; align-items: center; gap: .35rem; flex-wrap: wrap;
+}
 
 .tree-toggle {
   width: 1em; flex-shrink: 0; cursor: pointer; user-select: none;
-  color: var(--text-dim); text-align: center;
+  color: var(--text-dim); text-align: center; font-size: .85rem;
 }
 .tree-toggle-leaf { cursor: default; }
 
 .tree-type-label {
   font-size: .68rem; font-weight: 600; text-transform: uppercase;
-  padding: 0 .3rem; border-radius: 3px; flex-shrink: 0;
+  padding: .1rem .35rem; border-radius: 3px; flex-shrink: 0;
   color: var(--text-dim); background: var(--border);
 }
 /* Node type colors */
@@ -729,9 +759,17 @@ summary:focus-visible,
   background: #6a6a6a; color: #fff;
 }
 
+/* Content — wraps naturally, line-clamped for visual brevity */
 .tree-node-content {
-  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-top: .2rem; padding-left: 1.2rem;
+  font-size: .8rem; line-height: 1.45; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden; word-break: break-word;
 }
+.tree-node-content.is-expanded {
+  -webkit-line-clamp: unset; overflow: visible;
+}
+
 .tree-status { font-size: .7rem; flex-shrink: 0; padding: 0 .25rem; border-radius: 3px; }
 .tree-status-solid, .tree-status-supported { color: var(--ok); }
 .tree-status-contested, .tree-status-weak { color: var(--warning, #d97706); }
@@ -739,9 +777,14 @@ summary:focus-visible,
 .tree-status-unsupported { color: var(--text-dim); }
 .tree-status-bridged { color: var(--accent); }
 .tree-confidence { font-size: .7rem; color: var(--text-dim); flex-shrink: 0; }
+.tree-node-children-count {
+  font-size: .68rem; color: var(--text-dim); flex-shrink: 0;
+  margin-left: auto;
+}
 
+/* Detail panel */
 .tree-detail {
-  margin: 1rem 0; padding: .8rem; border: 1px solid var(--border);
+  margin: 1rem 0; padding: .9rem; border: 1px solid var(--border);
   border-radius: 8px; background: var(--surface);
 }
 .tree-detail:empty { display: none; }
@@ -752,7 +795,7 @@ summary:focus-visible,
 }
 .tree-detail-table td { font-size: .82rem; padding: .2rem .4rem; vertical-align: top; }
 .tree-detail-content { margin: .5rem 0; }
-.tree-detail-content p { font-size: .82rem; margin: .2rem 0; }
+.tree-detail-content p { font-size: .82rem; margin: .2rem 0; line-height: 1.5; word-break: break-word; }
 .tree-detail-sources {
   list-style: none; padding: 0; margin: .3rem 0;
   display: flex; flex-direction: column; gap: .2rem;
