@@ -27,6 +27,24 @@ dev = ["pytest>=7.0", "httpx>=0.27.0"]
 [project.scripts]
 seeker = "main:main"
 
+# Package discovery, stated rather than guessed.
+#
+# This is a flat layout with several non-package top-level directories
+# (db/, logs/, artifacts/, exports/, review/), and setuptools refuses to
+# auto-discover in that situation — it errors with "Multiple top-level
+# packages discovered in a flat-layout" rather than risk shipping the
+# database and the run artifacts inside the wheel. So `pip install .` has
+# never worked, which went unnoticed because nothing ever tried it.
+#
+# tools/ is deliberately absent: those are standalone scripts run with
+# `python3 tools/<name>.py`, not an importable package (no __init__.py).
+[tool.setuptools]
+packages = ["core", "agents", "web"]
+py-modules = ["main", "worker"]      # main:main backs the `seeker` entry point
+
+[tool.setuptools.package-data]
+web = ["static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Scenario scripts run as subprocesses via tests/test_scenarios.py — collecting

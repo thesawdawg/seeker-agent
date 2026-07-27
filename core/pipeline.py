@@ -218,6 +218,12 @@ def claim_step(run_id: str, step_name: str, from_statuses=("pending", "failed"))
     into the same run (review C5).
 
     Returns True if this caller now owns the step.
+
+    Relies on affected-row count, which on MySQL means *changed* rows rather
+    than matched ones. That is safe here only because the UPDATE always
+    changes `status` — a row it matches is never already 'running'. Widening
+    from_statuses to include 'running' would quietly break both that and the
+    mutual exclusion.
     """
     init_steps_table()
     ph = ", ".join("?" for _ in from_statuses)

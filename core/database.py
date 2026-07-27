@@ -843,15 +843,17 @@ def count_by(table: str, column: str, where: dict) -> dict:
 
     `column` is module-controlled, never caller input.
     """
-    ph = db_backend.placeholder()
+    # Written with '?' and handed to query(), which does the dialect
+    # translation. Building with the backend placeholder and translating back
+    # would round-trip through '%s' and corrupt any literal that contained it.
     sql = f"SELECT {column} AS k, COUNT(*) AS n FROM {table}"
     params: list = []
     if where:
-        sql += " WHERE " + " AND ".join(f"{k} = {ph}" for k in where)
+        sql += " WHERE " + " AND ".join(f"{k} = ?" for k in where)
         params = list(where.values())
     sql += f" GROUP BY {column}"
     out: dict = {}
-    for row in query(sql.replace(ph, "?"), tuple(params)):
+    for row in query(sql, tuple(params)):
         out[row.get("k") or "unrated"] = int(row.get("n") or 0)
     return out
 
