@@ -672,7 +672,6 @@ function showNewRun() {
   buildRoleGrid();
   buildModelGrid($('#new-model-grid'));
   buildSourceGrid();
-  buildSourceKeys();
   buildTemplateBar();
   refreshEstimate();
   buildPreviousRunPicker();
@@ -958,62 +957,6 @@ async function refreshEstimate() {
   } catch {
     box.hidden = true;      // non-essential; never block starting a run
   }
-}
-
-// Per-user academic source API keys (review U2). Lets a researcher add a
-// Scopus/CORE/... key inline on the New Run screen.
-function buildSourceKeys() {
-  const container = $('#new-source-keys');
-  if (!container) return;
-  clear(container);
-  const keyable = ['scopus', 'semantic_scholar', 'core', 'google_books',
-                   'philpapers', 'openalex', 'pubmed'];
-  const row = el('div', { class: 'source-key-row' },
-    el('select', { id: 'src-key-source' },
-      ...keyable.map(s => el('option', { value: s, text: s }))),
-    el('input', { type: 'password', id: 'src-key-value',
-                  placeholder: 'API key', autocomplete: 'off' }),
-    el('button', { class: 'btn btn-small', type: 'button', id: 'btn-save-src-key',
-                   onClick: saveSourceKey }, 'Save'),
-  );
-  container.append(row);
-  // List existing source keys
-  api('/api/source-credentials').then(res => {
-    const list = (res.credentials || []);
-    if (!list.length) return;
-    container.append(el('div', { class: 'source-key-list' },
-      ...list.map(c => el('div', { class: 'source-key-item' },
-        el('span', { text: c.source_id }),
-        el('span', { class: 'muted small', text: c.key_hint || '••••' }),
-        el('button', { class: 'btn btn-ghost btn-small', type: 'button',
-          onClick: () => deleteSourceKey(c.source_id) }, 'Remove'),
-      )),
-    ));
-  }).catch(() => {});
-}
-
-async function saveSourceKey() {
-  const sourceId = $('#src-key-source').value;
-  const value = $('#src-key-value').value;
-  if (!value) return;
-  try {
-    await api('/api/source-credentials', {
-      method: 'PUT', body: { source_id: sourceId, api_key: value } });
-    $('#src-key-value').value = '';
-    toast(`Key for ${sourceId} saved.`, 'ok');
-    buildSourceKeys();
-    buildSourceGrid();
-  } catch (err) { toast(err.message, 'error'); }
-}
-
-async function deleteSourceKey(sourceId) {
-  try {
-    await api(`/api/source-credentials/${encodeURIComponent(sourceId)}`,
-              { method: 'DELETE' });
-    toast(`Key for ${sourceId} removed.`, 'ok');
-    buildSourceKeys();
-    buildSourceGrid();
-  } catch (err) { toast(err.message, 'error'); }
 }
 
 function wireNewRun() {
@@ -3194,7 +3137,10 @@ function renderAdminTemplates(panel) {
   }
 }
 
-// ── Users tab: list users, manage provider connections ──
+// ── Users tab: view-only user list (admin) ──
+// Admins can see which users exist and which providers/sources they have
+// configured, but cannot add, edit, or delete credentials for other users.
+// Each user manages their own connections from the Settings page.
 async function renderAdminUsers(panel) {
   let userList = [];
   try {
@@ -3209,6 +3155,9 @@ async function renderAdminUsers(panel) {
     panel.append(el('p', { class: 'muted', text: 'No users registered yet.' }));
     return;
   }
+
+  panel.append(el('p', { class: 'muted small',
+    text: 'View-only. Each user manages their own provider connections from their Settings page.' }));
 
   // User list table
   const table = el('table', { class: 'admin-user-table' },
@@ -3232,25 +3181,25 @@ async function renderAdminUsers(panel) {
           el('button', {
             class: 'btn btn-small',
             type: 'button',
-            onClick: () => showUserCredentials(panel, u),
-          }, 'Manage connections')),
+            onClick: () => showUserConnections(panel, u),
+          }, 'View connections')),
       )),
     ),
   );
   panel.append(table);
 
-  // Container for the credential management sub-panel
+  // Container for the view-only connections sub-panel
   panel.append(el('div', { id: 'admin-user-credentials', class: 'admin-cred-panel' }));
 }
 
-async function showUserCredentials(panel, user) {
+async function showUserConnections(panel, user) {
   const container = $('#admin-user-credentials');
   if (!container) return;
   clear(container);
 
   // Header
   container.append(el('h3', {},
-    `Provider connections: ${user.display_name || user.user_id}`,
+    `Connections: ${user.display_name || user.user_id}`,
     el('button', {
       class: 'btn btn-ghost btn-small',
       type: 'button',
@@ -3259,17 +3208,193 @@ async function showUserCredentials(panel, user) {
     }, 'Close'),
   ));
 
-  // Load existing credentials
-  let creds = [];
+  // Load provider credentials (view-only, no secrets)
+  let creds = [], srcCreds = [];
   try {
-    const res = await api(`/api/admin/users/${encodeURIComponent(user.user_id)}/credentials`);
-    creds = res.credentials || [];
+    const [provRes, srcRes] = await Promise.all([
+      api(`/api/admin/users/${encodeURIComponent(user.user_id)}/credentials`),
+      api(`/api/admin/users/${encodeURIComponent(user.user_id)}/source-credentials`),
+    ]);
+    creds = provRes.credentials || [];
+    srcCreds = srcRes.credentials || [];
   } catch (err) {
     container.append(el('p', { class: 'error', text: err.message }));
     return;
   }
 
-  // Existing credentials list
+  // Provider connections
+  container.append(el('h4', { text: 'Model providers' }));
+  if (creds.length) {
+    const list = el('div', { class: 'cred-list' });
+    for (const c of creds) {
+      list.append(el('div', { class: 'cred-item' },
+        el('span', { class: 'cred-provider', text: c.provider }),
+        el('span', { class: 'muted small', text: c.key_hint || '••••' }),
+        el('span', { class: 'muted small',
+          text: c.base_url ? c.base_url.slice(0, 40) : '' }),
+      ));
+    }
+    container.append(list);
+  } else {
+    container.append(el('p', { class: 'muted small',
+      text: 'No provider connections configured.' }));
+  }
+
+  // Source API keys
+  container.append(el('h4', { text: 'Source API keys', style: 'margin-top: 1rem;' }));
+  if (srcCreds.length) {
+    const list = el('div', { class: 'cred-list' });
+    for (const c of srcCreds) {
+      list.append(el('div', { class: 'cred-item' },
+        el('span', { class: 'cred-provider', text: c.source_id }),
+        el('span', { class: 'muted small', text: c.key_hint || '••••' }),
+      ));
+    }
+    container.append(list);
+  } else {
+    container.append(el('p', { class: 'muted small',
+      text: 'No source API keys configured.' }));
+  }
+}
+
+// ── User settings ──────────────────────────────────────────────────────
+
+function switchSettingsTab(tab) {
+  markSelectedTab($$('#settings-tabs .tab'), t => t.dataset.settingsTab === tab);
+  $$('#view-settings .tab-panel').forEach(p => { p.hidden = true; });
+  const panel = $(`#panel-settings-${tab}`);
+  if (panel) { panel.hidden = false; renderSettingsTab(tab, panel); }
+}
+
+async function renderSettingsTab(tab, panel) {
+  clear(panel);
+  if (tab === 'profile')      renderSettingsProfile(panel);
+  else if (tab === 'providers') renderSettingsProviders(panel);
+  else if (tab === 'sources')   renderSettingsSources(panel);
+}
+
+function renderSettingsProfile(panel) {
+  const user = state.user;
+  if (!user) return;
+
+  // Display name
+  const nameInput = el('input', {
+    type: 'text', id: 'settings-display-name',
+    value: user.display_name || '',
+    placeholder: 'Your display name',
+  });
+  const saveNameBtn = el('button', {
+    class: 'btn btn-primary btn-small', type: 'button',
+  }, 'Save name');
+  saveNameBtn.addEventListener('click', async () => {
+    saveNameBtn.disabled = true;
+    try {
+      await api('/api/auth/me', {
+        method: 'PUT',
+        body: { display_name: nameInput.value.trim() },
+      });
+      state.user.display_name = nameInput.value.trim();
+      $('#user-chip').textContent = state.user.display_name;
+      toast('Display name updated', 'ok');
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      saveNameBtn.disabled = false;
+    }
+  });
+
+  panel.append(el('div', { class: 'settings-section' },
+    el('h3', { text: 'Display name' }),
+    el('div', { class: 'settings-inline-form' },
+      nameInput, saveNameBtn),
+  ));
+
+  // Account info
+  panel.append(el('div', { class: 'settings-section' },
+    el('h3', { text: 'Account' }),
+    el('p', { class: 'muted small' },
+      `User ID: ${user.user_id}`),
+    el('p', { class: 'muted small' },
+      `Auth method: ${user.auth_kind || 'provider_key'}`),
+    el('p', { class: 'muted small' },
+      `Admin: ${user.is_admin ? 'Yes' : 'No'}`),
+  ));
+
+  // Change password (password-auth users only)
+  if (user.auth_kind === 'password') {
+    const currentPw = el('input', {
+      type: 'password', id: 'settings-current-pw',
+      placeholder: 'Current password', autocomplete: 'current-password',
+    });
+    const newPw = el('input', {
+      type: 'password', id: 'settings-new-pw',
+      placeholder: 'New password (min 8 chars)', autocomplete: 'new-password',
+    });
+    const newPw2 = el('input', {
+      type: 'password', id: 'settings-new-pw2',
+      placeholder: 'Confirm new password', autocomplete: 'new-password',
+    });
+    const changeBtn = el('button', {
+      class: 'btn btn-primary btn-small', type: 'button',
+    }, 'Change password');
+    changeBtn.addEventListener('click', async () => {
+      if (newPw.value !== newPw2.value) {
+        toast('New passwords do not match', 'error'); return;
+      }
+      if (newPw.value.length < 8) {
+        toast('Password must be at least 8 characters', 'error'); return;
+      }
+      changeBtn.disabled = true;
+      changeBtn.textContent = 'Changing…';
+      try {
+        await api('/api/auth/password', {
+          method: 'PUT',
+          body: {
+            current_password: currentPw.value,
+            new_password: newPw.value,
+          },
+        });
+        currentPw.value = ''; newPw.value = ''; newPw2.value = '';
+        toast('Password changed', 'ok');
+      } catch (err) {
+        toast(err.message, 'error');
+      } finally {
+        changeBtn.disabled = false;
+        changeBtn.textContent = 'Change password';
+      }
+    });
+
+    panel.append(el('div', { class: 'settings-section' },
+      el('h3', { text: 'Change password' }),
+      el('label', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Current password'),
+        currentPw),
+      el('label', { class: 'field' },
+        el('span', { class: 'field-label' }, 'New password'),
+        newPw),
+      el('label', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Confirm new password'),
+        newPw2),
+      changeBtn,
+    ));
+  }
+}
+
+async function renderSettingsProviders(panel) {
+  // Load current credentials
+  let creds = [];
+  try {
+    const res = await api('/api/credentials');
+    creds = res.credentials || [];
+  } catch (err) {
+    panel.append(el('p', { class: 'error', text: err.message }));
+    return;
+  }
+
+  panel.append(el('p', { class: 'muted small',
+    text: 'Your model provider connections are private to your account. The API key is validated against the provider before being stored encrypted.' }));
+
+  // Existing credentials
   if (creds.length) {
     const list = el('div', { class: 'cred-list' });
     for (const c of creds) {
@@ -3281,30 +3406,30 @@ async function showUserCredentials(panel, user) {
         el('button', {
           class: 'btn btn-ghost btn-small',
           type: 'button',
-          onClick: () => deleteAdminCredential(user, c.provider, container),
+          onClick: () => deleteProviderCredential(c.provider, panel),
         }, 'Remove'),
       ));
     }
-    container.append(list);
+    panel.append(list);
   } else {
-    container.append(el('p', { class: 'muted',
+    panel.append(el('p', { class: 'muted',
       text: 'No provider connections configured. Add one below.' }));
   }
 
   // Add credential form
-  container.append(el('div', { class: 'divider' }, el('span', { text: 'Add provider' })));
+  panel.append(el('div', { class: 'divider' }, el('span', { text: 'Add provider' })));
 
-  const providerSelect = el('select', { id: 'admin-cred-provider' },
+  const providerSelect = el('select', { id: 'settings-cred-provider' },
     ...Object.keys(BASE_URL_DEFAULTS).map(p =>
       el('option', { value: p, text: p })),
   );
   const baseUrlInput = el('input', {
-    type: 'url', id: 'admin-cred-base-url',
+    type: 'url', id: 'settings-cred-base-url',
     value: BASE_URL_DEFAULTS['open-webui'] || '',
     placeholder: 'http://localhost:3000/api',
   });
   const apiKeyInput = el('input', {
-    type: 'password', id: 'admin-cred-api-key',
+    type: 'password', id: 'settings-cred-api-key',
     placeholder: 'sk-…', autocomplete: 'off',
   });
 
@@ -3320,7 +3445,7 @@ async function showUserCredentials(panel, user) {
     addBtn.disabled = true;
     addBtn.textContent = 'Validating…';
     try {
-      await api(`/api/admin/users/${encodeURIComponent(user.user_id)}/credentials`, {
+      await api('/api/credentials', {
         method: 'PUT',
         body: {
           provider: providerSelect.value,
@@ -3330,8 +3455,10 @@ async function showUserCredentials(panel, user) {
         },
       });
       apiKeyInput.value = '';
-      toast(`Provider connection added for ${user.display_name || user.user_id}`, 'ok');
-      showUserCredentials(panel, user);  // refresh
+      toast('Provider connection added', 'ok');
+      // Refresh credentials in state and re-render
+      await refreshUserCredentials();
+      renderSettingsProviders(panel);
     } catch (err) {
       toast(err.message, 'error');
     } finally {
@@ -3340,7 +3467,7 @@ async function showUserCredentials(panel, user) {
     }
   });
 
-  container.append(
+  panel.append(
     el('div', { class: 'admin-cred-form' },
       el('label', { class: 'field' },
         el('span', { class: 'field-label' }, 'Provider'),
@@ -3356,18 +3483,114 @@ async function showUserCredentials(panel, user) {
   );
 }
 
-async function deleteAdminCredential(user, provider, container) {
+async function deleteProviderCredential(provider, panel) {
   try {
-    await api(
-      `/api/admin/users/${encodeURIComponent(user.user_id)}/credentials/${encodeURIComponent(provider)}`,
+    await api(`/api/credentials/${encodeURIComponent(provider)}`,
       { method: 'DELETE' });
     toast(`Removed ${provider} connection`, 'ok');
-    // Re-render the credentials panel
-    const panel = $('#panel-admin-users');
-    if (panel) showUserCredentials(panel, user);
+    await refreshUserCredentials();
+    renderSettingsProviders(panel);
   } catch (err) {
     toast(err.message, 'error');
   }
+}
+
+async function refreshUserCredentials() {
+  try {
+    const me = await api('/api/auth/me');
+    state.user = me;
+    state.providers = me.credentials || [];
+  } catch { /* ignore */ }
+}
+
+async function renderSettingsSources(panel) {
+  const keyable = ['scopus', 'semantic_scholar', 'core', 'google_books',
+                   'philpapers', 'openalex', 'pubmed'];
+
+  panel.append(el('p', { class: 'muted small',
+    text: 'Store a per-user API key for sources that require authentication (Scopus, CORE, Semantic Scholar, etc.). Keys are stored encrypted and used instead of the matching .env variable for your runs.' }));
+
+  // Load existing source keys
+  let creds = [];
+  try {
+    const res = await api('/api/source-credentials');
+    creds = res.credentials || [];
+  } catch (err) {
+    panel.append(el('p', { class: 'error', text: err.message }));
+    return;
+  }
+
+  // Existing source keys
+  if (creds.length) {
+    const list = el('div', { class: 'cred-list' });
+    for (const c of creds) {
+      list.append(el('div', { class: 'cred-item' },
+        el('span', { class: 'cred-provider', text: c.source_id }),
+        el('span', { class: 'muted small', text: c.key_hint || '••••' }),
+        el('button', {
+          class: 'btn btn-ghost btn-small',
+          type: 'button',
+          onClick: () => deleteSourceKeyFromSettings(c.source_id, panel),
+        }, 'Remove'),
+      ));
+    }
+    panel.append(list);
+  } else {
+    panel.append(el('p', { class: 'muted',
+      text: 'No source API keys configured. Add one below.' }));
+  }
+
+  // Add source key form
+  panel.append(el('div', { class: 'divider' }, el('span', { text: 'Add source key' })));
+
+  const sourceSelect = el('select', { id: 'settings-src-source' },
+    ...keyable.map(s => el('option', { value: s, text: s })),
+  );
+  const keyValueInput = el('input', {
+    type: 'password', id: 'settings-src-key',
+    placeholder: 'API key', autocomplete: 'off',
+  });
+  const saveBtn = el('button', {
+    class: 'btn btn-primary btn-small', type: 'button',
+  }, 'Save key');
+  saveBtn.addEventListener('click', async () => {
+    if (!keyValueInput.value) return;
+    saveBtn.disabled = true;
+    try {
+      await api('/api/source-credentials', {
+        method: 'PUT',
+        body: { source_id: sourceSelect.value, api_key: keyValueInput.value },
+      });
+      keyValueInput.value = '';
+      toast(`Key for ${sourceSelect.value} saved`, 'ok');
+      renderSettingsSources(panel);
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+
+  panel.append(
+    el('div', { class: 'settings-inline-form' },
+      sourceSelect, keyValueInput, saveBtn),
+  );
+}
+
+async function deleteSourceKeyFromSettings(sourceId, panel) {
+  try {
+    await api(`/api/source-credentials/${encodeURIComponent(sourceId)}`,
+      { method: 'DELETE' });
+    toast(`Key for ${sourceId} removed`, 'ok');
+    renderSettingsSources(panel);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+function showSettings() {
+  showView('settings');
+  switchSettingsTab('profile');
 }
 
 /* Arrow-key navigation within a tablist. Expected of anything using the tab
@@ -3413,6 +3636,20 @@ function wireChrome() {
   // F12: admin button + admin tab switching
   $('#btn-admin')?.addEventListener('click', () => showAdmin().catch(err => toast(err.message, 'error')));
   $('#btn-guide')?.addEventListener('click', () => showView('guide'));
+  // Settings button + settings tab switching
+  $('#btn-settings')?.addEventListener('click', () => showSettings());
+  const linkSettingsSources = $('#link-settings-sources');
+  linkSettingsSources?.addEventListener('click', ev => {
+    ev.preventDefault();
+    showSettings();
+    switchSettingsTab('sources');
+  });
+  const settingsTabs = $('#settings-tabs');
+  settingsTabs?.addEventListener('click', ev => {
+    const tab = ev.target.closest('[data-settings-tab]');
+    if (tab) switchSettingsTab(tab.dataset.settingsTab);
+  });
+  if (settingsTabs) wireTablistKeys(settingsTabs, switchSettingsTab, 'settingsTab');
   const adminTabs = $('#admin-tabs');
   adminTabs?.addEventListener('click', ev => {
     const tab = ev.target.closest('[data-admin-tab]');

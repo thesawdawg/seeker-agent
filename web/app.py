@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from core.keys import _load_env
 _load_env()
 
-from core import breaks, database as db, jobs, llm, pipeline, users
+from core import breaks, crypto, database as db, jobs, llm, pipeline, users
 from core.utils import load_config
 from web import auth
 
@@ -182,8 +182,45 @@ def me(user: dict = Depends(auth.resolve_user)):
     return {
         "user_id":      user["user_id"],
         "display_name": user.get("display_name") or "",
+        "auth_kind":    user.get("auth_kind") or "",
+        "is_admin":     bool(user.get("is_admin")),
         "credentials":  users.list_credentials(user["user_id"]),
     }
+
+
+class UpdateProfileRequest(BaseModel):
+    display_name: str = Field(..., min_length=1, max_length=100)
+
+
+@app.put("/api/auth/me")
+def update_profile(body: UpdateProfileRequest,
+                   user: dict = Depends(auth.resolve_user)):
+    """Update the current user's display name."""
+    users.set_display_name(user["user_id"], body.display_name)
+    return {"ok": True, "display_name": body.display_name}
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(..., min_length=8)
+
+
+@app.put("/api/auth/password")
+def change_password(body: ChangePasswordRequest,
+                    user: dict = Depends(auth.resolve_user)):
+    """Change the current user's password (password-auth users only)."""
+    if user.get("auth_kind") != "password":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Password change is only available for "
+                            "username/password accounts")
+    # Verify current password before allowing change
+    stored_hash = user.get("password_hash") or ""
+    if not stored_hash or not crypto.verify_password(
+            body.current_password, stored_hash):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED,
+                            "Current password is incorrect")
+    users.set_password(user["user_id"], body.new_password)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +291,9 @@ def delete_source_credentials(source_id: str, user: dict = Depends(auth.resolve_
 
 # ---------------------------------------------------------------------------
 # Admin — user management (F12)
+# Admins can view users and see which providers/sources are configured,
+# but cannot add, edit, or delete credentials for other users. Each user
+# manages their own connections from the Settings page.
 # ---------------------------------------------------------------------------
 
 @app.get("/api/admin/users")
@@ -266,7 +306,7 @@ def admin_list_users(user: dict = Depends(auth.resolve_user)):
 @app.get("/api/admin/users/{user_id}/credentials")
 def admin_get_user_credentials(user_id: str,
                                user: dict = Depends(auth.resolve_user)):
-    """List another user's provider credentials — admin only."""
+    """View another user's provider connections — admin only, no secrets."""
     auth.require_admin(user)
     target = users.get_user(user_id)
     if not target:
@@ -277,41 +317,17 @@ def admin_get_user_credentials(user_id: str,
                      "auth_kind": target.get("auth_kind") or ""}}
 
 
-@app.put("/api/admin/users/{user_id}/credentials")
-def admin_set_user_credentials(user_id: str, body: CredentialRequest,
-                               user: dict = Depends(auth.resolve_user)):
-    """Add or replace provider credentials for another user — admin only."""
+@app.get("/api/admin/users/{user_id}/source-credentials")
+def admin_get_user_source_credentials(
+        user_id: str, user: dict = Depends(auth.resolve_user)):
+    """View another user's source API keys — admin only, no secrets."""
     auth.require_admin(user)
     target = users.get_user(user_id)
     if not target:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
-    kind = "anthropic" if body.provider == "anthropic" else "openai"
-    models = auth.validate_provider_key(body.base_url, body.api_key, kind)
-    stored = users.set_credentials(user_id, body.provider,
-                                   body.base_url, body.api_key, body.models)
-    return {"credential": stored, "available_models": models}
-
-
-@app.patch("/api/admin/users/{user_id}/credentials/{provider}/models")
-def admin_patch_user_credential_models(user_id: str, provider: str,
-                                       body: ModelRolesRequest,
-                                       user: dict = Depends(auth.resolve_user)):
-    """Set model roles for another user's provider — admin only."""
-    auth.require_admin(user)
-    updated = users.set_models(user_id, provider, body.models)
-    if not updated:
-        raise HTTPException(status.HTTP_404_NOT_FOUND,
-                            f"No credentials stored for provider '{provider}'")
-    return {"credential": updated}
-
-
-@app.delete("/api/admin/users/{user_id}/credentials/{provider}")
-def admin_delete_user_credentials(user_id: str, provider: str,
-                                  user: dict = Depends(auth.resolve_user)):
-    """Delete a provider credential from another user — admin only."""
-    auth.require_admin(user)
-    users.delete_credentials(user_id, provider)
-    return {"ok": True}
+    return {"credentials": users.list_source_credentials(user_id),
+            "user": {"user_id": user_id,
+                     "display_name": target.get("display_name") or ""}}
 
 
 @app.get("/api/models")

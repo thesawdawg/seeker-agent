@@ -16,6 +16,7 @@
   <div class="topbar-right">
     <span class="storage-badge" id="storage-badge"></span>
     <span class="user-chip" id="user-chip"></span>
+    <button class="btn btn-ghost" id="btn-settings" type="button">Settings</button>
     <button class="btn btn-ghost" id="btn-admin" type="button" hidden>Admin</button>
     <button class="btn btn-ghost" id="btn-guide" type="button">Guide</button>
     <button class="btn btn-ghost" id="btn-theme" type="button" title="Toggle dark/light theme">◐</button>
@@ -228,15 +229,11 @@
       <details class="disclosure">
         <summary>Source API keys <span class="muted">(optional)</span></summary>
         <p class="muted small">
-          Store a per-user API key for sources that require authentication
-          (Scopus, CORE, Semantic Scholar, etc.). These are stored
-          encrypted in the database and used instead of the matching
-          <code>.env</code> variable for your runs. Keys are per-user —
-          each researcher can use their own credentials. Get a key from
-          the source's developer portal (e.g. dev.elsevier.com for
-          Scopus, core.ac.uk/services/api for CORE).
+          Source API keys (Scopus, CORE, Semantic Scholar, etc.) are now
+          managed in <a href="#" id="link-settings-sources">Settings → Source keys</a>.
+          Keys are stored encrypted and used instead of the matching
+          <code>.env</code> variable for your runs.
         </p>
-        <div id="new-source-keys" class="source-keys"></div>
       </details>
 
       <details class="disclosure">
@@ -360,6 +357,34 @@
     <div class="tab-panel" role="tabpanel" id="panel-admin-themes" hidden></div>
     <div class="tab-panel" role="tabpanel" id="panel-admin-run_templates" hidden></div>
     <div class="tab-panel" role="tabpanel" id="panel-admin-users" hidden></div>
+  </section>
+
+  <!-- ── User settings ───────────────────────────────────────────────── -->
+  <section class="view" id="view-settings" hidden>
+    <div class="view-head">
+      <div>
+        <button class="btn btn-ghost btn-small" data-nav="runs" type="button">← All runs</button>
+        <h1>Settings</h1>
+        <p class="muted small">
+          Manage your account, model provider connections, and source API keys.
+          Each user provides their own credentials — your connections are
+          private to your account.
+        </p>
+      </div>
+    </div>
+
+    <nav class="tabs" id="settings-tabs" role="tablist" aria-label="Settings sections">
+      <button class="tab is-active" data-settings-tab="profile" type="button"
+              role="tab" aria-selected="true" aria-controls="panel-settings-profile">Profile</button>
+      <button class="tab" data-settings-tab="providers" type="button"
+              role="tab" aria-selected="false" aria-controls="panel-settings-providers">Providers</button>
+      <button class="tab" data-settings-tab="sources" type="button"
+              role="tab" aria-selected="false" aria-controls="panel-settings-sources">Source keys</button>
+    </nav>
+
+    <div class="tab-panel" role="tabpanel" id="panel-settings-profile"></div>
+    <div class="tab-panel" role="tabpanel" id="panel-settings-providers" hidden></div>
+    <div class="tab-panel" role="tabpanel" id="panel-settings-sources" hidden></div>
   </section>
 
   <!-- ── Guide / workflow documentation ──────────────────────────────── -->
