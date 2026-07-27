@@ -27,12 +27,35 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+_ENV_KEYS = ("SEEKER_DB_BACKEND", "MYSQL_URL")
+
+
 def _use_mysql():
     os.environ["SEEKER_DB_BACKEND"] = "mysql"
     os.environ["MYSQL_URL"] = TEST_URL
     from core import db_backend
     db_backend.reset_backend()
     return db_backend
+
+
+def _restore_env(saved: dict) -> None:
+    """
+    Put SEEKER_DB_BACKEND / MYSQL_URL back the way they were.
+
+    These are process-wide, and tests/test_scenarios.py launches the scenario
+    scripts as **subprocesses** that inherit os.environ. Leaving the backend
+    pinned to mysql sent those subprocesses at this test database instead of
+    their own SQLite scratch file, and they reported "No sources found".
+    Nobody had seen it because these tests skip without a server, so they had
+    never actually run.
+    """
+    from core import db_backend
+    for key in _ENV_KEYS:
+        if saved.get(key) is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = saved[key]
+    db_backend.reset_backend()
 
 
 def _table_names(db_backend) -> list[str]:
@@ -42,15 +65,21 @@ def _table_names(db_backend) -> list[str]:
         return [r["t"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def mysql_schema():
     """
-    Build the schema once for the session.
+    Build the schema once for this module.
 
     DDL is expensive (seconds per statement on some hosts), so tests clear
     rows between cases rather than dropping and recreating tables.
+
+    Module-scoped rather than session-scoped so the environment is restored
+    as soon as this file is done. At session scope the teardown ran after
+    every other test file, which is far too late to matter — see
+    _restore_env.
     """
     pytest.importorskip("pymysql")
+    saved = {key: os.environ.get(key) for key in _ENV_KEYS}
     db_backend = _use_mysql()
 
     # Start from a known-empty schema
@@ -62,8 +91,10 @@ def mysql_schema():
 
     import core.database as db
     db.init_db()
-    yield db
-    db_backend.reset_backend()
+    try:
+        yield db
+    finally:
+        _restore_env(saved)
 
 
 @pytest.fixture()

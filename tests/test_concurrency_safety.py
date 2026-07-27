@@ -231,3 +231,88 @@ def test_reaping_a_dead_worker_frees_its_step(store):
     assert jobs.reap_stale() == 1
     assert pipeline.get_step(run_id, "concept_mapper")["status"] == "pending"
     assert pipeline.claim_step(run_id, "concept_mapper") is True
+
+
+# ---------------------------------------------------------------------------
+# Disowning an abandoned driver (C3)
+# ---------------------------------------------------------------------------
+
+def test_an_abandoned_driver_stops_writing_once_disowned(store):
+    """
+    The worker abandons a step that will not stop, but the thread does not
+    die — it is sitting in a socket read. When that returns it used to carry
+    on running the step, writing into a run whose state had been reset,
+    resumed, or handed to another worker. In the test suite the same zombie
+    wrote into the *next* test's database (DB_PATH is a late-bound global),
+    which showed up as "database is locked" on a brand-new file.
+    """
+    from core import cancellation
+
+    wrote_after_disown = []
+    resumed = threading.Event()
+    disowned = threading.Event()
+    entered = threading.Event()
+
+    def wedged_step(step_name, run_id_, problem, config):
+        from core import progress
+        entered.set()
+        disowned.wait(5)                 # stand in for a blocked socket read
+        # This is the checkpoint every agent hits before an external call.
+        progress.note("openalex", "searching")
+        wrote_after_disown.append(step_name)   # must never be reached
+
+    import core.pipeline as pl
+    original = pl._run_agent_step
+    original_mapper = pl._run_concept_mapper
+    pl._run_concept_mapper = lambda *a: None
+    try:
+        # Get the run past concept_mapper and Break 0, so the next advance
+        # actually enters an agent step rather than parking at the break.
+        run_id = pipeline.create_run("A problem statement")
+        pipeline.advance(run_id, config={"themes": []})
+        pipeline.submit_break(run_id, 0, "CONFIRMED")
+        pl._run_agent_step = wedged_step
+
+        def drive():
+            try:
+                pipeline.advance(run_id, config={"themes": []})
+            except Exception:
+                pass
+            resumed.set()
+
+        thread = threading.Thread(target=drive, daemon=True)
+        thread.start()
+        assert entered.wait(10), "the driver never reached the agent step"
+
+        # The worker gives up on it and disowns the thread.
+        cancellation.new_epoch(run_id)
+        disowned.set()
+        resumed.wait(10)
+    finally:
+        pl._run_agent_step = original
+        pl._run_concept_mapper = original_mapper
+
+    assert wrote_after_disown == [], \
+        "a disowned driver kept running the step past its checkpoint"
+
+
+def test_a_live_driver_is_not_disowned_by_its_own_epoch(store):
+    """The guard must not fire for the driver that legitimately owns the run."""
+    from core import cancellation
+
+    run_id = pipeline.create_run("A problem statement")
+    token = cancellation.bind_epoch(run_id)
+    try:
+        assert cancellation.is_disowned(run_id) is False
+        cancellation.new_epoch(run_id)
+        assert cancellation.is_disowned(run_id) is True
+    finally:
+        cancellation.release_epoch(token)
+
+
+def test_disowned_check_is_inert_outside_a_driver(store):
+    """Nothing bound means nothing to disown."""
+    from core import cancellation
+    assert cancellation.is_disowned("RUN-NOBODY") is False
+    cancellation.new_epoch("RUN-NOBODY")
+    assert cancellation.is_disowned("RUN-NOBODY") is False

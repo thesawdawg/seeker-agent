@@ -17,8 +17,11 @@ if TEST_DB.exists():
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import core.argument_tree as at
 from core import database, db_backend
-database.DB_PATH = TEST_DB
-db_backend.reset_backend()
+# use_sqlite_file, not a bare DB_PATH poke: it also pins
+# SEEKER_DB_BACKEND=sqlite. Without that this scenario inherits
+# whatever backend the parent pytest process had in its environment,
+# and a subprocess launched after the MySQL suite went to MySQL.
+database.use_sqlite_file(TEST_DB)
 
 conn = sqlite3.connect(str(TEST_DB))
 conn.executescript("""

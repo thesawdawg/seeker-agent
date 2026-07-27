@@ -763,9 +763,15 @@ def advance(run_id: str, problem: str = None, config: dict = None,
     apply_model_overrides(run_id)
     run_token = llm.set_current_run(run_id)
     cancel_token = cancellation.bind(run_id)
+    # Claim the run's current epoch. If this driver is later abandoned — the
+    # worker giving up on a step that will not stop — the epoch moves and
+    # every checkpoint below starts raising, so the thread unwinds instead of
+    # writing into a run that has moved on without it (review C3).
+    epoch_token = cancellation.bind_epoch(run_id)
     try:
         return _advance_loop(run_id, problem, config, max_steps)
     finally:
+        cancellation.release_epoch(epoch_token)
         llm.reset_current_run(run_token)
         cancellation.release(cancel_token)
 
@@ -780,6 +786,12 @@ def _advance_loop(run_id: str, problem: str, config: dict,
 
         # Stop before starting more work, not only mid-step
         from core import cancellation
+        if cancellation.is_disowned(run_id):
+            # Superseded: another driver owns this run now. Return without
+            # touching a thing — in particular without finish_cancel, which
+            # would stomp on the live driver's state.
+            logger.info(f"[{run_id}] This driver was disowned — standing down")
+            return get_state(run_id)
         if cancellation.is_cancelling(run_id):
             finish_cancel(run_id)
             logger.info(f"[{run_id}] Stopped between steps")
@@ -830,6 +842,13 @@ def _advance_loop(run_id: str, problem: str, config: dict,
             set_step_status(run_id, name, "done")
             logger.info(f"[{run_id}] ✓ {step_def.label}")
         except cancellation.RunCancelled:
+            if cancellation.is_disowned(run_id):
+                # An abandoned driver waking up, not a stop request. The run
+                # belongs to someone else now, so unwind without touching its
+                # state. The finally below still releases the progress token.
+                logger.info(f"[{run_id}] Disowned driver unwound out of "
+                            f"{step_def.label}")
+                return get_state(run_id)
             # Not a failure — the researcher asked it to stop
             logger.info(f"[{run_id}] {step_def.label} interrupted by a stop request")
             finish_cancel(run_id, name)
