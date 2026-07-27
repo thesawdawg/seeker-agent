@@ -1,5 +1,7 @@
 /* SEEKER — light/dark, no build step, no external assets. */
 
+*, *::before, *::after { box-sizing: border-box; }
+
 :root {
   --bg:        #f7f7f5;
   --surface:   #ffffff;
@@ -104,6 +106,8 @@ code { font-family: var(--mono); font-size: .88em; }
   gap: 1rem; padding: .7rem 1.2rem;
   background: var(--surface); border-bottom: 1px solid var(--border);
   position: sticky; top: 0; z-index: 20;
+  max-width: 1100px; margin: 0 auto;
+  box-sizing: border-box;
 }
 .brand { font-weight: 600; letter-spacing: .04em; cursor: pointer; }
 .logo { color: var(--accent); }
@@ -115,7 +119,8 @@ code { font-family: var(--mono); font-size: .88em; }
 
 /* ── Layout ──────────────────────────────────────────────────────────── */
 
-#main { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1.2rem 4rem; }
+#main { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1.2rem 4rem;
+  box-sizing: border-box; overflow-x: hidden; }
 .view-centered { min-height: 82vh; display: flex; align-items: center; justify-content: center; }
 .view-head {
   display: flex; align-items: flex-start; justify-content: space-between;
