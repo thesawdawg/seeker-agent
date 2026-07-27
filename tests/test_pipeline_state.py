@@ -373,6 +373,50 @@ def test_break1_payload_carries_gaps_and_sources(env, stub_agents):
     assert [s["title"] for s in payload["fields"]["seminal"]] == ["Mind, Self and Society"]
 
 
+def test_break1_document_includes_full_references_with_backlinks(env, stub_agents):
+    """Break 1 document must include DOI/URL backlinks and abstracts for
+    seminal works so the researcher can read the original and validate claims."""
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+    pipeline.submit_break(run_id, 0, "CONFIRMED")
+    pipeline.advance(run_id, config=config)
+
+    db.upsert_source({
+        "source_id": "SRC-REF1", "title": "The Structure of Scientific Revolutions",
+        "type": "seminal", "run_id": run_id, "year": 1962,
+        "authors": ["Thomas Kuhn"],
+        "doi": "10.1234/test.doi",
+        "active_link": "https://example.com/kuhn1962",
+        "abstract": "A foundational work on paradigm shifts in science.",
+        "seminal_reason": "Established the concept of paradigm shifts.",
+        "source_name": "University of Chicago Press",
+    })
+
+    payload = pipeline.break_payload(run_id, 1, config)
+    doc_path = Path(payload["document"])
+    doc_text = doc_path.read_text()
+
+    # Title and seminal reason must be present
+    assert "The Structure of Scientific Revolutions" in doc_text
+    assert "Established the concept of paradigm shifts" in doc_text
+
+    # Full reference: authors
+    assert "Thomas Kuhn" in doc_text
+
+    # DOI backlink
+    assert "https://doi.org/10.1234/test.doi" in doc_text
+
+    # URL backlink
+    assert "https://example.com/kuhn1962" in doc_text
+
+    # Abstract excerpt
+    assert "A foundational work on paradigm shifts" in doc_text
+
+    # Source/venue
+    assert "University of Chicago Press" in doc_text
+
+
 def test_payload_reports_a_previously_answered_break(env, stub_agents):
     db, pipeline, config = env
     run_id = pipeline.create_run("A problem")

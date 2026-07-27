@@ -2165,34 +2165,131 @@ function renderBreak1(panel, draft) {
       el('h3', {}, 'Seminal works',
         el('span', { class: 'muted small', text: `${seminal.length} found` })),
       el('p', { class: 'muted small' },
-        'Disagree with why something was called seminal? Note it here.'),
+        'Each work includes full references and backlinks (DOI/URL) so you can read the original and validate the claims. Disagree with why something was called seminal? Note it in the override box.'),
     );
     for (const source of seminal.slice(0, 30)) {
       const id = source.source_id;
-      group.append(el('div', { class: 'item' },
-        el('div', { class: 'item-title',
-                    text: `${source.year || 'n.d.'} — ${source.title || ''}` }),
-        el('div', { class: 'item-meta', text: source.seminal_reason || '' }),
-        el('textarea', { rows: 1, placeholder: 'Override this assessment…',
-          onInput: ev => {
-            const value = ev.target.value.trim();
-            if (value) draft.seminalOverrides.set(id, value);
-            else draft.seminalOverrides.delete(id);
-            updatePreview();
-          },
-        }),
-      ));
+      const item = el('div', { class: 'item item-referenced' });
+
+      // Title line
+      item.append(el('div', { class: 'item-title',
+        text: `${source.year || 'n.d.'} — ${source.title || ''}` }));
+
+      // Seminal reason
+      item.append(el('div', { class: 'item-meta',
+        text: source.seminal_reason || '' }));
+
+      // Full reference with backlinks
+      const ref = el('div', { class: 'ref-block' });
+
+      // Authors
+      let authors = source.authors;
+      if (typeof authors === 'string') {
+        try { authors = JSON.parse(authors); } catch { /* keep as string */ }
+      }
+      if (Array.isArray(authors) && authors.length) {
+        const names = authors.map(a => typeof a === 'string' ? a : (a.name || a.full_name || ''));
+        ref.append(el('div', { class: 'ref-authors', text: names.join(', ') }));
+      }
+
+      // Source/venue
+      if (source.source_name) {
+        ref.append(el('div', { class: 'ref-venue muted small',
+          text: source.source_name }));
+      }
+
+      // DOI and URL backlinks
+      const links = el('div', { class: 'ref-links' });
+      const doi = (source.doi || '').trim();
+      if (doi) {
+        const doiUrl = doi.startsWith('http') ? doi : `https://doi.org/${doi}`;
+        links.append(el('a', {
+          href: doiUrl, target: '_blank', rel: 'noopener noreferrer',
+          class: 'ref-link', text: `DOI: ${doi}`,
+        }));
+      }
+      const activeLink = (source.active_link || '').trim();
+      if (activeLink && activeLink !== (doi ? (doi.startsWith('http') ? doi : `https://doi.org/${doi}`) : '')) {
+        links.append(el('a', {
+          href: activeLink, target: '_blank', rel: 'noopener noreferrer',
+          class: 'ref-link', text: 'View source →',
+        }));
+      }
+      if (links.children.length) ref.append(links);
+
+      // Abstract excerpt
+      const abstract = (source.abstract || '').trim();
+      if (abstract) {
+        const excerpt = abstract.length > 300
+          ? abstract.slice(0, 300) + '…'
+          : abstract;
+        ref.append(el('div', { class: 'ref-abstract muted small',
+          text: excerpt }));
+      }
+
+      item.append(ref);
+
+      // Override textarea
+      item.append(el('textarea', {
+        rows: 1, placeholder: 'Override this assessment…',
+        onInput: ev => {
+          const value = ev.target.value.trim();
+          if (value) draft.seminalOverrides.set(id, value);
+          else draft.seminalOverrides.delete(id);
+          updatePreview();
+        },
+      }));
+
+      group.append(item);
     }
     panel.append(group);
   }
 
   if (historical.length) {
-    panel.append(el('div', { class: 'review-group' },
+    const group = el('div', { class: 'review-group' },
       el('h3', {}, 'Historical map',
         el('span', { class: 'muted small', text: `${historical.length} entries` })),
-      el('div', { class: 'directive-preview', text: historical.slice(0, 25)
-        .map(s => `${s.year || 'n.d.'}  ${s.title || ''}`).join('\n') }),
-    ));
+    );
+    for (const source of historical.slice(0, 25)) {
+      const item = el('div', { class: 'item item-referenced' });
+      item.append(el('div', { class: 'item-title',
+        text: `${source.year || 'n.d.'} — ${source.title || ''} [${source.phase_tag || ''}]` }));
+      item.append(el('div', { class: 'item-meta',
+        text: source.historical_reason || '' }));
+
+      // Reference backlinks for historical works too
+      const ref = el('div', { class: 'ref-block' });
+      const doi = (source.doi || '').trim();
+      const activeLink = (source.active_link || '').trim();
+      const links = el('div', { class: 'ref-links' });
+      if (doi) {
+        const doiUrl = doi.startsWith('http') ? doi : `https://doi.org/${doi}`;
+        links.append(el('a', {
+          href: doiUrl, target: '_blank', rel: 'noopener noreferrer',
+          class: 'ref-link', text: `DOI: ${doi}`,
+        }));
+      }
+      if (activeLink && activeLink !== (doi ? (doi.startsWith('http') ? doi : `https://doi.org/${doi}`) : '')) {
+        links.append(el('a', {
+          href: activeLink, target: '_blank', rel: 'noopener noreferrer',
+          class: 'ref-link', text: 'View source →',
+        }));
+      }
+      if (links.children.length) ref.append(links);
+
+      const abstract = (source.abstract || '').trim();
+      if (abstract) {
+        const excerpt = abstract.length > 300
+          ? abstract.slice(0, 300) + '…'
+          : abstract;
+        ref.append(el('div', { class: 'ref-abstract muted small',
+          text: excerpt }));
+      }
+      if (ref.children.length) item.append(ref);
+
+      group.append(item);
+    }
+    panel.append(group);
   }
 }
 

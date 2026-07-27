@@ -33,6 +33,81 @@ def _now_str() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
 
+def _format_authors(authors_raw) -> str:
+    """Format a JSON-encoded author list into a readable string."""
+    if not authors_raw:
+        return ""
+    if isinstance(authors_raw, str):
+        try:
+            authors_raw = json.loads(authors_raw)
+        except (json.JSONDecodeError, ValueError):
+            return authors_raw
+    if not isinstance(authors_raw, list) or not authors_raw:
+        return ""
+    names = [a if isinstance(a, str) else (a.get("name") or a.get("full_name") or str(a))
+             for a in authors_raw]
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} & {names[1]}"
+    if len(names) <= 6:
+        return ", ".join(names[:-1]) + f", & {names[-1]}"
+    return ", ".join(names[:6]) + f", ... & {names[-1]}"
+
+
+def _doi_url(doi: str) -> str:
+    """Return a clickable DOI URL, or empty string."""
+    d = (doi or "").strip()
+    if not d:
+        return ""
+    if d.startswith("http"):
+        return d
+    return f"https://doi.org/{d}"
+
+
+def _format_full_reference(source: dict) -> str:
+    """
+    Format a source row as a full reference with backlinks.
+
+    Includes authors, year, title, DOI/URL, and abstract excerpt so the
+    researcher can locate and read the original work to validate claims.
+    """
+    parts = []
+    authors = _format_authors(source.get("authors"))
+    year = source.get("year") or "n.d."
+    title = source.get("title") or ""
+    if authors:
+        parts.append(authors)
+    parts.append(f"({year}).")
+    if title:
+        parts.append(f"**{title}**.")
+    # Source/venue
+    source_name = source.get("source_name") or ""
+    if source_name:
+        parts.append(f"*{source_name}*.")
+
+    ref = " ".join(parts)
+
+    # Backlinks
+    links = []
+    doi_url = _doi_url(source.get("doi") or "")
+    active_link = source.get("active_link") or ""
+    if doi_url:
+        links.append(f"DOI: [{doi_url}]({doi_url})")
+    if active_link and active_link != doi_url:
+        links.append(f"URL: [{active_link}]({active_link})")
+    if links:
+        ref += f"  \n  {' · '.join(links)}"
+
+    # Abstract excerpt
+    abstract = (source.get("abstract") or "").strip()
+    if abstract:
+        excerpt = abstract[:300] + ("…" if len(abstract) > 300 else "")
+        ref += f"  \n  > {excerpt}"
+
+    return ref
+
+
 def _produce_break0_doc(run_id: str, problem: str, selected_themes: list, excluded_themes: list) -> Path:
     """Produce Break 0 review document."""
     path = ARTIFACTS_DIR / f"{run_id}_break0_review.md"
@@ -96,13 +171,27 @@ def _produce_break1_doc(run_id: str, problem: str) -> Path:
         "## Seminal Works (Grounder)",
         f"*{len(seminal)} seminal works identified.*",
         "",
+        "Full references with backlinks are provided so you can read the",
+        "original works and validate the claims made about them.",
+        "",
     ]
     for s in seminal[:30]:
-        lines.append(f"- [{s.get('year','n.d.')}] **{s.get('title','')}** — {s.get('seminal_reason','')}")
+        sid = s.get("source_id", "")
+        lines.append(f"### [{s.get('year','n.d.')}] {s.get('title','')}")
+        lines.append(f"*Source ID: {sid}*")
+        lines.append("")
+        lines.append(f"**Why seminal:** {s.get('seminal_reason','')}")
+        lines.append("")
+        lines.append(_format_full_reference(s))
+        lines.append("")
 
     lines += ["", "---", "", "## Historical Map (Historian)", f"*{len(historical)} historical entries.*", ""]
     for s in historical[:30]:
-        lines.append(f"- [{s.get('year','n.d.')}] **{s.get('title','')}** [{s.get('phase_tag','')}] — {s.get('historical_reason','')}")
+        lines.append(f"### [{s.get('year','n.d.')}] {s.get('title','')} [{s.get('phase_tag','')}]")
+        lines.append(f"**Why historical:** {s.get('historical_reason','')}")
+        lines.append("")
+        lines.append(_format_full_reference(s))
+        lines.append("")
 
     lines += ["", "---", "", "## Gap Map (Gaper)", f"*{len(gaps)} gaps identified.*", ""]
     for g in gaps:

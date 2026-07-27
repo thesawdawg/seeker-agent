@@ -378,6 +378,27 @@ summary:focus-visible,
 .item-actions { display: flex; gap: .4rem; margin-top: .5rem; flex-wrap: wrap; }
 .item textarea { margin-top: .5rem; font-size: .88rem; }
 
+/* Full reference block in Break 1 seminal/historical works */
+.item-referenced { padding-bottom: .6rem; }
+.ref-block {
+  margin-top: .4rem; padding: .5rem .7rem;
+  border-left: 3px solid var(--border); background: var(--bg);
+  border-radius: 0 4px 4px 0;
+}
+.ref-authors { font-size: .82rem; font-weight: 500; }
+.ref-venue { font-style: italic; }
+.ref-links { display: flex; gap: .8rem; margin-top: .25rem; flex-wrap: wrap; }
+.ref-link {
+  font-size: .8rem; color: var(--accent); text-decoration: none;
+  border-bottom: 1px dotted var(--accent);
+}
+.ref-link:hover { border-bottom-style: solid; }
+.ref-abstract {
+  margin-top: .3rem; font-size: .78rem; line-height: 1.4;
+  font-style: italic; border-top: 1px solid var(--border);
+  padding-top: .3rem;
+}
+
 /* Combined report callout — headline output of the Reporter agent */
 .combined-report-callout {
   border: 1px solid var(--accent); border-radius: 8px;
