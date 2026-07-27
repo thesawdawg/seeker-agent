@@ -715,3 +715,26 @@ input:focus, select:focus, textarea:focus {
   display: flex; align-items: center; gap: .5rem; margin-bottom: .3rem;
 }
 .admin-template-head strong { flex: 1; }
+
+/* ── Guide / workflow documentation ──────────────────────────────────── */
+.guide-card { max-width: 820px; padding: 1.5rem 2rem; }
+.guide-toc {
+  display: flex; flex-wrap: wrap; gap: .8rem;
+  padding: .8rem 1rem; margin-bottom: 1.5rem;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.guide-toc a { color: var(--accent); text-decoration: none; font-size: .9rem; font-weight: 500; }
+.guide-toc a:hover { text-decoration: underline; }
+.guide-section { margin-bottom: 2rem; }
+.guide-section h2 { margin-bottom: .6rem; }
+.guide-section h3 { margin: 1.2rem 0 .3rem; }
+.guide-section p { line-height: 1.6; margin-bottom: .7rem; }
+.guide-section ul, .guide-section ol { line-height: 1.6; margin-bottom: .7rem; padding-left: 1.4rem; }
+.guide-section li { margin-bottom: .3rem; }
+.guide-section code { background: var(--surface-2); padding: .1rem .3rem; border-radius: 3px; font-size: .85em; }
+.guide-pipeline-list { list-style: decimal; padding-left: 1.6rem; }
+.guide-pipeline-list li { margin-bottom: .4rem; }
+@media (max-width: 600px) {
+  .guide-card { padding: 1rem; }
+  .guide-toc { gap: .5rem; }
+}
