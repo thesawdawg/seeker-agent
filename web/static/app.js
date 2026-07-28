@@ -3724,6 +3724,13 @@ async function renderSettingsTab(tab, panel) {
   else if (tab === 'sources')   renderSettingsSources(panel);
   else if (tab === 'mcp')       renderSettingsMcp(panel);
   else if (tab === 'preferences') renderSettingsPreferences(panel);
+  else {
+    // index.html is always refetched, app.js is cached against ?v=N. Forget to
+    // bump it and a new tab's button appears while its renderer doesn't exist,
+    // leaving a silently blank panel. Say so instead.
+    panel.append(el('p', { class: 'muted' },
+      `This section needs a newer version of the page. Reload to update.`));
+  }
 }
 
 /*
