@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SEEKER</title>
-  <link rel="stylesheet" href="/static/style.css?v=20">
+  <link rel="stylesheet" href="/static/style.css?v=21">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔎</text></svg>">
 </head>
 <body>
@@ -425,294 +425,322 @@
     <div class="view-head">
       <div>
         <button class="btn btn-ghost btn-small" data-nav="runs" type="button">← All runs</button>
-        <h1>How SEEKER works</h1>
+        <h1>User guide</h1>
         <p class="muted small">
-          A guide to the research pipeline, the agents that power it, and the
-          breaks where you steer the process.
+          How to run SEEKER, what happens at each step, and what to expect
+          along the way.
         </p>
       </div>
     </div>
 
     <div class="card guide-card">
-      <nav class="guide-toc">
-        <a href="#guide-overview">Overview</a>
-        <a href="#guide-pipeline">The pipeline</a>
-        <a href="#guide-agents">Agents</a>
+      <nav class="guide-toc" aria-label="Guide sections">
+        <a href="#guide-quickstart">Quick start</a>
+        <a href="#guide-pipeline">How a run works</a>
+        <a href="#guide-newrun">Starting a run</a>
+        <a href="#guide-following">Following a run</a>
         <a href="#guide-breaks">Breaks</a>
-        <a href="#guide-artifacts">Artifacts</a>
-        <a href="#guide-tips">Tips for best results</a>
+        <a href="#guide-agents">Agent reference</a>
+        <a href="#guide-results">Your results</a>
+        <a href="#guide-settings">Settings</a>
+        <a href="#guide-tips">Tips &amp; troubleshooting</a>
       </nav>
 
-      <!-- Overview -->
-      <section id="guide-overview" class="guide-section">
-        <h2>Overview</h2>
+      <!-- Quick start -->
+      <section id="guide-quickstart" class="guide-section">
+        <h2>Quick start</h2>
         <p>
           SEEKER is a multi-agent research assistant. You give it a research
-          problem — not a keyword — and it maps the intellectual territory
-          around that problem: where the field started, where it is now, what
-          gaps remain, what approaches have been tried, what's feasible, and
-          where to go next.
+          <em>problem</em> — not a keyword — and a pipeline of specialist
+          agents maps the intellectual territory around it: where the field
+          started, where it is now, what gaps remain, what approaches are
+          feasible, and where to go next. Your first run takes five steps:
         </p>
-        <p>
-          The pipeline runs in <strong>fourteen steps</strong>: one
-          pre-processing system step, ten agents, and three human-in-the-loop
-          breaks. Each agent has a specific analytical role and produces
-          structured output that feeds the next agent. The breaks are where
-          you review the accumulated knowledge and steer the direction of the
-          research.
-        </p>
-        <p>
-          A completed run produces an <strong>Understanding Map</strong> — a
-          citable document with intellectual genealogy, a reading curriculum,
-          a conceptual map, and self-assessment questions. You can also
-          request additional formatted outputs (blog posts, research briefs,
-          paper sections, literature reviews) at Break 2.
-        </p>
+        <ol class="guide-steps">
+          <li>
+            <strong>Connect a model provider.</strong> Go to
+            <em>Settings&nbsp;→&nbsp;Providers</em> and add an API key for
+            your LLM provider. Pick a <em>primary</em> model (heavy
+            reasoning) and a <em>light</em> model (summarizing and
+            formatting). Nothing can run without this.
+          </li>
+          <li>
+            <strong>Optionally add source API keys.</strong>
+            <em>Settings&nbsp;→&nbsp;Source&nbsp;keys</em> holds keys for
+            academic databases that need them (Scopus, CORE, Semantic
+            Scholar, …). Sources without a required key are silently skipped
+            — the run still works, with narrower coverage.
+          </li>
+          <li>
+            <strong>Start a run.</strong> Click <em>New run</em> and state
+            your problem as a question or claim, for example:
+            <em>"How does identity influence intelligence through the lens
+            of identity theory?"</em> Everything else on the form is
+            optional. A cost/duration estimate appears before you commit.
+          </li>
+          <li>
+            <strong>Respond at the three breaks.</strong> The pipeline
+            pauses three times and waits — as long as it takes — for your
+            review: theme selection (Break&nbsp;0), ground-truth validation
+            (Break&nbsp;1), and trajectory evaluation (Break&nbsp;2). A
+            <em>"your turn"</em> banner appears on the run page each time.
+          </li>
+          <li>
+            <strong>Collect your results.</strong> The Artifacts tab holds
+            the Understanding Map, any outputs you requested at Break&nbsp;2,
+            and a combined HTML report you can save as a PDF.
+          </li>
+        </ol>
+        <div class="guide-callout">
+          <strong>What to expect:</strong> agent steps typically take a few
+          minutes each, depending on your models and how many sources you
+          query. The Overview tab shows a live ETA once a couple of steps
+          have finished. Breaks don't expire — you can respond hours or days
+          later and the run resumes exactly where it paused.
+        </div>
       </section>
 
       <!-- Pipeline -->
       <section id="guide-pipeline" class="guide-section">
-        <h2>The pipeline</h2>
+        <h2>How a run works</h2>
         <p>
-          The pipeline runs in a fixed order. Each step builds on everything
-          that came before it:
+          Every run walks the same <strong>sixteen steps</strong> in a fixed
+          order — twelve automated steps, three human breaks, and one
+          pre-processing step. They fall into four phases:
         </p>
-        <ol class="guide-pipeline-list">
-          <li><strong>Concept Mapper</strong> <span class="muted">(system)</span> — expands your problem into themes</li>
-          <li><strong>Break 0</strong> <span class="muted">(human)</span> — confirm or adjust the theme selection</li>
-          <li><strong>Grounder</strong> — excavates intellectual origins</li>
-          <li><strong>Social</strong> — discovers contemporary literature</li>
-          <li><strong>Historian</strong> — builds a chronological map</li>
-          <li><strong>Gaper</strong> — maps research gaps</li>
-          <li><strong>Break 1</strong> <span class="muted">(human)</span> — validate ground truth</li>
-          <li><strong>Vision</strong> — extracts implications</li>
-          <li><strong>Theorist</strong> — proposes approaches</li>
-          <li><strong>Rude</strong> — evaluates feasibility</li>
-          <li><strong>Synthesizer</strong> — integrates everything into a narrative</li>
-          <li><strong>Break 2</strong> <span class="muted">(human)</span> — evaluate the trajectory</li>
-          <li><strong>Thinker</strong> — opens new directions</li>
-          <li><strong>Scribe</strong> — formats outputs into artifacts</li>
-        </ol>
+
+        <div class="guide-phase">
+          <h3>Phase 1 — Scope <span class="muted small">(steps 1–2)</span></h3>
+          <ol class="guide-phase-steps" start="1">
+            <li><span class="guide-kind guide-kind-system">system</span> <strong>Concept Mapper</strong> — expands your problem into searchable themes</li>
+            <li><span class="guide-kind guide-kind-break">you</span> <strong>Break 0</strong> — confirm or adjust the theme selection</li>
+          </ol>
+        </div>
+
+        <div class="guide-phase">
+          <h3>Phase 2 — Gather <span class="muted small">(steps 3–8)</span></h3>
+          <ol class="guide-phase-steps" start="3">
+            <li><span class="guide-kind guide-kind-agent">agent</span> <strong>Grounder</strong> — excavates the intellectual origins</li>
+            <li><span class="guide-kind guide-kind-agent">agent</span> <strong>Social</strong> — discovers contemporary literature</li>
+            <li><span class="guide-kind guide-kind-agent">agent</span> <strong>Historian</strong> — builds the chronological map</li>
+            <li><span class="guide-kind guide-kind-agent">agent</span> <strong>Gaper</strong> — maps the research gaps</li>
+            <li><span class="guide-kind guide-kind-agent">agent</span> <strong>Librarian</strong> — checks your library catalog for each source</li>
+            <li><span class="guide-kind guide-kind-break">you</span> <strong>Break 1</strong> — validate the ground truth</li>
+          </ol>
+        </div>
+
+        <div class="guide-phase">
+          <h3>Phase 3 — Reason <span class="muted small">(steps 9–13)</span></h3>
+          <ol class="guide-phase-steps" start="9">
+            <li><span class="guide-kind guide-kind-agent">agent</span> <strong>Vision</strong> — extracts implications and consequences</li>
+            <li><span class="guide-kind guide-kind-agent">agent</span> <strong>Theorist</strong> — proposes concrete approaches</li>
+            <li><span class="guide-kind guide-kind-agent">agent</span> <strong>Rude</strong> — evaluates their feasibility on the evidence</li>
+            <li><span class="guide-kind guide-kind-agent">agent</span> <strong>Synthesizer</strong> — integrates everything into a narrative</li>
+            <li><span class="guide-kind guide-kind-break">you</span> <strong>Break 2</strong> — evaluate the trajectory, request outputs</li>
+          </ol>
+        </div>
+
+        <div class="guide-phase">
+          <h3>Phase 4 — Deliver <span class="muted small">(steps 14–16)</span></h3>
+          <ol class="guide-phase-steps" start="14">
+            <li><span class="guide-kind guide-kind-agent">agent</span> <strong>Thinker</strong> — opens new research directions</li>
+            <li><span class="guide-kind guide-kind-agent">agent</span> <strong>Scribe</strong> — writes the Understanding Map and requested outputs</li>
+            <li><span class="guide-kind guide-kind-agent">agent</span> <strong>Reporter</strong> — assembles the combined HTML report</li>
+          </ol>
+        </div>
+
         <p>
-          The pipeline is divided into two halves by Break 1. Before the
-          break, agents <em>gather and map</em> what is known. After the
-          break, agents <em>reason about</em> what it means and where to go.
-          This separation ensures that inferential agents (Vision, Theorist,
-          Rude, Synthesizer) build on validated ground truth rather than
-          unverified assumptions.
+          Break 1 divides the pipeline in half. Before it, agents
+          <em>gather and map</em> what is known; after it, agents
+          <em>reason about</em> what it means. That's why Break 1 matters
+          most: everything downstream builds on what you validate there.
+        </p>
+        <p>
+          If Social fails (a source outage, say), the run continues with
+          what Grounder found — it is the one deliberately non-fatal step.
+          Any other failed step stops the run and offers a retry.
         </p>
       </section>
 
-      <!-- Agents -->
-      <section id="guide-agents" class="guide-section">
-        <h2>Agents</h2>
+      <!-- Starting a run -->
+      <section id="guide-newrun" class="guide-section">
+        <h2>Starting a run</h2>
+        <h3>The research problem</h3>
         <p>
-          Each agent has a distinct analytical role. They are not general
-          assistants — they are specialists that see specific inputs and
-          produce specific outputs.
+          The only required field. State a problem, not a keyword —
+          <em>"How does identity influence intelligence through the lens of
+          identity theory?"</em> is a problem; <em>"identity
+          intelligence"</em> is a keyword. The pipeline maps territory
+          around problems; keywords produce shallow results.
         </p>
 
-        <h3>Concept Mapper</h3>
-        <p class="muted small">System step — runs before Break 0</p>
+        <h3>Provider and models</h3>
         <p>
-          Translates your raw research problem into its full conceptual
-          territory. Uses three layers: ConceptNet for semantic expansion,
-          a curated disciplinary translation map, and an LLM pass to catch
-          what the static map missed. The output is a list of themes that
-          Social will use to find relevant literature. You confirm or adjust
-          this list at Break 0.
+          Choose which provider the run bills against and which models fill
+          the two roles: <strong>primary</strong> (heavy reasoning agents)
+          and <strong>light</strong> (Social and Scribe). Your choices are
+          saved against the provider and pre-filled next time.
         </p>
 
-        <h3>Grounder</h3>
-        <p class="muted small">Agent — runs after Break 0</p>
+        <h3>Model routing <span class="muted small">(optional)</span></h3>
         <p>
-          Excavates the intellectual origins of your problem. Decomposes the
-          problem into sub-questions, generates search queries, and queries
-          academic databases (OpenAlex, Semantic Scholar, Consensus, Google
-          Books, Open Library) plus web search. Produces seminal works with
-          intellectual genealogy, fundamental motivations, and original
-          definitions. Creates the argument tree root — the structural
-          backbone that all subsequent agents extend.
+          Override the model, max tokens (256–32768), and temperature
+          (0.0–2.0) per agent. Lower temperature (0.3–0.5) suits factual
+          extraction (Grounder, Historian); higher (0.8–1.2) suits
+          generative reasoning (Theorist, Synthesizer). All of this can also
+          be changed mid-run at any break.
         </p>
 
-        <h3>Social</h3>
-        <p class="muted small">Agent — runs after Grounder</p>
+        <h3>Sources <span class="muted small">(optional)</span></h3>
         <p>
-          Discovers contemporary literature across academic sources (OpenAlex,
-          arXiv, PubMed, Semantic Scholar, CrossRef, JSTOR, PhilPapers, SSRN,
-          CORE, BASE, HAL). Uses the themes from Concept Mapper to search
-          broadly across disciplines. Saves sources as "current" and extends
-          the argument tree with current evidence nodes. Non-fatal if it
-          fails — the pipeline continues with what Grounder found.
+          Pick which academic databases the run queries — OpenAlex, arXiv,
+          PubMed, Semantic Scholar, CORE, PhilPapers, and more. Sources that
+          need an API key you haven't provided are skipped at run time. The
+          <em>results per source</em> limit (default 8) directly drives run
+          cost and duration.
         </p>
 
-        <h3>Historian</h3>
-        <p class="muted small">Agent — runs after Social</p>
-        <p>
-          Builds a chronological map from Grounder's seminal works. Tracks
-          phases, turning points, dead ends, key actors, and how methods
-          evolved over time. Audits the argument tree for claim solidity
-          (well-supported, contested, weak, unsupported) and adds audit
-          notes. Produces historical works with phase tags and extends the
-          tree with historical and external factor nodes.
-        </p>
+        <h3>Templates, comparison, and exclusions <span class="muted small">(optional)</span></h3>
+        <ul>
+          <li><strong>Templates</strong> — the bar at the top of the form saves and restores a tuned set of model and source choices, so a configuration you like is one click away next run.</li>
+          <li><strong>Compare to previous run</strong> — pick an earlier run on the same topic and sources already seen there are flagged as "previously seen" in the Understanding Map, so you can focus on what's new.</li>
+          <li><strong>Excluded sources</strong> — block specific works by DOI, URL, or title substring (retracted papers, predatory journals). Exclusions persist across all your future runs.</li>
+        </ul>
 
-        <h3>Gaper</h3>
-        <p class="muted small">Agent — runs after Historian</p>
-        <p>
-          Maps research gaps using a three-step process. First, it finds
-          <em>structural gaps</em> from the argument tree (unanswered
-          questions, unsupported claims, weak claims) — these are proven
-          gaps the tree structure proves exist. Second, it finds
-          <em>analytical gaps</em> via LLM scan (disciplinary silences,
-          methodological blind spots, assumption gaps, dead-end revisit
-          opportunities). Third, it merges both into a single gap map with
-          significance ratings and references to all three source layers.
-        </p>
+        <div class="guide-callout">
+          <strong>Before you commit:</strong> an estimate card appears above
+          the Start button showing the expected scale of the run — treat it
+          as a rough guide, not a quote.
+        </div>
+      </section>
 
-        <h3>Vision</h3>
-        <p class="muted small">Agent — runs after Break 1</p>
+      <!-- Following a run -->
+      <section id="guide-following" class="guide-section">
+        <h2>Following a run</h2>
         <p>
-          Extracts logical consequences and implications from the accumulated
-          knowledge. The first inferential agent — it doesn't gather
-          information, it reasons about what the information means. Produces
-          direct implications, logical chains, second-order consequences,
-          hidden assumptions, gap demands (what must be true for a gap to
-          matter), and logical contradictions. Rates each implication by
-          strength: Strong, Moderate, or Speculative.
+          The run list shows every run with its status. Use the search box
+          and status chips (Running, Awaiting break, Complete, Failed,
+          Stopped) to find
+          a run; the list updates live. Opening a run shows four tabs, plus
+          a Break tab whenever the pipeline is waiting on you:
         </p>
+        <ul>
+          <li>
+            <strong>Overview</strong> — the live step list. The card at the
+            top shows what's happening right now: the running agent, its
+            elapsed time and current activity, an ETA once enough steps have
+            finished, and per-source progress while Grounder and Social are
+            querying databases.
+          </li>
+          <li>
+            <strong>Sources</strong> — every work the agents have gathered,
+            with links out to the original. If a database is misbehaving
+            mid-run (rate limits, errors), skip it here — future calls stop,
+            in-flight ones finish.
+          </li>
+          <li>
+            <strong>Tree</strong> — the argument tree: every question,
+            claim, evidence node, and gap the agents added, as a collapsible
+            hierarchy. Use the filter bar to search the tree's text or
+            narrow it by node type or status; matches are highlighted and
+            their ancestors kept for context.
+          </li>
+          <li>
+            <strong>Artifacts</strong> — the finished documents (see
+            <a href="#guide-results">Your results</a>).
+          </li>
+        </ul>
 
-        <h3>Theorist</h3>
-        <p class="muted small">Agent — runs after Vision</p>
-        <p>
-          Proposes concrete approaches, frameworks, and solutions anchored in
-          the pipeline outputs. Uses a two-pass design: pass 1 produces an
-          overview and index, pass 2 expands each proposal with full detail.
-          Produces 4–8 proposals with types (novel, extension, revival,
-          hybrid), promise ratings, assumptions, requirements, and
-          predictions. Each proposal is grounded in the foundations, timeline,
-          gaps, and implications from earlier agents.
-        </p>
-
-        <h3>Rude</h3>
-        <p class="muted small">Agent — runs after Theorist</p>
-        <p>
-          Evaluates Theorist's proposals strictly on empirical evidence.
-          Cross-references each proposal against historical dead ends and
-          current intelligence to check whether it's actually feasible.
-          Produces feasibility verdicts: feasible, partially feasible,
-          unfeasible, or insufficient evidence. For each verdict, it
-          identifies the weakest empirical links and what evidence would be
-          needed to change the verdict. This is the agent that keeps the
-          Theorist honest.
-        </p>
-
-        <h3>Synthesizer</h3>
-        <p class="muted small">Agent — runs after Rude</p>
-        <p>
-          Integrates all pipeline outputs into a single coherent research
-          narrative. Not a summary — an organizing intelligence that builds
-          an argument. Produces a sharpened problem statement, a knowledge
-          landscape (what's known, what's contested, what's unknown), a gap
-          landscape summary, viable proposals ranked by feasibility, and a
-          trajectory statement. Flags tensions, contradictions, and any
-          Break 1 overrides you applied.
-        </p>
-
-        <h3>Thinker</h3>
-        <p class="muted small">Agent — runs after Break 2</p>
-        <p>
-          Opens new directions from the synthesis. The first agent explicitly
-          allowed to look beyond the current frame — but from a position of
-          deep knowledge, not ignorance. Identifies new research directions,
-          alternative framings, adjacent fields, second-generation questions,
-          underexplored combinations, and challenges to unchallenged
-          assumptions. Rates each direction by distance: Near (buildable
-          now), Mid (needs development), or Far (speculative but generative).
-        </p>
-
-        <h3>Scribe</h3>
-        <p class="muted small">Agent — runs last</p>
-        <p>
-          Formats pipeline outputs into audience-ready artifacts. The
-          Understanding Map is a mandatory output for every run — it
-          includes coverage metrics, intellectual genealogy, a tiered
-          reading curriculum, a conceptual map, an unresolved core question,
-          and self-assessment questions with citation keys validated against
-          retrieved sources. Scribe can also produce blog posts, research
-          briefs, internal memos, paper sections, literature reviews, and
-          grant backgrounds in .md or .tex format, requested at Break 2.
-        </p>
+        <h3>Stopping, failures, and retries</h3>
+        <ul>
+          <li>
+            <strong>Stop and change model</strong> — available while an
+            agent runs. The in-flight step is discarded so it can restart
+            cleanly; the usual reason to stop is switching a struggling
+            model, and the stopped screen lets you do exactly that before
+            resuming.
+          </li>
+          <li>
+            <strong>Failed step</strong> — the run halts and shows the
+            error with a <em>Retry this step</em> button. If the failure
+            came from the LLM (rate limit, context overflow), change the
+            agent's model first, then retry. No completed work is lost.
+          </li>
+        </ul>
       </section>
 
       <!-- Breaks -->
       <section id="guide-breaks" class="guide-section">
-        <h2>Breaks</h2>
+        <h2>Breaks — where you steer</h2>
         <p>
-          Breaks are hard stops where the pipeline parks and waits for your
-          input. At each break, the system generates a structured review
-          document summarizing what the agents have found so far. You review
-          it and provide instructions using specific directives. The run
-          resumes automatically after you submit your response.
+          A break is a hard stop: the pipeline parks and nothing runs until
+          you respond. Each break presents a structured review document
+          summarizing what the agents found, and a response box. You steer
+          with one-per-line directives — every ID a directive needs
+          (<code>theme_id</code>, <code>gap_id</code>, <code>source_id</code>,
+          <code>evaluation_id</code>) is printed in the review document next
+          to the item it names. Anything you write that isn't a directive is
+          passed to the downstream agents as free-form guidance.
         </p>
         <p>
-          At any break you can also:
+          At any break you can also switch any agent's model for the rest of
+          the run, and enable or disable sources — both from panels below
+          the response box.
         </p>
-        <ul>
-          <li><strong>Change models</strong> — switch any agent to a different LLM for the rest of the run</li>
-          <li><strong>Skip sources</strong> — disable a problematic source (e.g. one that's rate-limiting you)</li>
-          <li><strong>Add free-form directives</strong> — natural language instructions appended to the next agent's context</li>
-        </ul>
 
-        <h3>Break 0 — Theme Confirmation</h3>
-        <p class="muted small">After Concept Mapper, before Grounder</p>
+        <h3>Break 0 — Theme confirmation</h3>
+        <p class="muted small">After Concept Mapper · before Grounder</p>
         <p>
-          The Concept Mapper has expanded your problem into themes. Review
-          the selection — are these the right themes to search? You can:
+          The Concept Mapper has expanded your problem into themes and
+          selected the ones it will search. Catching a conceptual mismatch
+          here is far cheaper than correcting it downstream.
         </p>
         <ul>
           <li><code>CONFIRMED</code> — accept the selection as-is</li>
-          <li><code>ADD THEME: &lt;theme_id&gt;</code> — include a theme that was excluded</li>
-          <li><code>REMOVE THEME: &lt;theme_id&gt;</code> — drop a theme that was selected</li>
+          <li><code>ADD THEME: &lt;theme_id&gt;</code> — include an excluded theme</li>
+          <li><code>REMOVE THEME: &lt;theme_id&gt;</code> — drop a selected theme</li>
         </ul>
-        <p>
-          This is your chance to catch conceptual mismatches early. If the
-          themes don't match your understanding of the problem, adjust them
-          here — it's much cheaper than correcting downstream.
-        </p>
+        <div class="guide-example">
+          <div class="guide-example-label">Example response — steering the theme selection</div>
+          <pre>ADD THEME: social_identity_theory
+REMOVE THEME: artificial_intelligence
+Focus on human cognition — "intelligence" here means cognitive ability, not AI.</pre>
+        </div>
 
-        <h3>Break 1 — Ground Truth Validation</h3>
-        <p class="muted small">After Librarian, before Vision</p>
+        <h3>Break 1 — Ground truth validation</h3>
+        <p class="muted small">After Librarian · before Vision</p>
         <p>
-          The gathering phase is complete. Grounder, Social, Historian, and
-          Gaper have mapped the territory. The Librarian has searched your
-          institution's library catalog (Primo) for each source and attached
-          catalog records and availability status. Review their findings —
-          are the gaps real? Are the seminal works correct? Each seminal and
-          historical work includes full references with DOI/URL backlinks,
-          abstract excerpts, and library catalog availability so you can
-          read the original and validate the claims. You can:
+          The gathering phase is done: seminal works, contemporary
+          literature, the historical map, and the gap analysis are all in,
+          and the Librarian has attached library catalog records and
+          availability where it found them. <strong>This is the most
+          important break.</strong> Every reasoning agent after it builds on
+          what you validate here — read the gaps and seminal works
+          carefully, follow the DOI/URL backlinks, and correct anything
+          wrong.
         </p>
         <ul>
           <li><code>CONFIRMED</code> — everything is correct</li>
           <li><code>CORRECT GAP &lt;gap_id&gt;: &lt;text&gt;</code> — revise a gap's description</li>
-          <li><code>REMOVE GAP &lt;gap_id&gt;</code> — drop a gap that isn't actually a gap</li>
+          <li><code>REMOVE GAP &lt;gap_id&gt;</code> — drop a gap that isn't one</li>
           <li><code>ADD GAP: &lt;description&gt;</code> — add a gap the agents missed</li>
-          <li><code>OVERRIDE SEMINAL &lt;source_id&gt;: &lt;note&gt;</code> — correct a seminal assessment</li>
+          <li><code>OVERRIDE SEMINAL &lt;source_id&gt;: &lt;note&gt;</code> — correct a seminal-work assessment</li>
         </ul>
-        <p>
-          This is the most important break. Everything after it — Vision,
-          Theorist, Rude, Synthesizer — reasons on top of what you validate
-          here. If the ground truth is wrong, the reasoning will be wrong
-          too. Take the time to get this right.
-        </p>
+        <div class="guide-example">
+          <div class="guide-example-label">Example response — correcting the ground truth</div>
+          <pre>CORRECT GAP gap_3: The missing piece is cross-cultural replication, not longitudinal design.
+REMOVE GAP gap_7
+OVERRIDE SEMINAL src_12: This is a later survey, not the origin — the 1979 Tajfel &amp; Turner chapter is.
+ADD GAP: No work connects identity threat to test performance outside laboratory settings.</pre>
+        </div>
 
-        <h3>Break 2 — Trajectory Evaluation</h3>
-        <p class="muted small">After Synthesizer, before Thinker</p>
+        <h3>Break 2 — Trajectory evaluation</h3>
+        <p class="muted small">After Synthesizer · before Thinker</p>
         <p>
           The Synthesizer has produced a research narrative with proposals
-          ranked by feasibility. Review the trajectory — do you agree with
-          the verdicts? Do you want specific outputs formatted? You can:
+          ranked by feasibility. Review the verdicts, and — importantly —
+          request any formatted outputs you want, because this is the only
+          point where Scribe takes orders.
         </p>
         <ul>
           <li><code>CONFIRMED</code> — accept the trajectory</li>
@@ -720,53 +748,230 @@
           <li><code>SCRIBE OUTPUT: &lt;type&gt; | audience: &lt;audience&gt;</code> — request a formatted artifact</li>
         </ul>
         <p>
-          Available output types: <code>blog_post</code>,
-          <code>research_brief</code>, <code>internal_memo</code>,
-          <code>paper_section</code>, <code>literature_review</code>,
-          <code>grant_background</code>. The audience parameter tailors the
-          tone and depth (e.g. "specialists in cognitive science",
-          "program officers at NSF", "a general academic audience").
+          Output types: <code>blog_post</code>, <code>research_brief</code>,
+          <code>internal_memo</code> (markdown);
+          <code>literature_review</code>, <code>paper_section</code>,
+          <code>grant_background</code> (LaTeX). The audience phrase tailors
+          tone and depth. If you request nothing, you still get a research
+          brief alongside the Understanding Map.
+        </p>
+        <div class="guide-example">
+          <div class="guide-example-label">Example response — accepting and ordering outputs</div>
+          <pre>CONFIRMED
+SCRIBE OUTPUT: literature_review | audience: specialists in social psychology
+SCRIBE OUTPUT: blog_post | audience: a general academic audience</pre>
+        </div>
+      </section>
+
+      <!-- Agent reference -->
+      <section id="guide-agents" class="guide-section">
+        <h2>Agent reference</h2>
+        <p>
+          Each agent is a specialist with a fixed role — it sees specific
+          inputs and produces specific outputs that feed the next step.
+        </p>
+
+        <h3>Concept Mapper <span class="muted small">· system step</span></h3>
+        <p>
+          Translates your problem into its full conceptual territory using
+          three layers: ConceptNet semantic expansion, a curated
+          disciplinary translation map, and an LLM pass to catch what the
+          static layers missed. Its themes drive Social's cross-disciplinary
+          search; you vet them at Break 0.
+        </p>
+
+        <h3>Grounder</h3>
+        <p>
+          Excavates the intellectual origins of your problem. Decomposes it
+          into sub-questions, queries academic databases and web search, and
+          produces seminal works with genealogy, motivations, and original
+          definitions. Creates the argument tree root that every later agent
+          extends.
+        </p>
+
+        <h3>Social</h3>
+        <p>
+          Discovers contemporary literature across the academic sources you
+          enabled, searching broadly along the Break-0 themes. Saves
+          "current" sources and adds current-evidence nodes to the tree.
+          Non-fatal: if it fails, the run continues on Grounder's findings.
+        </p>
+
+        <h3>Historian</h3>
+        <p>
+          Builds a chronological map from the seminal works — phases,
+          turning points, dead ends, key actors, and how methods evolved.
+          Audits the argument tree for claim solidity (well-supported,
+          contested, weak, unsupported).
+        </p>
+
+        <h3>Gaper</h3>
+        <p>
+          Maps research gaps in three passes: <em>structural</em> gaps the
+          argument tree proves exist (unanswered questions, unsupported
+          claims), <em>analytical</em> gaps from an LLM scan (disciplinary
+          silences, methodological blind spots, assumptions, dead ends worth
+          revisiting), then a merged gap map with significance ratings. You
+          vet this map at Break 1.
+        </p>
+
+        <h3>Librarian</h3>
+        <p>
+          Searches your institution's library catalog (Ex&nbsp;Libris Primo)
+          for every gathered source and attaches catalog links,
+          availability, and ISBN/ISSN — so at Break 1 you can see which
+          works you can actually get your hands on. Deterministic, no LLM
+          calls. If Primo isn't configured (Settings&nbsp;→&nbsp;MCP
+          connections), the step passes gracefully and the run continues
+          without catalog data.
+        </p>
+
+        <h3>Vision</h3>
+        <p>
+          The first inferential agent — it reasons about what the gathered
+          knowledge <em>means</em>. Produces implications, logical chains,
+          second-order consequences, hidden assumptions, and contradictions,
+          each rated Strong, Moderate, or Speculative.
+        </p>
+
+        <h3>Theorist</h3>
+        <p>
+          Proposes 4–8 concrete approaches anchored in the foundations,
+          timeline, gaps, and implications — typed (novel, extension,
+          revival, hybrid) with promise ratings, assumptions, requirements,
+          and predictions.
+        </p>
+
+        <h3>Rude</h3>
+        <p>
+          Stress-tests the Theorist's proposals strictly on empirical
+          evidence, cross-referencing historical dead ends. Verdicts:
+          feasible, partially feasible, unfeasible, or insufficient
+          evidence — each naming the weakest empirical link and what
+          evidence would change the verdict. You can override any verdict
+          at Break 2.
+        </p>
+
+        <h3>Synthesizer</h3>
+        <p>
+          Integrates everything into one research narrative: a sharpened
+          problem statement, the knowledge landscape (known / contested /
+          unknown), the gap landscape, proposals ranked by feasibility, and
+          a trajectory statement. Flags tensions and any Break-1 overrides
+          you applied.
+        </p>
+
+        <h3>Thinker</h3>
+        <p>
+          Opens new directions from the synthesis — the first agent allowed
+          to look beyond the current frame, from a position of knowledge
+          rather than ignorance. Each direction is rated by distance: Near
+          (buildable now), Mid (needs development), Far (speculative but
+          generative).
+        </p>
+
+        <h3>Scribe</h3>
+        <p>
+          Writes the deliverables. The Understanding Map is produced on
+          every run; each <code>SCRIBE OUTPUT</code> you requested at
+          Break 2 becomes an additional artifact in markdown or LaTeX, with
+          citations validated against the retrieved sources.
+        </p>
+
+        <h3>Reporter</h3>
+        <p>
+          The final step. Assembles everything into a single self-contained
+          HTML report: cover page, table of contents, charts of source
+          coverage, gap significance, proposal verdicts and publication
+          timeline, an executive summary, and every Scribe artifact as its
+          own section. Print-styled, so saving it to PDF from your browser
+          gives you the whole run as one document.
         </p>
       </section>
 
-      <!-- Artifacts -->
-      <section id="guide-artifacts" class="guide-section">
-        <h2>Artifacts</h2>
+      <!-- Results -->
+      <section id="guide-results" class="guide-section">
+        <h2>Your results</h2>
+        <p>A completed run leaves you three kinds of output:</p>
+        <ul>
+          <li>
+            <strong>The Artifacts tab</strong> — the
+            <em>Understanding Map</em> (every run): coverage metrics,
+            intellectual genealogy, a tiered reading curriculum, a
+            conceptual map, the unresolved core question, and
+            self-assessment questions with validated citations. Plus any
+            outputs you requested at Break 2, and the
+            <em>combined report</em> — the Reporter's single HTML document
+            covering the whole run, ready to save as PDF.
+          </li>
+          <li>
+            <strong>The Tree tab</strong> — the argument tree, the
+            structural backbone connecting every claim, question, evidence
+            node, and gap. It stays browsable and filterable after the run
+            finishes.
+          </li>
+          <li>
+            <strong>The break reviews</strong> — the structured documents
+            generated at each break (historical map, gap analysis,
+            implications, proposals, feasibility verdicts, the synthesis
+            narrative) remain readable from the run's break panels, so the
+            intermediate analysis is never lost.
+          </li>
+        </ul>
+      </section>
+
+      <!-- Settings -->
+      <section id="guide-settings" class="guide-section">
+        <h2>Settings &amp; customization</h2>
         <p>
-          A completed run produces several artifacts, all accessible from the
-          run's Artifacts tab:
+          Everything under <em>Settings</em> is scoped to your account —
+          your credentials and preferences are private and follow you across
+          browsers.
         </p>
         <ul>
-          <li><strong>Understanding Map</strong> — the core deliverable. Coverage metrics, intellectual genealogy, a tiered reading curriculum, a conceptual map, an unresolved core question, and self-assessment questions. Generated for every run.</li>
-          <li><strong>Historical map</strong> — chronological phases, turning points, and methods evolution from Historian</li>
-          <li><strong>Implications map</strong> — logical consequences and inferential chains from Vision</li>
-          <li><strong>Proposals</strong> — concrete approaches with promise ratings from Theorist</li>
-          <li><strong>Feasibility report</strong> — empirical evaluations of proposals from Rude</li>
-          <li><strong>Research narrative</strong> — integrated synthesis with sharpened problem and trajectory from Synthesizer</li>
-          <li><strong>New directions</strong> — research openings with distance ratings from Thinker</li>
-          <li><strong>Break reviews</strong> — the structured review documents generated at each break</li>
-          <li><strong>Requested outputs</strong> — any blog posts, briefs, paper sections, etc. requested at Break 2</li>
+          <li>
+            <strong>Profile</strong> — your account details.
+          </li>
+          <li>
+            <strong>Providers</strong> — LLM provider credentials and the
+            primary/light model choices runs are pre-filled from. Required
+            before your first run.
+          </li>
+          <li>
+            <strong>Source keys</strong> — API keys for academic databases
+            that need them. Stored encrypted; used in place of the matching
+            server-side <code>.env</code> variable for your runs.
+          </li>
+          <li>
+            <strong>MCP connections</strong> — external tool connections:
+            <em>Consensus</em> (evidence search) and <em>Primo</em> (your
+            library catalog, which powers the Librarian step). Toggle each
+            on or off for your runs.
+          </li>
+          <li>
+            <strong>Preferences</strong> — run defaults (provider, models,
+            sources, template, results per source) so the New Run form
+            pre-fills itself; appearance (theme, density, font scale);
+            display options (runs per page, sort order, default run tab,
+            timestamp format); and notification choices for break-ready,
+            completion, and failure alerts.
+          </li>
         </ul>
-        <p>
-          The argument tree (visible in the Tree tab) is the structural
-          backbone — every claim, question, evidence node, and gap that the
-          agents added throughout the run. It's the connective tissue
-          between all the artifacts.
-        </p>
       </section>
 
       <!-- Tips -->
       <section id="guide-tips" class="guide-section">
-        <h2>Tips for best results</h2>
+        <h2>Tips &amp; troubleshooting</h2>
         <ul>
-          <li><strong>State a problem, not a keyword.</strong> "How does identity influence intelligence through the lens of identity theory?" is a problem. "identity intelligence" is a keyword. The pipeline maps territory around problems; keywords produce shallow results.</li>
-          <li><strong>Take Break 1 seriously.</strong> It's the single most influential point in the pipeline. If you skip it with a quick CONFIRMED, downstream agents reason on unvalidated ground truth. Read the gap analysis and seminal works carefully.</li>
-          <li><strong>Use the model routing wisely.</strong> Factual agents (Grounder, Historian) benefit from lower temperature (0.3–0.5) for precise extraction. Creative agents (Theorist, Synthesizer) benefit from higher temperature (0.8–1.2) for generative reasoning. The defaults are sensible but not optimal for every domain.</li>
-          <li><strong>Add API keys for sources.</strong> Sources without keys are silently skipped. If your field relies on Scopus, CORE, or Semantic Scholar, add keys in the Source API keys section or your <code>.env</code> file to get full coverage.</li>
-          <li><strong>Use the compare-to-previous-run feature.</strong> If you've run on the same topic before, selecting the previous run flags already-seen sources so you can focus on what's new.</li>
-          <li><strong>Request outputs at Break 2.</strong> The Understanding Map is always produced, but if you need a formatted artifact (blog post, paper section, literature review), you must request it at Break 2 using the <code>SCRIBE OUTPUT</code> directive.</li>
-          <li><strong>Skip sources that are failing.</strong> If a source is rate-limiting or returning errors, use the skip button on the Sources tab to disable it mid-run. This won't interrupt in-flight calls but prevents future ones.</li>
-          <li><strong>Let the pipeline run fully.</strong> Each agent builds on the previous ones. If you cancel mid-run, you get partial results — useful for debugging, but not for research. Let it complete to get the full picture.</li>
+          <li><strong>Take Break 1 seriously.</strong> It is the single most influential point in the pipeline. A reflexive <code>CONFIRMED</code> means every downstream agent reasons on unvalidated ground truth.</li>
+          <li><strong>Tune temperature per agent.</strong> Factual agents (Grounder, Historian) do better at 0.3–0.5; generative agents (Theorist, Synthesizer) at 0.8–1.2. The defaults are sensible but not optimal for every domain.</li>
+          <li><strong>Add source keys for your field.</strong> If your literature lives in Scopus, CORE, or Semantic Scholar, add keys under Settings → Source keys — sources without required keys are skipped silently.</li>
+          <li><strong>Re-running a topic? Use compare.</strong> Selecting a previous run flags already-seen sources so the Understanding Map shows you what's new.</li>
+          <li><strong>A source is failing mid-run?</strong> Skip it from the Sources tab — future calls stop immediately — or disable it for the rest of the run at the next break.</li>
+          <li><strong>An agent step failed?</strong> Open Overview: the error is shown with a <em>Retry this step</em> button. For LLM errors (rate limits, context overflow), switch that agent's model first, then retry.</li>
+          <li><strong>Wrong model mid-run?</strong> Use <em>Stop and change model</em> on the Overview tab. The in-flight step is discarded and re-run cleanly with the new routing.</li>
+          <li><strong>Save what works.</strong> When a model/source configuration serves you well, save it as a template from the New Run form and reuse it in one click.</li>
+          <li><strong>Let runs finish.</strong> Each agent builds on the previous ones; a cancelled run yields partial results that are useful for debugging, not research.</li>
         </ul>
       </section>
     </div>
@@ -790,6 +995,6 @@
 <!-- Bump ?v= on BOTH assets whenever app.js or style.css changes. index.html is
      always refetched; these are cached against the query string, so a stale
      number strands returning users on old code. -->
-<script src="/static/app.js?v=19"></script>
+<script src="/static/app.js?v=20"></script>
 </body>
 </html>

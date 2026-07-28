@@ -1653,7 +1653,7 @@ function renderLiveCard(status) {
     card.append(el('div', { class: 'live-card is-done' },
       el('div', { class: 'live-head' }, el('h2', { text: 'Pipeline complete' })),
       el('p', { class: 'live-activity',
-                text: 'All 15 steps finished. Your outputs are under Artifacts.' }),
+                text: `All ${status.progress.total} steps finished. Your outputs are under Artifacts.` }),
     ));
     return;
   }
