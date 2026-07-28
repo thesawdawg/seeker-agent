@@ -2950,43 +2950,97 @@ async function renderTree() {
     return;
   }
 
-  // Stats summary
-  const statRow = el('div', { class: 'tree-stats' });
-  const byType = stats.by_type || {};
-  for (const t of ['question', 'claim', 'evidence', 'counter', 'bridge', 'historical', 'external', 'audit_note']) {
-    if (byType[t]) {
-      statRow.append(el('span', { class: 'tree-stat-chip',
-        text: `${byType[t]} ${TREE_TYPE_LABEL[t] || t}` }));
-    }
-  }
-  if (stats.unique_sources) {
-    statRow.append(el('span', { class: 'tree-stat-chip',
-      text: `${stats.unique_sources} sources` }));
-  }
-  const claimStatuses = stats.claim_statuses || {};
-  for (const [s, n] of Object.entries(claimStatuses)) {
-    if (TREE_STATUS_BADGE[s]) {
-      statRow.append(el('span', { class: 'tree-stat-chip tree-stat-status',
-        text: `${n} ${TREE_STATUS_BADGE[s]}` }));
-    }
-  }
-
   panel.append(el('div', { class: 'review-group' },
     el('h3', {}, 'Argument Tree'),
     el('p', { class: 'muted small' },
       'Every claim traces to evidence. Click a node to inspect its source and metadata. ' +
-      'Nodes are color-coded by type; claims carry an audit status badge. ' +
-      'Content wraps fully — no truncation. Use Expand all to see every branch.'),
-    statRow,
+      'Search or filter by type below; matches are highlighted and their ' +
+      'ancestors kept for context. Content wraps fully — no truncation.'),
   ));
 
-  // Legend
-  const legend = el('div', { class: 'tree-legend' });
-  for (const [t, cls] of Object.entries(TREE_NODE_COLORS)) {
-    legend.append(el('span', { class: `tree-legend-item ${cls}`,
-      text: TREE_TYPE_LABEL[t] || t }));
+  /*
+   * Filter bar.
+   *
+   * This replaces two separate rows that both looked interactive and were not:
+   * a stats row ("8 Question", "28 ⚠ weak") and a colour legend ("Root",
+   * "Question", …). Users read them as filter chips and clicked to no effect.
+   * They are now one row of real toggles that carry the same counts and the
+   * same colour coding, so the legend is implicit in the control.
+   */
+  const treeFilter = { query: '', types: new Set(), statuses: new Set() };
+  const byType = stats.by_type || {};
+  const claimStatuses = stats.claim_statuses || {};
+
+  const search = el('input', {
+    type: 'search', id: 'tree-search', class: 'tree-search',
+    placeholder: 'Search node text…', autocomplete: 'off',
+  });
+  let searchDebounce;
+  search.addEventListener('input', () => {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => {
+      treeFilter.query = search.value.trim().toLowerCase();
+      applyTreeFilter();
+    }, 150);
+  });
+
+  const chipRow = el('div', { class: 'tree-filter-chips', role: 'group',
+                              'aria-label': 'Filter tree nodes' });
+
+  const makeChip = (label, count, extraClass, set, key) => {
+    const chip = el('button', {
+      class: `tree-chip ${extraClass}`, type: 'button', 'aria-pressed': 'false',
+    },
+      el('span', { class: 'tree-chip-count', text: String(count) }),
+      el('span', { text: label }),
+    );
+    chip.addEventListener('click', () => {
+      const on = set.has(key);
+      if (on) set.delete(key); else set.add(key);
+      chip.classList.toggle('is-on', !on);
+      chip.setAttribute('aria-pressed', String(!on));
+      applyTreeFilter();
+    });
+    chipRow.append(chip);
+    return chip;
+  };
+
+  for (const t of ['question', 'claim', 'evidence', 'counter', 'bridge',
+                   'historical', 'external', 'audit_note']) {
+    if (byType[t]) {
+      makeChip(TREE_TYPE_LABEL[t] || t, byType[t],
+               TREE_NODE_COLORS[t] || '', treeFilter.types, t);
+    }
   }
-  panel.append(legend);
+  for (const [s, n] of Object.entries(claimStatuses)) {
+    if (TREE_STATUS_BADGE[s]) {
+      makeChip(TREE_STATUS_BADGE[s], n, 'tree-chip-status', treeFilter.statuses, s);
+    }
+  }
+
+  const matchCount = el('span', { class: 'tree-match-count', 'aria-live': 'polite' });
+  const clearBtn = el('button', { class: 'btn btn-small', type: 'button',
+                                  text: 'Clear filters', hidden: true });
+  clearBtn.addEventListener('click', () => {
+    treeFilter.query = '';
+    treeFilter.types.clear();
+    treeFilter.statuses.clear();
+    search.value = '';
+    chipRow.querySelectorAll('.tree-chip').forEach(c => {
+      c.classList.remove('is-on');
+      c.setAttribute('aria-pressed', 'false');
+    });
+    applyTreeFilter();
+  });
+
+  panel.append(el('div', { class: 'tree-filter-bar' },
+    search, chipRow,
+    el('div', { class: 'tree-filter-meta' },
+      stats.unique_sources
+        ? el('span', { class: 'muted small', text: `${stats.unique_sources} sources` })
+        : null,
+      matchCount, clearBtn),
+  ));
 
   // Toolbar: expand/collapse all + breadcrumb container
   const breadcrumbEl = el('div', { class: 'tree-breadcrumb', id: 'tree-breadcrumb' });
@@ -3033,6 +3087,9 @@ async function renderTree() {
 
   // Track currently selected node for visual highlight
   let selectedNodeEl = null;
+
+  // node_id → rendered pieces, so the filter can show/hide without re-rendering.
+  const rendered = new Map();
 
   // Recursive tree renderer
   const renderNode = (node, depth = 0) => {
@@ -3104,6 +3161,7 @@ async function renderTree() {
     );
 
     const wrapper = el('div', { class: 'tree-node-wrapper' }, nodeEl, childContainer);
+    rendered.set(node.node_id, { node, wrapper, nodeEl, childContainer, toggle });
 
     if (hasChildren) {
       for (const child of node.children) {
@@ -3117,6 +3175,73 @@ async function renderTree() {
 
   const treeRoot = renderNode(tree, 0);
   if (treeRoot) panel.append(treeRoot);
+
+  const emptyMsg = el('p', { class: 'empty', hidden: true,
+    text: 'No nodes match those filters.' });
+  panel.append(emptyMsg);
+
+  /*
+   * Show a node when it matches, or when a descendant does — a bare match list
+   * would strip the tree of the structure that gives each claim its meaning.
+   * Matches are marked; ancestors kept only for context are dimmed, and the
+   * path to every match is expanded so hits aren't hidden behind a collapsed
+   * parent.
+   *
+   * Returns whether `node`'s subtree contains a match.
+   */
+  function applyTreeFilter() {
+    const active = Boolean(treeFilter.query || treeFilter.types.size || treeFilter.statuses.size);
+    clearBtn.hidden = !active;
+    let matches = 0;
+
+    const matchesSelf = (node) => {
+      const type = node.node_type || 'unknown';
+      if (treeFilter.types.size && !treeFilter.types.has(type)) return false;
+      if (treeFilter.statuses.size && !treeFilter.statuses.has(node.status)) return false;
+      if (treeFilter.query &&
+          !(node.content || '').toLowerCase().includes(treeFilter.query)) return false;
+      return true;
+    };
+
+    const walk = (node) => {
+      const entry = rendered.get(node.node_id);
+      const self = active ? matchesSelf(node) : false;
+      let descendant = false;
+      for (const child of (node.children || [])) {
+        if (walk(child)) descendant = true;
+      }
+      if (!entry) return self || descendant;
+
+      if (!active) {
+        entry.wrapper.hidden = false;
+        entry.nodeEl.classList.remove('is-match', 'is-context');
+        return false;
+      }
+
+      const visible = self || descendant;
+      entry.wrapper.hidden = !visible;
+      entry.nodeEl.classList.toggle('is-match', self);
+      entry.nodeEl.classList.toggle('is-context', !self && descendant);
+      if (self) matches++;
+
+      // Open the path down to any match.
+      if (descendant && entry.childContainer) {
+        entry.childContainer.hidden = false;
+        if (entry.toggle && !entry.toggle.classList.contains('tree-toggle-leaf')) {
+          entry.toggle.textContent = '▾';
+        }
+      }
+      return visible;
+    };
+
+    walk(tree);
+
+    matchCount.textContent = active
+      ? `${matches} of ${rendered.size} nodes match` : '';
+    emptyMsg.hidden = !(active && matches === 0);
+  }
+
+  applyTreeFilter();
 }
 
 function showNodeDetail(node, sources, container, root, parentMap, breadcrumbEl) {

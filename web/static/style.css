@@ -91,6 +91,7 @@
   --pill-danger-text:  #9c2d21;   /* 5.69:1 on #f4dbd9 */
   --pill-running-text: #225788;   /* 5.90:1 on #d9e5f1 */
   --on-accent:         #ffffff;
+  --on-accent-dim:     #5b2fd6;   /* 6.30:1 on #efe9ff */
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -99,6 +100,7 @@
     --pill-danger-text:  var(--danger);
     --pill-running-text: var(--running);
     --on-accent:         #1a1030;  /* 6.74:1 on #a98bff */
+    --on-accent-dim:     var(--accent);  /* 5.54:1 on #2a2340 */
   }
 }
 [data-theme="dark"] {
@@ -107,6 +109,7 @@
   --pill-danger-text:  var(--danger);
   --pill-running-text: var(--running);
   --on-accent:         #1a1030;
+  --on-accent-dim:     var(--accent);
 }
 [data-theme="light"] {
   --pill-warn-text:    #8a5200;
@@ -114,6 +117,7 @@
   --pill-danger-text:  #9c2d21;
   --pill-running-text: #225788;
   --on-accent:         #ffffff;
+  --on-accent-dim:     #5b2fd6;
 }
 
 * { box-sizing: border-box; }
@@ -187,7 +191,7 @@ code { font-family: var(--mono); font-size: .88em; }
 }
 .chip:hover { color: var(--text); }
 .chip.is-on {
-  background: var(--accent-dim); color: var(--accent);
+  background: var(--accent-dim); color: var(--on-accent-dim);
   border-color: var(--accent);
 }
 .load-more-wrap { display: flex; justify-content: center; margin-top: 1rem; }
@@ -842,21 +846,67 @@ summary:focus-visible,
 .rail-step.has-warnings { border-left: 2px solid var(--warning, #d97706); }
 
 /* ── Argument tree (F9) ─────────────────────────────────────────────── */
-.tree-stats { display: flex; flex-wrap: wrap; gap: .3rem; margin: .5rem 0; }
-.tree-stat-chip {
-  font-size: .75rem; padding: .15rem .5rem; border-radius: 4px;
-  background: var(--surface); border: 1px solid var(--border);
+/*
+ * Tree filter bar.
+ *
+ * Replaces the old .tree-stats and .tree-legend rows, which showed the same
+ * counts and colours but could not be clicked — users kept trying. The chips
+ * carry both jobs now: each is a real toggle, and its type colour is the
+ * legend.
+ */
+.tree-filter-bar {
+  display: flex; flex-direction: column; gap: .5rem;
+  margin: .6rem 0 .9rem;
 }
-.tree-stat-status { border-color: var(--accent); }
+.tree-search {
+  max-width: 26rem; width: 100%;
+  font: inherit; font-size: .85rem;
+  padding: .35rem .6rem; border-radius: var(--radius);
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border);
+}
+.tree-filter-chips { display: flex; flex-wrap: wrap; gap: .35rem; }
+.tree-chip {
+  display: inline-flex; align-items: center; gap: .35rem;
+  font: inherit; font-size: .75rem; cursor: pointer;
+  padding: .15rem .55rem; border-radius: 999px;
+  background: var(--surface); color: var(--text-dim);
+  border: 1px solid var(--border);
+}
+.tree-chip:hover { color: var(--text); border-color: var(--text-dim); }
+.tree-chip-count {
+  font-family: var(--mono); font-weight: 600; font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+/*
+ * --accent on --accent-dim is only 4.07:1 in light mode. --on-accent-dim is a
+ * deepened accent that clears AA on that wash (6.30:1); dark mode's accent
+ * already passes on its own dim (5.54:1) so it aliases straight through.
+ */
+.tree-chip.is-on {
+  background: var(--accent-dim); color: var(--on-accent-dim);
+  border-color: var(--accent);
+}
+.tree-chip.is-on .tree-chip-count { color: var(--on-accent-dim); }
+.tree-filter-meta {
+  display: flex; align-items: center; gap: .7rem; flex-wrap: wrap;
+  font-size: .78rem; color: var(--text-dim);
+}
+.tree-match-count { font-variant-numeric: tabular-nums; }
 
-.tree-legend {
-  display: flex; flex-wrap: wrap; gap: .4rem; margin: .5rem 0 1rem;
-  font-size: .72rem; color: var(--text-dim);
+/*
+ * A node that matched, vs one kept only to show where a match sits.
+ *
+ * Dimming the context nodes with opacity was the obvious approach and the wrong
+ * one: opacity composites every descendant colour against the page, which took
+ * 52 already-passing elements below AA (the type badges landed at 2.5:1). The
+ * match is marked instead, and context nodes are left alone at full contrast.
+ */
+.tree-node.is-match {
+  box-shadow: inset 3px 0 0 var(--accent);
+  background: var(--accent-dim);
 }
-.tree-legend-item {
-  padding: .1rem .35rem; border-radius: 3px; border: 1px solid var(--border);
-  background: var(--surface);
-}
+.tree-node.is-context { background: transparent; }
 
 /* Tree toolbar — expand/collapse all controls */
 .tree-toolbar {
@@ -913,39 +963,39 @@ summary:focus-visible,
 /* Node type colors */
 .tree-node-root .tree-type-label,
 .tree-type-label.tree-node-root {
-  background: var(--accent); color: var(--bg);
+  background: #6b3ff0; color: #fff;
 }
 .tree-node-question .tree-type-label,
 .tree-type-label.tree-node-question {
-  background: #4a7fb8; color: #fff;
+  background: #3f6d9e; color: #fff;
 }
 .tree-node-claim .tree-type-label,
 .tree-type-label.tree-node-claim {
-  background: #5a8a5a; color: #fff;
+  background: #4a734a; color: #fff;
 }
 .tree-node-evidence .tree-type-label,
 .tree-type-label.tree-node-evidence {
-  background: #8a7a5a; color: #fff;
+  background: #736548; color: #fff;
 }
 .tree-node-counter .tree-type-label,
 .tree-type-label.tree-node-counter {
-  background: #b85a5a; color: #fff;
+  background: #a04c4c; color: #fff;
 }
 .tree-node-bridge .tree-type-label,
 .tree-type-label.tree-node-bridge {
-  background: #7a5ab8; color: #fff;
+  background: #6b4ea3; color: #fff;
 }
 .tree-node-historical .tree-type-label,
 .tree-type-label.tree-node-historical {
-  background: #8a6a4a; color: #fff;
+  background: #785c40; color: #fff;
 }
 .tree-node-external .tree-type-label,
 .tree-type-label.tree-node-external {
-  background: #5a8a8a; color: #fff;
+  background: #4a7373; color: #fff;
 }
 .tree-node-audit .tree-type-label,
 .tree-type-label.tree-node-audit {
-  background: #6a6a6a; color: #fff;
+  background: #5c5c5c; color: #fff;
 }
 
 /* Content — wraps naturally, line-clamped for visual brevity */
@@ -959,12 +1009,25 @@ summary:focus-visible,
   -webkit-line-clamp: unset; overflow: visible;
 }
 
-.tree-status { font-size: .7rem; flex-shrink: 0; padding: 0 .25rem; border-radius: 3px; }
-.tree-status-solid, .tree-status-supported { color: var(--ok); }
-.tree-status-contested, .tree-status-weak { color: var(--warning, #d97706); }
-.tree-status-contradicted { color: var(--danger); }
+/*
+ * Status badges carry their own background so their contrast doesn't depend on
+ * whatever the node behind them is tinted with — a matched node's accent wash
+ * had been dropping "⚠ weak" to 2.69:1.
+ *
+ * These also used the AA-safe text tokens rather than the raw status hues:
+ * --ok and --accent sit near the 4.5:1 line on a white surface. Note the old
+ * `var(--warning, …)` referenced a variable that does not exist in this
+ * stylesheet — the project's token is --warn — so it always used the fallback.
+ */
+.tree-status {
+  font-size: .7rem; flex-shrink: 0; padding: 0 .25rem; border-radius: 3px;
+  background: var(--surface);
+}
+.tree-status-solid, .tree-status-supported { color: var(--pill-ok-text); }
+.tree-status-contested, .tree-status-weak { color: var(--pill-warn-text); }
+.tree-status-contradicted { color: var(--pill-danger-text); }
 .tree-status-unsupported { color: var(--text-dim); }
-.tree-status-bridged { color: var(--accent); }
+.tree-status-bridged { color: var(--on-accent-dim); }
 .tree-confidence { font-size: .7rem; color: var(--text-dim); flex-shrink: 0; }
 .tree-node-children-count {
   font-size: .68rem; color: var(--text-dim); flex-shrink: 0;
