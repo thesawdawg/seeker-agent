@@ -141,10 +141,37 @@
       <h1>Your research runs</h1>
       <button class="btn btn-primary" id="btn-new-run" type="button">New run</button>
     </div>
+    <!-- Setup checklist: shown only until a model provider is connected. -->
+    <div id="setup-card" class="setup-card" hidden></div>
+
+    <div class="run-filters" id="run-filters" hidden>
+      <label class="field-inline">
+        <span class="sr-only">Search runs</span>
+        <input id="run-search" type="search" placeholder="Search runs…"
+               autocomplete="off">
+      </label>
+      <div class="filter-chips" id="run-status-chips" role="group"
+           aria-label="Filter by status"></div>
+      <label class="field-inline">
+        <span class="sr-only">Sort runs</span>
+        <select id="run-sort">
+          <option value="recent">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="problem">By problem A–Z</option>
+        </select>
+      </label>
+    </div>
+
     <div id="runs-list" class="run-list"></div>
     <p class="empty" id="runs-empty" hidden>
       No runs yet. Start one to map the territory around a research problem.
     </p>
+    <p class="empty" id="runs-nomatch" hidden>
+      No runs match those filters.
+    </p>
+    <div class="load-more-wrap">
+      <button class="btn" id="btn-load-more" type="button" hidden>Load more</button>
+    </div>
   </section>
 
   <!-- ── New run ─────────────────────────────────────────────────────── -->
@@ -380,11 +407,14 @@
               role="tab" aria-selected="false" aria-controls="panel-settings-providers">Providers</button>
       <button class="tab" data-settings-tab="sources" type="button"
               role="tab" aria-selected="false" aria-controls="panel-settings-sources">Source keys</button>
+      <button class="tab" data-settings-tab="mcp" type="button"
+              role="tab" aria-selected="false" aria-controls="panel-settings-mcp">MCP connections</button>
     </nav>
 
     <div class="tab-panel" role="tabpanel" id="panel-settings-profile"></div>
     <div class="tab-panel" role="tabpanel" id="panel-settings-providers" hidden></div>
     <div class="tab-panel" role="tabpanel" id="panel-settings-sources" hidden></div>
+    <div class="tab-panel" role="tabpanel" id="panel-settings-mcp" hidden></div>
   </section>
 
   <!-- ── Guide / workflow documentation ──────────────────────────────── -->
@@ -649,14 +679,16 @@
         </p>
 
         <h3>Break 1 — Ground Truth Validation</h3>
-        <p class="muted small">After Gaper, before Vision</p>
+        <p class="muted small">After Librarian, before Vision</p>
         <p>
           The gathering phase is complete. Grounder, Social, Historian, and
-          Gaper have mapped the territory. Review their findings — are the
-          gaps real? Are the seminal works correct? Each seminal and
-          historical work now includes full references with DOI/URL backlinks
-          and abstract excerpts so you can read the original and validate the
-          claims. You can:
+          Gaper have mapped the territory. The Librarian has searched your
+          institution's library catalog (Primo) for each source and attached
+          catalog records and availability status. Review their findings —
+          are the gaps real? Are the seminal works correct? Each seminal and
+          historical work includes full references with DOI/URL backlinks,
+          abstract excerpts, and library catalog availability so you can
+          read the original and validate the claims. You can:
         </p>
         <ul>
           <li><code>CONFIRMED</code> — everything is correct</li>

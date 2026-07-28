@@ -119,6 +119,11 @@ class SourceCredentialRequest(BaseModel):
     api_key: str
 
 
+class McpToggleRequest(BaseModel):
+    conn_id: str = Field(..., description="MCP connection id, e.g. consensus, primo")
+    enabled: bool
+
+
 class ModelRolesRequest(BaseModel):
     models: dict = Field(
         default_factory=dict,
@@ -290,6 +295,27 @@ def delete_source_credentials(source_id: str, user: dict = Depends(auth.resolve_
 
 
 # ---------------------------------------------------------------------------
+# MCP connection toggles — per-user enable/disable for MCP-based sources
+# (Consensus, Primo, etc.). Stored in user_preferences.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/mcp-toggles")
+def get_mcp_toggles(user: dict = Depends(auth.resolve_user)):
+    """List all MCP connections with their current enabled/disabled state."""
+    return {"connections": users.get_mcp_toggles(user["user_id"])}
+
+
+@app.put("/api/mcp-toggles")
+def set_mcp_toggle(body: McpToggleRequest, user: dict = Depends(auth.resolve_user)):
+    """Enable or disable an MCP connection for the current user."""
+    try:
+        result = users.set_mcp_toggle(user["user_id"], body.conn_id, body.enabled)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Admin — user management (F12)
 # Admins can view users and see which providers/sources are configured,
 # but cannot add, edit, or delete credentials for other users. Each user
@@ -409,8 +435,11 @@ def create_run(body: CreateRunRequest, user: dict = Depends(auth.resolve_user)):
     if not cfg or not cfg.configured:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"No credentials stored for provider '{body.provider}'. "
-            f"PUT /api/credentials first.",
+            # User-facing: this is the message a researcher sees if they reach
+            # Start run without a provider, so it names the screen, not the
+            # endpoint.
+            f"No model provider is connected yet. Open Settings → Providers "
+            f"and connect '{body.provider}' before starting a run.",
         )
 
     run_id = pipeline.create_run(body.problem,

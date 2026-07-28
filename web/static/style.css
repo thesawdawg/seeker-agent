@@ -148,6 +148,56 @@ code { font-family: var(--mono); font-size: .88em; }
 .error { color: var(--danger); font-size: .9rem; margin-top: .6rem; }
 .empty { color: var(--text-dim); text-align: center; padding: 3rem 1rem; }
 
+/* Visible to screen readers, clipped for everyone else. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ── Setup checklist (shown until a provider is connected) ───────────── */
+.setup-card {
+  background: var(--surface); border: 1px solid var(--accent);
+  border-radius: var(--radius); padding: 1.2rem 1.4rem; margin-bottom: 1.2rem;
+  max-width: var(--measure);
+}
+.setup-card h2 { margin: 0 0 .3rem; font-size: 1.05rem; }
+.setup-steps { list-style: none; margin: .9rem 0 0; padding: 0; display: grid; gap: .6rem; }
+.setup-steps li {
+  display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+  color: var(--text);
+}
+.setup-steps li.is-done { color: var(--text-dim); }
+.setup-mark { font-weight: 700; color: var(--accent); width: 1rem; text-align: center; }
+.setup-steps li.is-done .setup-mark { color: var(--ok); }
+.setup-steps .btn { margin-left: auto; }
+
+/* ── Run list filters ────────────────────────────────────────────────── */
+.run-filters {
+  display: flex; align-items: center; gap: .7rem; flex-wrap: wrap;
+  margin-bottom: .9rem;
+}
+.field-inline { display: inline-flex; align-items: center; }
+#run-search { min-width: 16rem; }
+.filter-chips { display: flex; gap: .4rem; flex-wrap: wrap; }
+.chip {
+  font: inherit; font-size: .8rem; cursor: pointer;
+  padding: .22rem .7rem; border-radius: 999px;
+  background: var(--surface); color: var(--text-dim);
+  border: 1px solid var(--border);
+}
+.chip:hover { color: var(--text); }
+.chip.is-on {
+  background: var(--accent-dim); color: var(--accent);
+  border-color: var(--accent);
+}
+.load-more-wrap { display: flex; justify-content: center; margin-top: 1rem; }
+
+@media (max-width: 700px) {
+  .run-filters { align-items: stretch; flex-direction: column; }
+  #run-search { min-width: 0; width: 100%; }
+  .setup-steps .btn { margin-left: 0; }
+}
+
 /* ── Top bar ─────────────────────────────────────────────────────────── */
 
 .topbar {
