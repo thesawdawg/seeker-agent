@@ -316,6 +316,37 @@ def set_mcp_toggle(body: McpToggleRequest, user: dict = Depends(auth.resolve_use
 
 
 # ---------------------------------------------------------------------------
+# User settings — run defaults, appearance, display, notifications.
+# Stored per account in the existing user_preferences table; the schema lives
+# in core/user_settings.py so the UI can render itself from it.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/settings")
+def get_user_settings(user: dict = Depends(auth.resolve_user)):
+    """Current settings merged over defaults, plus the schema to render them."""
+    from core import user_settings
+    return {
+        "settings": user_settings.get_settings(user["user_id"]),
+        "groups":   user_settings.schema_for_ui(),
+    }
+
+
+@app.put("/api/settings")
+def put_user_settings(body: dict, user: dict = Depends(auth.resolve_user)):
+    """
+    Partial update: {key: value}. Validated as a whole before anything is
+    written, so one bad value cannot half-apply the request.
+    """
+    from core import user_settings
+    payload = body.get("settings", body)
+    try:
+        updated = user_settings.update_settings(user["user_id"], payload)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    return {"ok": True, "settings": updated}
+
+
+# ---------------------------------------------------------------------------
 # Admin — user management (F12)
 # Admins can view users and see which providers/sources are configured,
 # but cannot add, edit, or delete credentials for other users. Each user

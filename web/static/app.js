@@ -518,6 +518,14 @@ async function afterSignIn() {
     badge.hidden = !state.isAdmin;
   }
 
+  // Account-scoped preferences. Advisory — a failure here must not block
+  // sign-in, so the app falls back to the built-in defaults.
+  try {
+    const prefs = await api('/api/settings');
+    state.settings = prefs.settings;
+    applyPreferences(prefs.settings);
+  } catch { /* defaults are fine */ }
+
   await loadModels();
   await showRuns();
 }
@@ -554,7 +562,7 @@ async function showRuns() {
   buildRunFilterBar();
   renderSetupCard();
 
-  const data = await api(`/api/runs?limit=${RUNS_PAGE_SIZE}&offset=0`);
+  const data = await api(`/api/runs?limit=${runsPageSize()}&offset=0`);
   state.runs = data.runs || [];
   state.runsTotal = data.total;
   renderRunList();
@@ -579,6 +587,19 @@ function runBucket(run) {
 
 const runFilters = { query: '', statuses: new Set(), sort: 'recent' };
 const RUNS_PAGE_SIZE = 25;
+
+/* display.runs_per_page, once preferences have loaded. */
+function runsPageSize() { return state.runsPageSize || RUNS_PAGE_SIZE; }
+
+/* Honours display.show_run_ids and display.timestamp_format. */
+function runCardMeta(run) {
+  const settings = state.settings || {};
+  const showId = settings['display.show_run_ids'] !== false;
+  const when = settings['display.timestamp_format'] === 'absolute'
+    ? new Date(run.created_at).toLocaleString()
+    : shortTime(run.created_at);
+  return showId ? `${run.run_id} · ${when}` : when;
+}
 
 function buildRunFilterBar() {
   const chips = $('#run-status-chips');
@@ -638,7 +659,7 @@ async function loadMoreRuns() {
   btn.disabled = true;
   btn.textContent = 'Loading…';
   try {
-    const data = await api(`/api/runs?limit=${RUNS_PAGE_SIZE}&offset=${(state.runs || []).length}`);
+    const data = await api(`/api/runs?limit=${runsPageSize()}&offset=${(state.runs || []).length}`);
     state.runs = [...(state.runs || []), ...(data.runs || [])];
     state.runsTotal = data.total;
     renderRunList();
@@ -683,8 +704,7 @@ function renderRunList() {
     },
       el('div', {},
         el('div', { class: 'run-card-problem', text: run.problem }),
-        el('div', { class: 'run-card-meta',
-                    text: `${run.run_id} · ${shortTime(run.created_at)}` }),
+        el('div', { class: 'run-card-meta', text: runCardMeta(run) }),
       ),
       el('div', { class: 'run-card-right' },
         runPill(run),
@@ -3703,6 +3723,140 @@ async function renderSettingsTab(tab, panel) {
   else if (tab === 'providers') renderSettingsProviders(panel);
   else if (tab === 'sources')   renderSettingsSources(panel);
   else if (tab === 'mcp')       renderSettingsMcp(panel);
+  else if (tab === 'preferences') renderSettingsPreferences(panel);
+}
+
+/*
+ * Preferences tab, rendered from the schema the server sends rather than a
+ * hand-built form per field. Adding a key to core/user_settings.py SCHEMA is
+ * enough to make it appear here — no default value is duplicated in the client.
+ */
+async function renderSettingsPreferences(panel) {
+  panel.append(el('p', { class: 'muted small', text: 'Loading…' }));
+
+  let data;
+  try {
+    data = await api('/api/settings');
+  } catch (err) {
+    clear(panel);
+    panel.append(el('p', { class: 'error', text: err.message }));
+    return;
+  }
+  clear(panel);
+
+  state.settings = data.settings;
+  const pending = {};
+
+  const control = (spec) => {
+    const current = data.settings[spec.key];
+    if (spec.type === 'bool') {
+      const box = el('input', { type: 'checkbox', id: `set-${spec.key}` });
+      box.checked = Boolean(current);
+      box.addEventListener('change', () => { pending[spec.key] = box.checked; });
+      return box;
+    }
+    if (spec.type === 'enum') {
+      const sel = el('select', { id: `set-${spec.key}` },
+        ...spec.choices.map(c => el('option', { value: c, text: c })));
+      sel.value = String(current);
+      sel.addEventListener('change', () => { pending[spec.key] = sel.value; });
+      return sel;
+    }
+    if (spec.type === 'int' || spec.type === 'float') {
+      const inp = el('input', {
+        type: 'number', id: `set-${spec.key}`,
+        step: spec.type === 'float' ? '0.05' : '1',
+        min: spec.min, max: spec.max,
+      });
+      inp.value = current;
+      inp.addEventListener('input', () => { pending[spec.key] = inp.value; });
+      return inp;
+    }
+    if (spec.type === 'list') {
+      const inp = el('input', {
+        type: 'text', id: `set-${spec.key}`,
+        placeholder: 'comma-separated, blank for the default set',
+      });
+      inp.value = (current || []).join(', ');
+      inp.addEventListener('input', () => { pending[spec.key] = inp.value; });
+      return inp;
+    }
+    const inp = el('input', { type: 'text', id: `set-${spec.key}` });
+    inp.value = current == null ? '' : String(current);
+    inp.addEventListener('input', () => { pending[spec.key] = inp.value; });
+    return inp;
+  };
+
+  for (const group of data.groups) {
+    const section = el('div', { class: 'settings-section' },
+      el('h3', { text: group.label }));
+    for (const spec of group.settings) {
+      const input = control(spec);
+      section.append(el('label', { class: 'field', for: `set-${spec.key}` },
+        el('span', { class: 'field-label', text: spec.label }),
+        input,
+        spec.help ? el('span', { class: 'field-hint', text: spec.help }) : null,
+      ));
+    }
+    panel.append(section);
+  }
+
+  const saveBtn = el('button', { class: 'btn btn-primary', type: 'button' },
+    'Save preferences');
+  saveBtn.addEventListener('click', async () => {
+    if (!Object.keys(pending).length) { toast('Nothing changed'); return; }
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    try {
+      const res = await api('/api/settings', { method: 'PUT', body: { settings: pending } });
+      state.settings = res.settings;
+      applyPreferences(res.settings);
+      toast('Preferences saved', 'ok');
+      renderSettingsPreferences(panel);      // re-read so coerced values show
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save preferences';
+    }
+  });
+  panel.append(saveBtn);
+}
+
+/*
+ * Apply the presentation-affecting settings to the live document.
+ *
+ * Theme still writes through to localStorage so the next first paint doesn't
+ * have to wait on /api/settings — the account value is authoritative, the
+ * local copy is only there to avoid a flash.
+ */
+function applyPreferences(settings) {
+  if (!settings) return;
+
+  const theme = settings['appearance.theme'] || 'system';
+  if (theme === 'system') {
+    document.documentElement.removeAttribute('data-theme');
+    try { localStorage.removeItem('seeker-theme'); } catch { /* private mode */ }
+  } else {
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem('seeker-theme', theme); } catch { /* private mode */ }
+  }
+
+  document.documentElement.setAttribute(
+    'data-density', settings['appearance.density'] || 'comfortable');
+
+  const scale = Number(settings['appearance.font_scale']) || 1;
+  document.documentElement.style.setProperty('--font-scale', String(scale));
+
+  const perPage = Number(settings['display.runs_per_page']);
+  if (perPage) state.runsPageSize = perPage;
+
+  const sort = settings['display.runs_sort'];
+  if (sort) {
+    runFilters.sort = sort;
+    const sel = $('#run-sort');
+    if (sel) sel.value = sort;
+  }
 }
 
 function renderSettingsProfile(panel) {

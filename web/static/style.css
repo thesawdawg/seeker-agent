@@ -238,11 +238,32 @@ code { font-family: var(--mono); font-size: .88em; }
  * stretched to 1140px for a value like "sawdawg" is not what that bought. Cap
  * the controls and the prose measure, leave the layout alone.
  */
-:root { --measure: 72ch; --control-max: 44rem; }
+:root { --measure: 72ch; --control-max: 44rem; --font-scale: 1; }
+
+/* appearance.font_scale / appearance.density, set from user preferences. */
+html { font-size: calc(100% * var(--font-scale)); }
+[data-density="compact"] .card,
+[data-density="compact"] .settings-section { padding: .7rem .9rem; }
+[data-density="compact"] .run-card { padding: .55rem .9rem; }
+[data-density="compact"] .run-list { gap: .4rem; }
+[data-density="compact"] .field { margin-bottom: .5rem; }
 .field input:not([type="checkbox"]):not([type="radio"]),
 .field select,
 .field textarea,
 .settings-inline-form input { max-width: var(--control-max); width: 100%; }
+
+/*
+ * A checkbox in a .field inherits the stacked label-above-control layout, which
+ * leaves the box floating alone on its own line. Pull it back beside its label.
+ */
+.field:has(> input[type="checkbox"]) {
+  display: flex; align-items: center; gap: .55rem; flex-wrap: wrap;
+}
+.field:has(> input[type="checkbox"]) .field-label { order: 2; margin: 0; }
+.field:has(> input[type="checkbox"]) input[type="checkbox"] {
+  order: 1; width: auto; margin: 0;
+}
+.field:has(> input[type="checkbox"]) .field-hint { order: 3; flex-basis: 100%; }
 .view-head + p, .settings-section > p.muted, .card > p.muted { max-width: var(--measure); }
 .view-centered { min-height: 82vh; display: flex; align-items: center; justify-content: center; }
 .view-head {
