@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 
 from core import database as db
 from core import llm
-from core.utils import generate_id
+from core.utils import generate_id, truncate_words
 from core import progress
 
 logger = logging.getLogger(__name__)
@@ -395,7 +395,8 @@ def run(context: str, run_id: str, **kwargs):
             "gap_origin":           "structural",
             "gap_type":             "temporal",
             "description":          f"Temporal gap: {bn['earlier_year']}-{bn['later_year']} "
-                                    f"({bn['gap_years']} years) in '{bn['question'][:80]}'",
+                                    f"({bn['gap_years']} years) in "
+                                    f"'{truncate_words(bn['question'], 80)}'",
             "significance":         "Medium",
             "significance_reason":  "Bridge papers needed to connect historical to contemporary evidence",
             "tree_node_ref":        bn.get("question_id", ""),

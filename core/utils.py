@@ -176,3 +176,28 @@ def match_themes_to_problem(problem: str, themes: list[dict]) -> tuple[list[dict
         excluded = []
 
     return selected, excluded
+
+
+def truncate_words(text: str, limit: int = 80) -> str:
+    """
+    Shorten `text` to at most `limit` characters without splitting a word.
+
+    Plain slicing produced gap titles that broke mid-token and stranded
+    punctuation — e.g. "...moral reasoning in D&" from "D&D", rendered inside
+    surrounding quotes so the result read as an unclosed quotation. This backs
+    up to the last whitespace boundary and appends an ellipsis instead.
+
+    Returns `text` unchanged when it already fits.
+    """
+    if not text:
+        return ""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rstrip()
+    space = cut.rfind(" ")
+    # Only honour the boundary if it leaves something readable; a single very
+    # long token still has to be cut somewhere.
+    if space > limit * 0.6:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:—-") + "…"

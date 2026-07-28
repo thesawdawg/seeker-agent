@@ -306,6 +306,7 @@ function wireLogin() {
 
   function switchMethod(method) {
     loginMethod = method;
+    try { localStorage.setItem('seeker-auth-method', method); } catch { /* private mode */ }
     document.querySelectorAll('.auth-tab').forEach(t =>
       t.classList.toggle('active', t.dataset.method === method));
     const apikeyPanel = $('#login-apikey');
@@ -472,6 +473,17 @@ async function discoverAuthMethods() {
       const tab = document.querySelector('.auth-tab[data-method="password"]');
       if (tab) tab.hidden = true;
     }
+
+    // Reopen on whichever method signed you in last. The form defaulted to
+    // "API key" every visit, so password users clicked the same tab each time.
+    // Preference only — never the credential, and never before checking the
+    // backend is still enabled.
+    const last = localStorage.getItem('seeker-auth-method');
+    if (last && last !== 'apikey') {
+      const stillEnabled = methods.find(m => m.name === last && m.enabled);
+      const tab = document.querySelector(`.auth-tab[data-method="${last}"]`);
+      if (stillEnabled && tab && !tab.hidden) tab.click();
+    }
   } catch {
     // If the endpoint isn't available (older server), defaults are fine.
   }
@@ -497,6 +509,13 @@ async function afterSignIn() {
   } catch {
     state.isAdmin = false;
     $('#btn-admin').hidden = true;
+  }
+
+  // Storage backend badge: admins only (see init()).
+  const badge = $('#storage-badge');
+  if (badge) {
+    badge.textContent = state.isAdmin ? (state.storage || '') : '';
+    badge.hidden = !state.isAdmin;
   }
 
   await loadModels();
@@ -539,7 +558,17 @@ async function showRuns() {
   $('#runs-empty').hidden = runs.length > 0;
 
   for (const run of runs) {
-    list.append(el('div', { class: 'run-card', onClick: () => openRun(run.run_id) },
+    // Keyboard-operable card. A <button> can't wrap this block-level content,
+    // so it carries the button role and its own Enter/Space handling instead.
+    const open = () => openRun(run.run_id);
+    list.append(el('div', {
+      class: 'run-card', role: 'button', tabindex: '0',
+      'aria-label': `Open run: ${run.problem}`,
+      onClick: open,
+      onKeyDown: (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); }
+      },
+    },
       el('div', {},
         el('div', { class: 'run-card-problem', text: run.problem }),
         el('div', { class: 'run-card-meta',
@@ -788,7 +817,8 @@ async function buildTemplateBar() {
     ...userTpls.map(t => ({ ...t, _builtin: false })),
   ];
 
-  const select = el('select', { id: 'template-select' },
+  const select = el('select', { id: 'template-select',
+                                'aria-label': 'Load a run template' },
     el('option', { value: '', text: '— load template —' }),
     ...builtinTpls.map(t => el('option', { value: `builtin::${t.name}`,
       text: `${t.name} (built-in)` })),
@@ -1158,9 +1188,11 @@ async function handleStatusTransitions(status, previous) {
   }
 }
 
+// Plain-BMP glyphs only. U+23F8 PAUSE renders as tofu wherever the font has no
+// coverage — and awaiting_input is the one state the user must actually notice.
 const STEP_ICON = {
-  pending: '·', running: '', awaiting_input: '⏸',
-  done: '✓', failed: '✗', skipped: '⊘',
+  pending: '·', running: '', awaiting_input: '❚❚',
+  done: '✓', failed: '✗', skipped: '⊖',
 };
 
 function renderRail(status) {
@@ -2209,13 +2241,45 @@ function renderBreak1(panel, draft) {
         }));
       }
       const activeLink = (source.active_link || '').trim();
-      if (activeLink && activeLink !== (doi ? (doi.startsWith('http') ? doi : `https://doi.org/${doi}`) : '')) {
+      const doiUrlForCompare = doi ? (doi.startsWith('http') ? doi : `https://doi.org/${doi}`) : '';
+      if (activeLink && activeLink !== doiUrlForCompare) {
         links.append(el('a', {
           href: activeLink, target: '_blank', rel: 'noopener noreferrer',
           class: 'ref-link', text: 'View source →',
         }));
       }
+      // Library catalog link (from Librarian step)
+      const catalogUrl = (source.catalog_url || '').trim();
+      if (catalogUrl && catalogUrl !== activeLink && catalogUrl !== doiUrlForCompare) {
+        links.append(el('a', {
+          href: catalogUrl, target: '_blank', rel: 'noopener noreferrer',
+          class: 'ref-link', text: 'Library catalog →',
+        }));
+      }
       if (links.children.length) ref.append(links);
+
+      // URL validation warnings (from server-side pre-check)
+      const urlIssues = source._url_issues || [];
+      if (Array.isArray(urlIssues) && urlIssues.length) {
+        const warn = el('div', { class: 'ref-url-warnings' });
+        for (const issue of urlIssues) {
+          warn.append(el('span', { class: 'url-warning-badge', text: `⚠ ${issue}` }));
+        }
+        ref.append(warn);
+      }
+
+      // Library catalog availability badge (from Librarian step)
+      let availRaw = source.availability;
+      if (typeof availRaw === 'string' && availRaw) {
+        try { availRaw = JSON.parse(availRaw); } catch { /* keep as string */ }
+      }
+      if (Array.isArray(availRaw) && availRaw.length) {
+        const availEl = el('div', { class: 'ref-availability' });
+        for (const a of availRaw) {
+          availEl.append(el('span', { class: 'avail-badge', text: String(a) }));
+        }
+        ref.append(availEl);
+      }
 
       // Abstract excerpt
       const abstract = (source.abstract || '').trim();
@@ -2276,6 +2340,16 @@ function renderBreak1(panel, draft) {
         }));
       }
       if (links.children.length) ref.append(links);
+
+      // URL validation warnings (from server-side pre-check)
+      const urlIssues = source._url_issues || [];
+      if (Array.isArray(urlIssues) && urlIssues.length) {
+        const warn = el('div', { class: 'ref-url-warnings' });
+        for (const issue of urlIssues) {
+          warn.append(el('span', { class: 'url-warning-badge', text: `⚠ ${issue}` }));
+        }
+        ref.append(warn);
+      }
 
       const abstract = (source.abstract || '').trim();
       if (abstract) {
@@ -3467,6 +3541,7 @@ async function renderSettingsTab(tab, panel) {
   if (tab === 'profile')      renderSettingsProfile(panel);
   else if (tab === 'providers') renderSettingsProviders(panel);
   else if (tab === 'sources')   renderSettingsSources(panel);
+  else if (tab === 'mcp')       renderSettingsMcp(panel);
 }
 
 function renderSettingsProfile(panel) {
@@ -3701,10 +3776,10 @@ async function refreshUserCredentials() {
 
 async function renderSettingsSources(panel) {
   const keyable = ['scopus', 'semantic_scholar', 'core', 'google_books',
-                   'philpapers', 'openalex', 'pubmed'];
+                   'philpapers', 'openalex', 'pubmed', 'primo'];
 
   panel.append(el('p', { class: 'muted small',
-    text: 'Store a per-user API key for sources that require authentication (Scopus, CORE, Semantic Scholar, etc.). Keys are stored encrypted and used instead of the matching .env variable for your runs.' }));
+    text: 'Store a per-user API key for sources that require authentication (Scopus, CORE, Semantic Scholar, Primo library catalog, etc.). Keys are stored encrypted and used instead of the matching .env variable for your runs. For Primo, also set PRIMO_VID, PRIMO_SCOPE, and PRIMO_TAB in .env — these are institution-specific and shared across users.' }));
 
   // Load existing source keys
   let creds = [];
@@ -3787,6 +3862,74 @@ async function deleteSourceKeyFromSettings(sourceId, panel) {
 function showSettings() {
   showView('settings');
   switchSettingsTab('profile');
+}
+
+async function renderSettingsMcp(panel) {
+  panel.append(el('p', { class: 'muted small',
+    text: 'Globally enable or disable MCP-based connections for your runs. ' +
+          'When disabled, the pipeline skips that connection entirely — ' +
+          'no API calls are made, no tokens consumed. Toggles apply to all ' +
+          'current and future runs.' }));
+
+  let connections = [];
+  try {
+    const res = await api('/api/mcp-toggles');
+    connections = res.connections || [];
+  } catch (err) {
+    panel.append(el('p', { class: 'error', text: err.message }));
+    return;
+  }
+
+  if (!connections.length) {
+    panel.append(el('p', { class: 'muted',
+      text: 'No MCP connections configured.' }));
+    return;
+  }
+
+  const list = el('div', { class: 'mcp-toggle-list' });
+  for (const conn of connections) {
+    const item = el('div', { class: 'mcp-toggle-item' });
+
+    // Toggle switch
+    const toggle = el('label', { class: 'switch' },
+      el('input', {
+        type: 'checkbox',
+        checked: conn.enabled,
+        onChange: ev => toggleMcpConnection(conn.conn_id, ev.target.checked, panel),
+      }),
+      el('span', { class: 'switch-slider' }),
+    );
+    item.append(toggle);
+
+    // Label and description
+    const info = el('div', { class: 'mcp-toggle-info' });
+    info.append(el('div', { class: 'mcp-toggle-label', text: conn.label }));
+    info.append(el('div', { class: 'muted small', text: conn.description }));
+    item.append(info);
+
+    // Status badge
+    item.append(el('span', {
+      class: `mcp-status-badge ${conn.enabled ? 'mcp-status-on' : 'mcp-status-off'}`,
+      text: conn.enabled ? 'Enabled' : 'Disabled',
+    }));
+
+    list.append(item);
+  }
+  panel.append(list);
+}
+
+async function toggleMcpConnection(connId, enabled, panel) {
+  try {
+    await api('/api/mcp-toggles', {
+      method: 'PUT',
+      body: { conn_id: connId, enabled },
+    });
+    toast(`${connId} ${enabled ? 'enabled' : 'disabled'}`, 'ok');
+    renderSettingsMcp(panel);
+  } catch (err) {
+    toast(err.message, 'error');
+    renderSettingsMcp(panel);
+  }
 }
 
 /* Arrow-key navigation within a tablist. Expected of anything using the tab
@@ -3874,7 +4017,9 @@ async function init() {
 
   try {
     const health = await api('/api/health');
-    $('#storage-badge').textContent = health.storage;
+    // Which database backend is running is operator information. Stash it now;
+    // afterSignIn() decides whether this user should see it.
+    state.storage = health.storage;
     if (!health.secrets_configured) {
       toast('Server has no SEEKER_SECRET_KEY — sign-in will be refused.', 'error');
     }

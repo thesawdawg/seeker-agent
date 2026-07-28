@@ -67,6 +67,55 @@
     --running:   #2b6cb0;
 }
 
+/*
+ * Foreground tokens that have to clear WCAG AA (4.5:1) against a *tinted*
+ * backdrop rather than the page background.
+ *
+ * A pill paints its label in the same hue as its 18–20% background wash, which
+ * in light mode left "Break 1" at 3.29:1 and "Complete" at 3.48:1. The status
+ * hues themselves are still used for borders and icons, where the 3:1
+ * non-text threshold applies — so these are separate tokens, not replacements.
+ *
+ * Dark mode already passes (6.3–6.5:1) because the wash darkens instead of
+ * lightening, so there the tokens simply alias the status colors.
+ *
+ * --on-accent is the label on a filled accent button: white-on-#a98bff is
+ * 2.68:1 in dark mode, so dark mode flips it to near-black (6.74:1).
+ *
+ * Ordering matters: these must follow the dark media query so that an explicit
+ * [data-theme] choice wins at equal specificity.
+ */
+:root {
+  --pill-warn-text:    #8a5200;   /* 4.97:1 on #f0e1cc */
+  --pill-ok-text:      #176b3a;   /* 5.23:1 on #d7eadf */
+  --pill-danger-text:  #9c2d21;   /* 5.69:1 on #f4dbd9 */
+  --pill-running-text: #225788;   /* 5.90:1 on #d9e5f1 */
+  --on-accent:         #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --pill-warn-text:    var(--warn);
+    --pill-ok-text:      var(--ok);
+    --pill-danger-text:  var(--danger);
+    --pill-running-text: var(--running);
+    --on-accent:         #1a1030;  /* 6.74:1 on #a98bff */
+  }
+}
+[data-theme="dark"] {
+  --pill-warn-text:    var(--warn);
+  --pill-ok-text:      var(--ok);
+  --pill-danger-text:  var(--danger);
+  --pill-running-text: var(--running);
+  --on-accent:         #1a1030;
+}
+[data-theme="light"] {
+  --pill-warn-text:    #8a5200;
+  --pill-ok-text:      #176b3a;
+  --pill-danger-text:  #9c2d21;
+  --pill-running-text: #225788;
+  --on-accent:         #ffffff;
+}
+
 * { box-sizing: border-box; }
 
 /*
@@ -121,6 +170,30 @@ code { font-family: var(--mono); font-size: .88em; }
 
 #main { margin: 0 auto; padding: 1.5rem 1.2rem 4rem;
   box-sizing: border-box; overflow-x: hidden; }
+
+/*
+ * Visible focus (WCAG 2.4.7). There was previously no :focus styling at all, so
+ * keyboard users had no way to tell where they were. :focus-visible keeps mouse
+ * clicks from painting a ring. The offset needs a matching background colour to
+ * read against, which every focusable surface here already has.
+ */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/*
+ * The page itself is deliberately full-width (commit 0f47fc7), but a text input
+ * stretched to 1140px for a value like "sawdawg" is not what that bought. Cap
+ * the controls and the prose measure, leave the layout alone.
+ */
+:root { --measure: 72ch; --control-max: 44rem; }
+.field input:not([type="checkbox"]):not([type="radio"]),
+.field select,
+.field textarea,
+.settings-inline-form input { max-width: var(--control-max); width: 100%; }
+.view-head + p, .settings-section > p.muted, .card > p.muted { max-width: var(--measure); }
 .view-centered { min-height: 82vh; display: flex; align-items: center; justify-content: center; }
 .view-head {
   display: flex; align-items: flex-start; justify-content: space-between;
@@ -173,7 +246,7 @@ summary:focus-visible,
 }
 .btn:hover:not(:disabled) { border-color: var(--accent); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .btn-ghost { background: transparent; }
 .btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn-block { width: 100%; margin-top: .5rem; }
@@ -260,6 +333,37 @@ summary:focus-visible,
 .settings-inline-form input { flex: 1; min-width: 12rem; }
 .settings-inline-form select { min-width: 10rem; }
 
+/* ── MCP connection toggles ──────────────────────────────────────────── */
+
+.mcp-toggle-list { display: grid; gap: .6rem; }
+.mcp-toggle-item {
+  display: flex; align-items: center; gap: 1rem;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: .8rem 1rem;
+}
+.mcp-toggle-info { flex: 1; }
+.mcp-toggle-label { font-weight: 600; }
+.mcp-status-badge {
+  font-size: .7rem; font-weight: 600; text-transform: uppercase;
+  padding: .15rem .5rem; border-radius: 3px; white-space: nowrap;
+}
+.mcp-status-on  { background: #5a8a5a; color: #fff; }
+.mcp-status-off { background: var(--border); color: var(--muted); }
+
+/* Toggle switch (used by MCP connections tab) */
+.switch { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch-slider {
+  position: absolute; cursor: pointer; inset: 0;
+  background: var(--border); border-radius: 24px; transition: .2s;
+}
+.switch-slider::before {
+  content: ''; position: absolute; height: 18px; width: 18px;
+  left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: .2s;
+}
+.switch input:checked + .switch-slider { background: var(--accent); }
+.switch input:checked + .switch-slider::before { transform: translateX(20px); }
+
 /* ── Run list ────────────────────────────────────────────────────────── */
 
 .run-list { display: grid; gap: .7rem; }
@@ -278,10 +382,10 @@ summary:focus-visible,
   padding: .12rem .55rem; border-radius: 999px;
   background: var(--surface-2); color: var(--text-dim);
 }
-.pill-active   { background: color-mix(in srgb, var(--running) 18%, transparent); color: var(--running); }
-.pill-break    { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
-.pill-done     { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
-.pill-failed   { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+.pill-active   { background: color-mix(in srgb, var(--running) 18%, transparent); color: var(--pill-running-text); }
+.pill-break    { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--pill-warn-text); }
+.pill-done     { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--pill-ok-text); }
+.pill-failed   { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--pill-danger-text); }
 
 /* ── Run detail ──────────────────────────────────────────────────────── */
 
@@ -397,6 +501,20 @@ summary:focus-visible,
   margin-top: .3rem; font-size: .78rem; line-height: 1.4;
   font-style: italic; border-top: 1px solid var(--border);
   padding-top: .3rem;
+}
+.ref-availability { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .3rem; }
+.avail-badge {
+  font-size: .68rem; font-weight: 600; text-transform: uppercase;
+  padding: .1rem .35rem; border-radius: 3px;
+  background: #5a8a5a; color: #fff;
+}
+.avail-badge:nth-child(2) { background: #4a7fb8; }
+.avail-badge:nth-child(3) { background: #8a7a5a; }
+.ref-url-warnings { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .3rem; }
+.url-warning-badge {
+  font-size: .68rem; font-weight: 600;
+  padding: .1rem .35rem; border-radius: 3px;
+  background: #b85a5a; color: #fff;
 }
 
 /* Combined report callout — headline output of the Reporter agent */
