@@ -4099,6 +4099,7 @@ function renderSettingsProfile(panel) {
 }
 
 async function renderSettingsProviders(panel) {
+  clear(panel);            // re-invoked after save/delete — see renderSettingsMcp
   // Load current credentials
   let creds = [];
   try {
@@ -4222,6 +4223,7 @@ async function refreshUserCredentials() {
 }
 
 async function renderSettingsSources(panel) {
+  clear(panel);            // re-invoked after save/delete — see renderSettingsMcp
   const keyable = ['scopus', 'semantic_scholar', 'core', 'google_books',
                    'philpapers', 'openalex', 'pubmed', 'primo'];
 
@@ -4312,6 +4314,11 @@ function showSettings() {
 }
 
 async function renderSettingsMcp(panel) {
+  // These renderers append, and each is re-invoked from its own action
+  // handlers as well as from renderSettingsTab. Only the latter cleared first,
+  // so acting on a row stacked a second copy of the whole tab beneath it.
+  // Clearing here makes the function idempotent whoever calls it.
+  clear(panel);
   panel.append(el('p', { class: 'muted small',
     text: 'Globally enable or disable MCP-based connections for your runs. ' +
           'When disabled, the pipeline skips that connection entirely — ' +
@@ -4337,45 +4344,56 @@ async function renderSettingsMcp(panel) {
   for (const conn of connections) {
     const item = el('div', { class: 'mcp-toggle-item' });
 
-    // Toggle switch
-    const toggle = el('label', { class: 'switch' },
-      el('input', {
-        type: 'checkbox',
-        checked: conn.enabled,
-        onChange: ev => toggleMcpConnection(conn.conn_id, ev.target.checked, panel),
-      }),
-      el('span', { class: 'switch-slider' }),
-    );
-    item.append(toggle);
+    const badge = el('span', {
+      class: `mcp-status-badge ${conn.enabled ? 'mcp-status-on' : 'mcp-status-off'}`,
+      text: conn.enabled ? 'Enabled' : 'Disabled',
+    });
+
+    const box = el('input', {
+      type: 'checkbox',
+      checked: conn.enabled,
+      'aria-label': `Enable ${conn.label}`,
+    });
+    box.addEventListener('change', () =>
+      toggleMcpConnection(conn.conn_id, box.checked, box, badge));
+
+    item.append(el('label', { class: 'switch' },
+      box, el('span', { class: 'switch-slider' })));
 
     // Label and description
     const info = el('div', { class: 'mcp-toggle-info' });
     info.append(el('div', { class: 'mcp-toggle-label', text: conn.label }));
     info.append(el('div', { class: 'muted small', text: conn.description }));
     item.append(info);
-
-    // Status badge
-    item.append(el('span', {
-      class: `mcp-status-badge ${conn.enabled ? 'mcp-status-on' : 'mcp-status-off'}`,
-      text: conn.enabled ? 'Enabled' : 'Disabled',
-    }));
+    item.append(badge);
 
     list.append(item);
   }
   panel.append(list);
 }
 
-async function toggleMcpConnection(connId, enabled, panel) {
+/*
+ * Update the one row that changed rather than re-rendering the tab. A full
+ * re-render also refetched the list and threw away scroll position for a
+ * single boolean.
+ */
+async function toggleMcpConnection(connId, enabled, box, badge) {
+  box.disabled = true;
   try {
     await api('/api/mcp-toggles', {
       method: 'PUT',
       body: { conn_id: connId, enabled },
     });
+    badge.textContent = enabled ? 'Enabled' : 'Disabled';
+    badge.className =
+      `mcp-status-badge ${enabled ? 'mcp-status-on' : 'mcp-status-off'}`;
     toast(`${connId} ${enabled ? 'enabled' : 'disabled'}`, 'ok');
-    renderSettingsMcp(panel);
   } catch (err) {
+    // The write failed, so put the switch back where it was.
+    box.checked = !enabled;
     toast(err.message, 'error');
-    renderSettingsMcp(panel);
+  } finally {
+    box.disabled = false;
   }
 }
 
