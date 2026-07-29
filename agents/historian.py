@@ -217,6 +217,7 @@ def run(context: str, run_id: str, **kwargs):
             "date_collected":     datetime.now(timezone.utc).isoformat(),
             "last_checked":       datetime.now(timezone.utc).isoformat(),
             "link_status":        link_status,
+            "url_origin":         "llm_synthesis",
             "run_id":             run_id,
         })
         if ok:

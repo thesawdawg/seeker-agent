@@ -127,6 +127,7 @@ def test_full_run_stops_at_each_break_in_order(env, stub_agents):
     assert db.get_run(run_id)["status"] == "completed"
     assert stub_agents == [
         "concept_mapper", "grounder", "social", "historian", "gaper",
+        "librarian",
         "vision", "theorist", "rude", "synthesizer", "thinker", "scribe",
         "reporter",
     ]
@@ -268,7 +269,8 @@ def test_resume_never_steps_over_a_failed_step(env, monkeypatch):
 def test_downstream_steps_ordering(env):
     _, pipeline, _ = env
     downstream = pipeline.downstream_steps("gaper")
-    assert downstream[0] == "break1"
+    assert downstream[0] == "librarian"
+    assert downstream[1] == "break1"
     assert downstream[-1] == "reporter"
     assert "grounder" not in downstream
 
@@ -293,6 +295,7 @@ def test_rerun_cascades_and_purges_outputs(env, stub_agents):
     reset = pipeline.reset_step(run_id, "gaper")
 
     assert "gaper" in reset and "vision" in reset and "scribe" in reset
+    assert "librarian" in reset, "librarian is downstream of gaper"
     assert "grounder" not in reset, "upstream work must survive"
     assert db.count("gaps", {"run_id": run_id}) == 0
     assert db.count("implications", {"run_id": run_id}) == 0
@@ -387,10 +390,11 @@ def test_break1_document_includes_full_references_with_backlinks(env, stub_agent
         "type": "seminal", "run_id": run_id, "year": 1962,
         "authors": ["Thomas Kuhn"],
         "doi": "10.1234/test.doi",
-        "active_link": "https://example.com/kuhn1962",
+        "active_link": "https://arxiv.org/abs/2401.00001",
         "abstract": "A foundational work on paradigm shifts in science.",
         "seminal_reason": "Established the concept of paradigm shifts.",
         "source_name": "University of Chicago Press",
+        "url_origin": "provider_api",
     })
 
     payload = pipeline.break_payload(run_id, 1, config)
@@ -408,13 +412,128 @@ def test_break1_document_includes_full_references_with_backlinks(env, stub_agent
     assert "https://doi.org/10.1234/test.doi" in doc_text
 
     # URL backlink
-    assert "https://example.com/kuhn1962" in doc_text
+    assert "https://arxiv.org/abs/2401.00001" in doc_text
 
     # Abstract excerpt
     assert "A foundational work on paradigm shifts" in doc_text
 
     # Source/venue
     assert "University of Chicago Press" in doc_text
+
+
+def test_break1_document_shows_catalog_availability(env, stub_agents):
+    """Break 1 document includes library catalog availability from the
+    Librarian step when catalog data is present on the source."""
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+    pipeline.advance(run_id, config=config)
+    pipeline.submit_break(run_id, 0, "CONFIRMED")
+    pipeline.advance(run_id, config=config)
+
+    db.upsert_source({
+        "source_id": "SRC-CAT1", "title": "A Seminal Book",
+        "type": "seminal", "run_id": run_id, "year": 1962,
+        "authors": ["Test Author"],
+        "seminal_reason": "Foundational work.",
+        "catalog_url": "https://catalog.example.com/record/123",
+        "availability": '["Online", "Physical"]',
+        "catalog_checked": "2026-01-01T00:00:00Z",
+    })
+
+    payload = pipeline.break_payload(run_id, 1, config)
+    doc_text = Path(payload["document"]).read_text()
+
+    assert "A Seminal Book" in doc_text
+    assert "https://catalog.example.com/record/123" in doc_text
+    assert "Catalog availability" in doc_text
+    assert "Online" in doc_text and "Physical" in doc_text
+
+
+def test_librarian_skips_when_primo_not_configured(env, monkeypatch):
+    """Librarian should complete gracefully when Primo is not configured."""
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+
+    # Ensure Primo is not configured
+    from core import primo
+    monkeypatch.setattr(primo, "is_primo_configured", lambda: False)
+
+    from agents.librarian import run as librarian_run
+    # Should not raise
+    librarian_run(f"PROBLEM:\nA problem", run_id)
+
+
+def test_librarian_skips_when_mcp_toggle_disabled(env, monkeypatch):
+    """Librarian should skip when the user has disabled the Primo MCP toggle."""
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+
+    # Create a user and link them as the run owner
+    from core import users
+    users._schema_ready = False
+    users._owner_schema_ready = False
+    users.init_users_tables()
+    users.init_run_owners()
+    user = users.get_or_create("test-key-mcp-toggle", display_name="TestUser")
+    users.claim_run(run_id, user["user_id"], provider="test")
+    # Disable the primo MCP toggle
+    users.set_mcp_toggle(user["user_id"], "primo", enabled=False)
+
+    # Even if Primo is configured, the toggle should prevent the search
+    from core import primo
+    monkeypatch.setattr(primo, "is_primo_configured", lambda: True)
+
+    # Add a source so the librarian would have something to search for
+    db.upsert_source({
+        "source_id": "SRC-TOGGLE1", "title": "A Test Book",
+        "type": "seminal", "run_id": run_id, "year": 2020,
+    })
+
+    from agents.librarian import run as librarian_run
+    librarian_run(f"PROBLEM:\nA problem", run_id)
+
+    # The source should NOT have been enriched (catalog_checked should be None)
+    sources = db.get_sources_by_type("seminal", run_id)
+    assert len(sources) == 1
+    assert sources[0].get("catalog_checked") is None
+    assert sources[0].get("primo_record_id") is None
+
+
+def test_librarian_enriches_sources_with_catalog_data(env, monkeypatch):
+    """Librarian should search Primo and update sources with catalog data."""
+    db, pipeline, config = env
+    run_id = pipeline.create_run("A problem")
+
+    # Add a source to search for
+    db.upsert_source({
+        "source_id": "SRC-LIB1", "title": "The Structure of Scientific Revolutions",
+        "type": "seminal", "run_id": run_id, "year": 1962,
+        "doi": "10.1234/test",
+    })
+
+    # Mock Primo as configured and returning a result
+    from core import primo
+    monkeypatch.setattr(primo, "is_primo_configured", lambda: True)
+    monkeypatch.setattr(primo, "find_source_in_primo", lambda **kwargs: {
+        "record_id": "alma990001234",
+        "title": "The Structure of Scientific Revolutions",
+        "record_url": "https://catalog.example.com/record/990001234",
+        "availability": ["Online", "Physical"],
+        "isbn": "9780226458040",
+        "issn": None,
+    })
+
+    from agents.librarian import run as librarian_run
+    librarian_run(f"PROBLEM:\nA problem", run_id)
+
+    # Verify the source was enriched
+    sources = db.get_sources_by_type("seminal", run_id)
+    assert len(sources) == 1
+    s = sources[0]
+    assert s.get("primo_record_id") == "alma990001234"
+    assert s.get("catalog_url") == "https://catalog.example.com/record/990001234"
+    assert "Online" in (s.get("availability") or "")
+    assert s.get("catalog_checked") is not None
 
 
 def test_payload_reports_a_previously_answered_break(env, stub_agents):

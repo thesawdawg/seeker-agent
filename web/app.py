@@ -1218,8 +1218,9 @@ def preview_break0_theme(run_id: str, theme: str,
     # Use the run_id so the rate limiter coordinates with any in-flight work,
     # but the preview never writes to the sources table.
     run = db.get_run(run_id) or {}
+    config = pipeline.apply_source_overrides(run_id, load_config())
     return social.preview_theme(theme_obj, run_id=run_id,
-                                problem=run.get("problem", ""))
+                                problem=run.get("problem", ""), config=config)
 
 
 @app.post("/api/runs/{run_id}/break/{break_num}")

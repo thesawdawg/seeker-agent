@@ -48,6 +48,7 @@ SERVICE_LABELS = {
     "nber":             "NBER",
     "persee":           "Persée",
     "scopus":           "Scopus",
+    "primo":            "Primo (Ex Libris)",
     "consensus":        "Consensus",
     "openlibrary":      "Open Library",
     "google_books":     "Google Books",

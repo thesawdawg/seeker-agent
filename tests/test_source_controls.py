@@ -128,6 +128,110 @@ class TestSourceOverrides:
         pipeline._schema_ready = False
 
 
+class TestSourceDispatch:
+    def test_disabled_source_never_reaches_handler(self, monkeypatch):
+        from agents import social
+
+        class ExplodingHandler:
+            def search(self, *args, **kwargs):
+                raise AssertionError("disabled source handler was called")
+
+        monkeypatch.setitem(social.SOURCE_HANDLERS, "openalex", ExplodingHandler())
+        config = {
+            "sources": {"openalex": {"enabled": False}},
+            "agent_sources": {"grounder": ["openalex"]},
+        }
+        assert social.search_source(
+            "openalex", "query", [], 5, "RUN-X", config, "grounder"
+        ) == []
+
+    def test_source_outside_agent_route_never_reaches_handler(self, monkeypatch):
+        from agents import social
+
+        class ExplodingHandler:
+            def search(self, *args, **kwargs):
+                raise AssertionError("unrouted source handler was called")
+
+        monkeypatch.setitem(social.SOURCE_HANDLERS, "openalex", ExplodingHandler())
+        config = {
+            "sources": {"openalex": {"enabled": True}},
+            "agent_sources": {"social": []},
+        }
+        assert social.search_source(
+            "openalex", "query", [], 5, "RUN-X", config, "social"
+        ) == []
+
+    def test_allowed_source_reaches_handler(self, monkeypatch):
+        from agents import social
+
+        calls = []
+
+        class RecordingHandler:
+            def search(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                return [{"title": "Result"}]
+
+        monkeypatch.setitem(social.SOURCE_HANDLERS, "openalex", RecordingHandler())
+        config = {
+            "sources": {"openalex": {"enabled": True}},
+            "agent_sources": {"grounder": ["openalex"]},
+        }
+        results = social.search_source(
+            "openalex", "query", [], 5, "RUN-X", config, "grounder"
+        )
+
+        assert results == [{"title": "Result"}]
+        assert len(calls) == 1
+
+    def test_grounder_receives_resolved_config(self, monkeypatch):
+        from agents import grounder
+        from core import pipeline
+
+        resolved = {
+            "sources": {"openalex": {"enabled": False}},
+            "agent_sources": {"grounder": []},
+        }
+        seen = {}
+        monkeypatch.setattr(pipeline, "_instructions", lambda *args: "CONFIRMED")
+        monkeypatch.setattr(
+            grounder, "run",
+            lambda context, run_id, **kwargs: seen.update(kwargs),
+        )
+
+        pipeline._run_agent_step("grounder", "RUN-X", "A problem", resolved)
+
+        assert seen["config"] is resolved
+
+    def test_grounder_uses_supplied_config_instead_of_global(self, client, monkeypatch):
+        from agents import grounder
+        from core import pipeline
+
+        run_id = pipeline.create_run("A problem")
+        responses = iter([
+            '{"sub_questions":[{"id":"Q1","question":"A problem",'
+            '"level":"foundational","rationale":"test"}],'
+            '"decomposition_logic":"test"}',
+            '{"paper_query":"paper query","book_query":"book query",'
+            '"web_query":"web query"}',
+            '{"themes_extracted":[],"seminal_works":[],'
+            '"intellectual_genealogy":"","fundamental_whys":"",'
+            '"original_definitions":[],"intersection_points":[],'
+            '"proposed_new_themes":[],"assumptions_flagged":[]}',
+        ])
+        monkeypatch.setattr(
+            grounder, "load_config",
+            lambda: (_ for _ in ()).throw(AssertionError("global config was loaded")),
+        )
+        monkeypatch.setattr(grounder.llm, "call", lambda *args, **kwargs: next(responses))
+        monkeypatch.setattr(grounder, "_save_doc", lambda *args, **kwargs: None)
+        config = {
+            "sources": {"openalex": {"enabled": False}},
+            "agent_sources": {"grounder": []},
+        }
+
+        grounder.run("PROBLEM:\nA problem", run_id, config=config)
+
+
 # ---------------------------------------------------------------------------
 # Source credentials (U2)
 # ---------------------------------------------------------------------------

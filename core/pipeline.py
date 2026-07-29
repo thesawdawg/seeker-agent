@@ -136,6 +136,8 @@ STEP_DEFS: tuple[StepDef, ...] = (
                      ("argument_tree", {"agent_origin": "historian"}))),
     StepDef("gaper", "agent", "Gaper",
             outputs=(("gaps", {}), ("argument_tree", {"agent_origin": "gaper"}))),
+    StepDef("librarian", "agent", "Librarian",
+            outputs=(("sources", {"added_by": "librarian"}),)),
     StepDef("break1", "break", "Break 1 — Ground Truth Validation", break_num=1),
     StepDef("vision", "agent", "Vision", outputs=(("implications", {}),)),
     StepDef("theorist", "agent", "Theorist", outputs=(("proposals", {}),)),
@@ -646,7 +648,7 @@ def _selected_themes(run_id: str, config: dict) -> list[dict]:
 def _run_agent_step(step_name: str, run_id: str, problem: str, config: dict) -> None:
     """Dispatch one agent step. Raises on failure."""
     from core.context import (
-        for_grounder, for_historian, for_gaper, for_vision, for_theorist,
+        for_grounder, for_historian, for_gaper, for_librarian, for_vision, for_theorist,
         for_rude, for_synthesizer, for_thinker, for_scribe,
         for_understanding_map, for_reporter,
     )
@@ -656,7 +658,7 @@ def _run_agent_step(step_name: str, run_id: str, problem: str, config: dict) -> 
 
     if step_name == "grounder":
         from agents.grounder import run as agent
-        agent(for_grounder(run_id, problem, []), run_id)
+        agent(for_grounder(run_id, problem, []), run_id, config=config)
 
     elif step_name == "social":
         from agents.social import run as agent
@@ -670,6 +672,10 @@ def _run_agent_step(step_name: str, run_id: str, problem: str, config: dict) -> 
     elif step_name == "gaper":
         from agents.gaper import run as agent
         agent(for_gaper(run_id, problem), run_id)
+
+    elif step_name == "librarian":
+        from agents.librarian import run as agent
+        agent(for_librarian(run_id, problem), run_id)
 
     elif step_name == "vision":
         from agents.vision import run as agent

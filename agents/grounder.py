@@ -257,7 +257,9 @@ def run(context: str, run_id: str, **kwargs):
         problem = context.split("PROBLEM:")[1].split("\n\n")[0].strip()
 
     # Load agent source config
-    _config = load_config()
+    _config = kwargs.get("config")
+    if _config is None:
+        _config = load_config()
     _allowed = set(_config.get("agent_sources", {}).get("grounder",
         ["openalex", "semantic_scholar", "consensus",
          "google_books", "open_library", "web"]))
@@ -267,7 +269,8 @@ def run(context: str, run_id: str, **kwargs):
     def _lim(name: str, default: int) -> int:
         return int(_limits.get(name, default))
     def _src_on(name: str) -> bool:
-        return name in _allowed
+        return name in _allowed and \
+            _config.get("sources", {}).get(name, {}).get("enabled", True)
 
     # Initialize argument tree
     from core.argument_tree import TreeBuilder
@@ -402,7 +405,7 @@ def run(context: str, run_id: str, **kwargs):
         # retry/backoff machinery, the circuit breaker, and the global daily
         # limit (review O1 / R1 / E6). Web search stays Anthropic-specific
         # (no OpenAI-compatible equivalent) but still goes through the limiter.
-        from agents.social import SOURCE_HANDLERS
+        from agents.social import SOURCE_HANDLERS, search_source
         from core.rate_limiter import get_limiter, SourceUnavailable
 
         def _run_shared_source(source_id: str, label: str, query: str,
@@ -413,7 +416,10 @@ def run(context: str, run_id: str, **kwargs):
                 return
             progress.note(source_id, "searching", query)
             try:
-                results = handler.search(query, [], limit, run_id=run_id)
+                results = search_source(
+                    source_id, query, [], limit,
+                    run_id, _config, "grounder",
+                )
                 db.record_source_health(
                     run_id, source_id, "grounder",
                     status="ok" if results else "degraded",
@@ -566,6 +572,7 @@ For each seminal work, use the exact title and author from the sources above whe
             "date_collected":    datetime.now(timezone.utc).isoformat(),
             "last_checked":      datetime.now(timezone.utc).isoformat(),
             "link_status":       link_status,
+            "url_origin":        "llm_synthesis",
             "run_id":            run_id,
         })
         if ok:

@@ -18,6 +18,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 from . import database as db
+from .urlcheck import is_well_formed, is_reachable
 
 logger = logging.getLogger(__name__)
 
@@ -65,12 +66,119 @@ def _doi_url(doi: str) -> str:
     return f"https://doi.org/{d}"
 
 
+def _validate_source_for_display(source: dict,
+                                 require_reachable: bool = False) -> dict:
+    """
+    Pre-check all URLs on a source before it appears in a break report.
+
+    Returns a *copy* of `source` with invalid URLs blanked out and a
+    `_url_issues` list describing what was removed, so both the markdown
+    renderer and the web UI can show the researcher what happened.
+
+    Provenance policy
+    -----------------
+    Links are unreliable unless directly extracted from provider response
+    data or a tool call. The `url_origin` field records where a source's
+    URLs came from:
+
+      - "provider_api"   — Social agent, URLs extracted from OpenAlex /
+                            Semantic Scholar / Consensus API responses.
+      - "llm_synthesis"  — Grounder / Historian, URLs emitted by the LLM
+                            during synthesis. These may be copied from
+                            provider results, hallucinated, or mangled —
+                            we cannot tell, so they are never shown.
+      - "library_catalog"— Librarian, catalog_url from the Primo API.
+
+    `active_link` and `doi` are shown only when `url_origin == "provider_api"`.
+    `catalog_url` is always eligible (it is only ever written by the Librarian
+    from a real API response) and is subject to the well-formed + dead-link
+    checks below.
+
+    Legacy rows without a `url_origin` field are treated as `llm_synthesis`
+    (the safe default — hide rather than risk showing a fabricated link).
+
+    Remaining checks (applied to URLs that pass the provenance gate)
+    ---------------------------------------------------------------
+    A URL is kept if it passes is_well_formed AND:
+      - link_status is active / redirected / unreachable / flagged
+        (unreachable is a transient network failure, not evidence the URL
+        is invalid — review V2), OR
+      - link_status is missing/unchecked and a live HEAD check does not
+        return 404/410.
+
+    A URL is removed if:
+      - it fails is_well_formed (LLM placeholder, bad scheme, no host), OR
+      - link_status is "dead" (server returned 404/410 at ingestion time), OR
+      - link_status is missing/unchecked and a live HEAD check returns 404/410.
+
+    The `require_reachable` parameter is retained for backward compatibility
+    but is now redundant — provenance is the primary filter. When True,
+    unchecked/missing link_status rows get a live HEAD check even on
+    provider_api sources, providing an extra verification pass.
+    """
+    s = dict(source)
+    issues: list[str] = []
+    link_status = (s.get("link_status") or "").strip().lower()
+    url_origin = (s.get("url_origin") or "").strip().lower()
+
+    doi_url = _doi_url(s.get("doi") or "")
+    active_link = (s.get("active_link") or "").strip()
+    catalog_url = (s.get("catalog_url") or "").strip()
+
+    # Provenance gate: active_link and doi are only eligible for display
+    # when they came from a provider API response. LLM-synthesized URLs
+    # (Grounder, Historian) and legacy rows without url_origin are hidden.
+    llm_synthesized = url_origin != "provider_api"
+
+    def _check(url: str, label: str, *, allow_llm: bool = False) -> str:
+        """Return the URL if valid, else '' and record an issue."""
+        if not url:
+            return ""
+
+        # Provenance gate for active_link / doi
+        if not allow_llm and llm_synthesized:
+            issues.append(
+                f"{label}: link hidden (url_origin="
+                f"{url_origin or 'missing'} — not from provider API)")
+            return ""
+
+        if not is_well_formed(url):
+            issues.append(f"{label}: malformed URL removed ({url[:80]})")
+            return ""
+        if link_status == "dead":
+            issues.append(f"{label}: dead link removed (404/410 at ingestion)")
+            return ""
+        # If link_status is unchecked or missing, do a live HEAD check
+        if link_status in ("", "unchecked") or require_reachable:
+            if not is_reachable(url, timeout=5.0):
+                issues.append(f"{label}: dead link removed (404/410 on live check)")
+                return ""
+        return url
+
+    valid_doi_url = _check(doi_url, "DOI")
+    valid_active = _check(active_link, "URL")
+    valid_catalog = _check(catalog_url, "Catalog", allow_llm=True)
+
+    # Blank out invalid URLs so downstream renderers don't display them.
+    # For DOI, blank the raw doi field if the constructed URL was invalid.
+    if doi_url and not valid_doi_url:
+        s["doi"] = ""
+    if active_link and not valid_active:
+        s["active_link"] = ""
+    if catalog_url and not valid_catalog:
+        s["catalog_url"] = ""
+
+    s["_url_issues"] = issues
+    return s
+
+
 def _format_full_reference(source: dict) -> str:
     """
     Format a source row as a full reference with backlinks.
 
-    Includes authors, year, title, DOI/URL, and abstract excerpt so the
-    researcher can locate and read the original work to validate claims.
+    Includes authors, year, title, DOI/URL, abstract excerpt, and library
+    catalog availability so the researcher can locate and read the original
+    work to validate claims.
     """
     parts = []
     authors = _format_authors(source.get("authors"))
@@ -92,18 +200,37 @@ def _format_full_reference(source: dict) -> str:
     links = []
     doi_url = _doi_url(source.get("doi") or "")
     active_link = source.get("active_link") or ""
+    catalog_url = source.get("catalog_url") or ""
     if doi_url:
         links.append(f"DOI: [{doi_url}]({doi_url})")
     if active_link and active_link != doi_url:
         links.append(f"URL: [{active_link}]({active_link})")
+    if catalog_url and catalog_url != active_link and catalog_url != doi_url:
+        links.append(f"Catalog: [{catalog_url}]({catalog_url})")
     if links:
         ref += f"  \n  {' · '.join(links)}"
+
+    # Library catalog availability (from Librarian step)
+    availability_raw = source.get("availability") or ""
+    if availability_raw:
+        try:
+            avail_list = json.loads(availability_raw) if isinstance(availability_raw, str) else availability_raw
+            if isinstance(avail_list, list) and avail_list:
+                avail_str = ", ".join(str(a) for a in avail_list)
+                ref += f"  \n  **Catalog availability:** {avail_str}"
+        except (json.JSONDecodeError, ValueError):
+            pass
 
     # Abstract excerpt
     abstract = (source.get("abstract") or "").strip()
     if abstract:
         excerpt = abstract[:300] + ("…" if len(abstract) > 300 else "")
         ref += f"  \n  > {excerpt}"
+
+    # URL validation warnings (from _validate_source_for_display)
+    issues = source.get("_url_issues") or []
+    if issues:
+        ref += f"  \n  ⚠ *{'; '.join(issues)}*"
 
     return ref
 
@@ -176,21 +303,23 @@ def _produce_break1_doc(run_id: str, problem: str) -> Path:
         "",
     ]
     for s in seminal[:30]:
-        sid = s.get("source_id", "")
-        lines.append(f"### [{s.get('year','n.d.')}] {s.get('title','')}")
+        sv = _validate_source_for_display(s)
+        sid = sv.get("source_id", "")
+        lines.append(f"### [{sv.get('year','n.d.')}] {sv.get('title','')}")
         lines.append(f"*Source ID: {sid}*")
         lines.append("")
-        lines.append(f"**Why seminal:** {s.get('seminal_reason','')}")
+        lines.append(f"**Why seminal:** {sv.get('seminal_reason','')}")
         lines.append("")
-        lines.append(_format_full_reference(s))
+        lines.append(_format_full_reference(sv))
         lines.append("")
 
     lines += ["", "---", "", "## Historical Map (Historian)", f"*{len(historical)} historical entries.*", ""]
     for s in historical[:30]:
-        lines.append(f"### [{s.get('year','n.d.')}] {s.get('title','')} [{s.get('phase_tag','')}]")
-        lines.append(f"**Why historical:** {s.get('historical_reason','')}")
+        sv = _validate_source_for_display(s, require_reachable=True)
+        lines.append(f"### [{sv.get('year','n.d.')}] {sv.get('title','')} [{sv.get('phase_tag','')}]")
+        lines.append(f"**Why historical:** {sv.get('historical_reason','')}")
         lines.append("")
-        lines.append(_format_full_reference(s))
+        lines.append(_format_full_reference(sv))
         lines.append("")
 
     lines += ["", "---", "", "## Gap Map (Gaper)", f"*{len(gaps)} gaps identified.*", ""]
@@ -571,8 +700,10 @@ def build_payload(run_id: str, break_num: int, config: dict = None) -> dict:
 
     elif break_num == 1:
         payload["title"] = "Break 1 — Ground Truth Validation"
-        payload["fields"]["seminal"]    = db.get_sources_by_type("seminal", run_id)
-        payload["fields"]["historical"] = db.get_sources_by_type("historical", run_id)
+        payload["fields"]["seminal"]    = [_validate_source_for_display(s)
+                                           for s in db.get_sources_by_type("seminal", run_id)]
+        payload["fields"]["historical"] = [_validate_source_for_display(s, require_reachable=True)
+                                           for s in db.get_sources_by_type("historical", run_id)]
         payload["fields"]["gaps"]       = db.get_gaps(run_id)
         payload["directives"] = [
             {"command": "CONFIRMED", "description": "Everything is correct"},

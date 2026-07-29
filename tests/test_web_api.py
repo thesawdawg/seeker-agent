@@ -447,6 +447,63 @@ def test_admin_user_list_excludes_password_hashes(client, provider):
 
 
 # ---------------------------------------------------------------------------
+# MCP connection toggles — per-user enable/disable for MCP-based sources
+# ---------------------------------------------------------------------------
+
+def test_mcp_toggles_default_enabled(client, provider):
+    """MCP connections should be enabled by default when no preference is set."""
+    sign_in(client, provider)
+    resp = client.get("/api/mcp-toggles")
+    assert resp.status_code == 200
+    conns = resp.json()["connections"]
+    assert len(conns) >= 2
+    ids = {c["conn_id"] for c in conns}
+    assert "consensus" in ids and "primo" in ids
+    for c in conns:
+        assert c["enabled"] is True, f"{c['conn_id']} should default to enabled"
+
+
+def test_mcp_toggle_disable_and_reenable(client, provider):
+    """A user can disable and re-enable an MCP connection."""
+    sign_in(client, provider)
+    # Disable primo
+    resp = client.put("/api/mcp-toggles", json={"conn_id": "primo", "enabled": False})
+    assert resp.status_code == 200
+    assert resp.json()["enabled"] is False
+    # Verify it's persisted
+    resp = client.get("/api/mcp-toggles")
+    conns = {c["conn_id"]: c for c in resp.json()["connections"]}
+    assert conns["primo"]["enabled"] is False
+    assert conns["consensus"]["enabled"] is True  # others unaffected
+    # Re-enable
+    resp = client.put("/api/mcp-toggles", json={"conn_id": "primo", "enabled": True})
+    assert resp.json()["enabled"] is True
+    resp = client.get("/api/mcp-toggles")
+    conns = {c["conn_id"]: c for c in resp.json()["connections"]}
+    assert conns["primo"]["enabled"] is True
+
+
+def test_mcp_toggle_rejects_unknown_connection(client, provider):
+    """Setting a toggle for an unknown MCP connection should return 400."""
+    sign_in(client, provider)
+    resp = client.put("/api/mcp-toggles", json={"conn_id": "nonexistent", "enabled": True})
+    assert resp.status_code == 400
+
+
+def test_mcp_toggle_per_user_isolation(client, provider):
+    """One user disabling an MCP connection should not affect another user."""
+    sign_in(client, provider, name="UserA")
+    client.put("/api/mcp-toggles", json={"conn_id": "consensus", "enabled": False})
+    client.post("/api/auth/logout")
+    # User B signs in with a different key → different user
+    provider.valid_key = "sk-second-key"
+    sign_in(client, provider, name="UserB")
+    resp = client.get("/api/mcp-toggles")
+    conns = {c["conn_id"]: c for c in resp.json()["connections"]}
+    assert conns["consensus"]["enabled"] is True, "User B should be unaffected by User A's toggle"
+
+
+# ---------------------------------------------------------------------------
 # User settings — profile and password management
 # ---------------------------------------------------------------------------
 
@@ -642,7 +699,7 @@ def test_status_reports_step_level_progress(client, provider, stub_agents):
     drain()
 
     status = client.get(f"/api/runs/{run_id}/status").json()
-    assert status["progress"]["total"] == 15
+    assert status["progress"]["total"] == 16
     names = [s["name"] for s in status["steps"]]
     assert names[:3] == ["concept_mapper", "break0", "grounder"]
     by_name = {s["name"]: s for s in status["steps"]}
@@ -1756,6 +1813,12 @@ def test_static_pipeline_shape_is_public(client):
     steps = client.get("/api/steps").json()["steps"]
     assert [s["name"] for s in steps][:2] == ["concept_mapper", "break0"]
     assert any(s["kind"] == "break" for s in steps)
+
+
+def test_historian_is_not_advertised_as_provider_retrieval(client):
+    steps = client.get("/api/steps").json()["steps"]
+    historian = next(s for s in steps if s["name"] == "historian")
+    assert historian["services"] == [{"id": "llm", "label": "Model provider"}]
 
 
 # ---------------------------------------------------------------------------

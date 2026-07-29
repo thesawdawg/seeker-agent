@@ -26,7 +26,7 @@ The system is designed to preserve the researcher's intellectual contribution. I
 Concept Mapper → Break 0 (you confirm themes)
   → Grounder (decomposes problem → searches → builds argument tree)
   → Social (contemporary + bridge papers → extends tree)
-  → Historian (audits tree → historical search → external factors)
+  → Historian (audits tree → synthesizes historical context → external factors)
   → Gaper (structural + analytical gap mapping from tree)
   → Break 1 (you review foundations and gaps)
   → Vision (logical implications)
@@ -420,7 +420,18 @@ Controls which academic themes are available, their search keywords, and which s
 }
 ```
 
-Add or remove sources per agent without touching code.
+Add or remove sources per agent without touching code. Per-run source choices are
+resolved into this routing before a worker advances the run. Grounder and Social
+send every academic-provider query through the shared dispatch guard, which checks
+both `sources.<id>.enabled` and the agent's resolved allowlist. A deselected
+provider therefore receives no query from that run, including Break 0 coverage
+previews and Social bridge searches.
+
+Historian is currently synthesis-only: it reads Grounder and Social evidence,
+calls the configured model, and validates citation links. It is deliberately
+absent from `agent_sources` and must not be presented as querying OpenAlex,
+Semantic Scholar, or Consensus. Link validation is separate from provider
+retrieval.
 
 ### `concept_map.json`
 

@@ -160,6 +160,10 @@ def scopus_inst_token() -> str:
     return get("SCOPUS_INST_TOKEN", required=False, source_id="scopus",
                source_name="Scopus institutional token (optional — email datasupport@elsevier.com)")
 
+def primo_api_key() -> str:
+    return get("PRIMO_API_KEY", required=False, source_id="primo",
+               source_name="Primo (Ex Libris library catalog — for the Librarian step)")
+
 def consensus_mcp_status() -> str:
     """Consensus uses MCP OAuth — check db/consensus_tokens.json for token status."""
     from pathlib import Path

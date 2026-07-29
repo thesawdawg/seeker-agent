@@ -1179,6 +1179,11 @@
       "api_url": "https://api.elsevier.com/content/search/scopus",
       "enabled": true,
       "_note": "Requires SCOPUS_API_KEY + institutional IP or VPN. Institutional token optional."
+    },
+    "primo": {
+      "api_url": "",
+      "enabled": true,
+      "_note": "Ex Libris Primo library catalog. Uses MCPO bridge (docker-compose mcpo service) or direct Primo REST API. Requires PRIMO_API_KEY + PRIMO_VID + PRIMO_SCOPE in .env or user Settings. Used by the Librarian step to find catalog records and availability."
     }
   },
   "recheck_schedule": "twice_weekly",
@@ -1202,15 +1207,15 @@
       "semantic_scholar",
       "consensus"
     ],
-    "historian": [
-      "openalex",
-      "semantic_scholar",
-      "consensus"
+    "librarian": [
+      "primo"
     ],
     "_notes": {
       "social": "Primary discovery layer. consensus removed — high token cost per search across all themes.",
       "grounder": "Seminal work search. consensus removed by default — add back if you want semantic search on sub-questions.",
-      "consensus_standalone": "Consensus is still available via: python3 core/consensus_mcp.py \"query\""
+      "historian": "Synthesis-only: reads Grounder and Social evidence, calls the LLM, and validates citation links; it does not query academic providers.",
+      "consensus_standalone": "Consensus is still available via: python3 core/consensus_mcp.py \"query\"",
+      "librarian": "Library catalog lookup via Primo MCPO bridge. Searches for existing sources in the institution's catalog to find records and availability."
     }
   },
   "run_templates": {
@@ -1357,6 +1362,10 @@
       "gaper": {
         "model_role": "primary",
         "max_tokens": 12000
+      },
+      "librarian": {
+        "model_role": "light",
+        "max_tokens": 8000
       },
       "vision": {
         "model_role": "primary",

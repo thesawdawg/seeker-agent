@@ -49,6 +49,19 @@ x-app: &app
     CORE_API_KEY: ${CORE_API_KEY:-}
     SCOPUS_API_KEY: ${SCOPUS_API_KEY:-}
     SCOPUS_INST_TOKEN: ${SCOPUS_INST_TOKEN:-}
+    # Primo library catalog (Ex Libris) — for the Librarian step.
+    # Get a key from your institution's Ex Libris Developer Network account.
+    PRIMO_API_KEY: ${PRIMO_API_KEY:-}
+    PRIMO_VID: ${PRIMO_VID:-}
+    PRIMO_TAB: ${PRIMO_TAB:-}
+    PRIMO_SCOPE: ${PRIMO_SCOPE:-}
+    PRIMO_INST: ${PRIMO_INST:-}
+    PRIMO_REGION: ${PRIMO_REGION:-na}
+    PRIMO_BASE_URL: ${PRIMO_BASE_URL:-}
+    # MCPO bridge URL — where the Librarian agent calls the Primo MCP server.
+    # If empty, the Librarian falls back to calling the Primo API directly.
+    MCPO_URL: ${MCPO_URL:-http://mcpo:8000}
+    MCPO_API_KEY: ${MCPO_API_KEY:-seeker-mcpo}
   volumes:
     - ./db:/app/db                 # conceptnet.db — read-mostly, large
     - artifacts:/app/artifacts     # Scribe outputs, served through the API
@@ -132,6 +145,28 @@ services:
     command: ["python3", "worker.py"]
     healthcheck:
       disable: true
+
+  # MCPO bridge — exposes the Primo MCP server as OpenAPI-compatible REST
+  # endpoints. The Librarian agent calls this to search the library catalog.
+  # Configure Primo credentials in .env (PRIMO_API_KEY, PRIMO_VID, etc.).
+  # If this service is down or unconfigured, the Librarian gracefully skips.
+  mcpo:
+    build: ./mcp
+    restart: unless-stopped
+    environment:
+      PRIMO_API_KEY: ${PRIMO_API_KEY:-}
+      PRIMO_VID: ${PRIMO_VID:-}
+      PRIMO_TAB: ${PRIMO_TAB:-}
+      PRIMO_SCOPE: ${PRIMO_SCOPE:-}
+      PRIMO_INST: ${PRIMO_INST:-}
+      PRIMO_REGION: ${PRIMO_REGION:-na}
+      PRIMO_BASE_URL: ${PRIMO_BASE_URL:-}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   mysql-data:

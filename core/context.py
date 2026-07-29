@@ -202,6 +202,13 @@ def for_gaper(run_id: str, problem: str, break1_instructions: str = None) -> str
     return ctx
 
 
+def for_librarian(run_id: str, problem: str) -> str:
+    """Context for Librarian — just the problem. The Librarian is a
+    deterministic enrichment step that searches the library catalog for
+    existing sources; it doesn't need LLM context."""
+    return f"PROBLEM:\n{problem}"
+
+
 def _tree_context(run_id: str, max_depth: int = 3, include_evidence: bool = True) -> str:
     """Get argument tree context if tree exists for this run."""
     try:

@@ -77,6 +77,16 @@ CREATE TABLE IF NOT EXISTS user_templates (
     created_at    {TEXT} NOT NULL,
     UNIQUE (user_id, name)
 );
+
+-- Per-user preferences (key-value). Used for global toggles like MCP
+-- connection enable/disable, which apply to all of a user's runs.
+CREATE TABLE IF NOT EXISTS user_preferences (
+    user_id       {ID} NOT NULL,
+    pref_key      {KEY} NOT NULL,
+    pref_value    {TEXT},
+    updated_at    {TEXT},
+    UNIQUE (user_id, pref_key)
+);
 """
 
 _schema_ready = False
@@ -641,3 +651,95 @@ def delete_template(user_id: str, name: str) -> bool:
         "DELETE FROM user_templates WHERE user_id = ? AND name = ?",
         (user_id, name),
     )
+
+
+# ---------------------------------------------------------------------------
+# User preferences (key-value) — MCP toggles, etc.
+# ---------------------------------------------------------------------------
+
+# MCP connection keys that can be toggled. Each maps to a human label and
+# a description shown in the Settings UI. The pref_key stored in the DB is
+# f"mcp.{conn_id}.enabled" with value "1" or "0". Default is enabled ("1")
+# when no row exists — MCP connections are opt-out, not opt-in.
+MCP_CONNECTIONS = [
+    {
+        "conn_id":   "consensus",
+        "label":     "Consensus",
+        "description": "AI-powered semantic search over 200M+ papers via MCP OAuth. "
+                       "Used by Social and Grounder agents for discovery.",
+    },
+    {
+        "conn_id":   "primo",
+        "label":     "Primo (Ex Libris)",
+        "description": "Library catalog search via the MCPO bridge. Used by the "
+                       "Librarian agent to find catalog records and availability. "
+                       "Requires PRIMO_API_KEY + PRIMO_VID in .env or Settings.",
+    },
+]
+
+
+def get_preference(user_id: str, key: str, default: str = "") -> str:
+    """Get a single user preference value."""
+    init_users_tables()
+    rows = db.fetch("user_preferences", {"user_id": user_id, "pref_key": key})
+    if rows:
+        return rows[0].get("pref_value") or default
+    return default
+
+
+def set_preference(user_id: str, key: str, value: str) -> None:
+    """Set a single user preference value (upsert)."""
+    init_users_tables()
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    db.insert("user_preferences", {
+        "user_id":    user_id,
+        "pref_key":   key,
+        "pref_value": value,
+        "updated_at": now,
+    })
+
+
+def get_all_preferences(user_id: str) -> dict:
+    """Get all preferences for a user as a {key: value} dict."""
+    init_users_tables()
+    rows = db.fetch("user_preferences", {"user_id": user_id})
+    return {r.get("pref_key"): r.get("pref_value") or ""
+            for r in rows}
+
+
+def mcp_connection_enabled(user_id: str, conn_id: str) -> bool:
+    """Check if an MCP connection is enabled for a user.
+
+    Default is True (enabled) when no preference is set — MCP connections
+    are opt-out, not opt-in. Set to "0" to disable.
+    """
+    val = get_preference(user_id, f"mcp.{conn_id}.enabled", "1")
+    return val != "0"
+
+
+def get_mcp_toggles(user_id: str) -> list[dict]:
+    """Get all MCP connection toggles for a user, with current state."""
+    prefs = get_all_preferences(user_id)
+    out = []
+    for conn in MCP_CONNECTIONS:
+        key = f"mcp.{conn['conn_id']}.enabled"
+        val = prefs.get(key, "1")
+        out.append({
+            "conn_id":     conn["conn_id"],
+            "label":       conn["label"],
+            "description": conn["description"],
+            "enabled":     val != "0",
+        })
+    return out
+
+
+def set_mcp_toggle(user_id: str, conn_id: str, enabled: bool) -> dict:
+    """Enable or disable an MCP connection for a user."""
+    init_users_tables()
+    # Validate conn_id
+    valid_ids = [c["conn_id"] for c in MCP_CONNECTIONS]
+    if conn_id not in valid_ids:
+        raise ValueError(f"Unknown MCP connection: {conn_id}")
+    set_preference(user_id, f"mcp.{conn_id}.enabled", "1" if enabled else "0")
+    return {"conn_id": conn_id, "enabled": enabled}

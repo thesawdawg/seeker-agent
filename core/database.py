@@ -120,7 +120,15 @@ CREATE TABLE IF NOT EXISTS sources (
     last_checked    {TEXT},
     link_status     {KEY} DEFAULT 'active', -- active / redirected / dead / flagged
     run_id          {ID},
-    previously_seen {INT} DEFAULT 0         -- F5: 1 if this source also appeared in a previous run
+    previously_seen {INT} DEFAULT 0,        -- F5: 1 if this source also appeared in a previous run
+    -- Library catalog enrichment (Librarian step — Primo/Ex Libris)
+    primo_record_id {TEXT},                 -- Primo record ID for catalog lookup
+    catalog_url     {TEXT},                 -- Direct link to the catalog record
+    availability    {TEXT},                 -- JSON array of availability categories
+    isbn            {TEXT},                 -- ISBN from catalog (if different from source)
+    issn            {TEXT},                 -- ISSN from catalog (if different from source)
+    catalog_checked {TEXT},                 -- ISO timestamp of last catalog lookup
+    url_origin      {TEXT}                  -- provider_api | llm_synthesis | library_catalog
 );
 
 -- Dead links archive
@@ -383,6 +391,16 @@ def init_db():
     """Initialize database — create all tables if they don't exist."""
     backend = db_backend.get_backend()
     backend.init_schema(SCHEMA)
+    # Migrate existing tables with new columns (idempotent)
+    db_backend.ensure_columns("sources", {
+        "primo_record_id": "{TEXT}",
+        "catalog_url":     "{TEXT}",
+        "availability":    "{TEXT}",
+        "isbn":            "{TEXT}",
+        "issn":            "{TEXT}",
+        "catalog_checked": "{TEXT}",
+        "url_origin":      "{TEXT}",
+    })
     # These live in their own modules but share the same database
     from core.argument_tree import init_tree_table
     from core.pipeline import init_steps_table

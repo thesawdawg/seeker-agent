@@ -758,6 +758,18 @@ class ConsensusHandler(SourceHandler):
 
     def search(self, query: str, keywords: list[str], limit: int = 10,
                run_id: str = "") -> list[dict]:
+        # Check if the user has disabled the Consensus MCP connection
+        if run_id:
+            try:
+                from core import users
+                owner = users.run_owner(run_id)
+                user_id = owner.get("user_id") if owner else None
+                if user_id and not users.mcp_connection_enabled(user_id, "consensus"):
+                    logger.info("[Consensus] MCP connection disabled by user — skipping.")
+                    return []
+            except Exception:
+                pass  # Don't block on preference lookup errors
+
         try:
             from core.consensus_mcp import search_consensus
         except ImportError:
@@ -900,6 +912,27 @@ SOURCE_HANDLERS = {
     "google_books":     GoogleBooksHandler(),
     "open_library":     OpenLibraryHandler(),
 }
+
+
+def source_allowed(config: dict, agent_name: str, source_id: str) -> bool:
+    source_cfg = (config.get("sources") or {}).get(source_id, {})
+    if not source_cfg.get("enabled", True):
+        return False
+    agent_sources = config.get("agent_sources") or {}
+    allowed = agent_sources.get(agent_name)
+    return allowed is None or source_id in allowed
+
+
+def search_source(source_id: str, query: str, keywords: list[str], limit: int,
+                  run_id: str, config: dict, agent_name: str) -> list[dict]:
+    if not source_allowed(config, agent_name, source_id):
+        logger.info(f"[{agent_name}] {source_id} disabled by run source plan — skipping")
+        return []
+    handler = SOURCE_HANDLERS.get(source_id)
+    if not handler:
+        logger.warning(f"[{agent_name}] No handler for source: {source_id}")
+        return []
+    return handler.search(query, keywords, limit, run_id=run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1088,7 +1121,8 @@ PREVIEW_SOURCES = ["openalex", "semantic_scholar"]
 PREVIEW_LIMIT_PER_SOURCE = 3
 
 
-def preview_theme(theme: dict, run_id: str = "", problem: str = "") -> dict:
+def preview_theme(theme: dict, run_id: str = "", problem: str = "",
+                  config: dict = None) -> dict:
     """
     Fire a single OpenAlex + Semantic Scholar query (3 results each) so the
     researcher can confirm a theme has live coverage before the full Social /
@@ -1107,6 +1141,7 @@ def preview_theme(theme: dict, run_id: str = "", problem: str = "") -> dict:
     """
     from core.rate_limiter import SourceUnavailable
 
+    config = load_config() if config is None else config
     query = _build_query(theme)
     keywords = [kw.get("seed", "") for kw in theme.get("keywords", [])]
     theme_id = theme.get("theme_id", "")
@@ -1114,12 +1149,11 @@ def preview_theme(theme: dict, run_id: str = "", problem: str = "") -> dict:
     sources_hit = 0
 
     for src_id in PREVIEW_SOURCES:
-        handler = SOURCE_HANDLERS.get(src_id)
-        if not handler:
-            continue
         try:
-            res = handler.search(query, keywords, PREVIEW_LIMIT_PER_SOURCE,
-                                 run_id=run_id)
+            res = search_source(
+                src_id, query, keywords, PREVIEW_LIMIT_PER_SOURCE,
+                run_id, config, "social",
+            )
         except SourceUnavailable:
             res = []
         except Exception as e:
@@ -1189,8 +1223,7 @@ def _collect_for_theme(
     # Count enabled sources for progress
     enabled_sources = [
         s for s in sources
-        if config.get("sources", {}).get(s, {}).get("enabled", True)
-        and SOURCE_HANDLERS.get(s)
+        if source_allowed(config, "social", s) and SOURCE_HANDLERS.get(s)
     ]
     total_sources = len(enabled_sources)
 
@@ -1207,8 +1240,7 @@ def _collect_for_theme(
     keywords = [kw.get("seed", "") for kw in theme.get("keywords", [])]
     tasks: list[tuple[str, SourceHandler]] = []
     for source_id in sources:
-        source_cfg = config.get("sources", {}).get(source_id, {})
-        if not source_cfg.get("enabled", True):
+        if not source_allowed(config, "social", source_id):
             continue
         handler = SOURCE_HANDLERS.get(source_id)
         if not handler:
@@ -1224,7 +1256,10 @@ def _collect_for_theme(
 
     def _search_one(src_id: str, handler: SourceHandler) -> None:
         try:
-            res = handler.search(query, keywords, limit_per_source, run_id=run_id)
+            res = search_source(
+                src_id, query, keywords, limit_per_source,
+                run_id, config, "social",
+            )
             search_results[src_id] = res
         except Exception as e:
             search_errors[src_id] = str(e)
@@ -1316,6 +1351,7 @@ def _collect_for_theme(
                 "date_collected":  datetime.now(timezone.utc).isoformat(),
                 "last_checked":    datetime.now(timezone.utc).isoformat(),
                 "link_status":     link_status,
+                "url_origin":      "provider_api",
             }
 
             # A confirmed-gone landing page is worth recording, but it is not
@@ -1676,18 +1712,16 @@ def run(context: str, run_id: str, **kwargs):
         # Search OpenAlex for papers in the gap period
         results = []
         if not agent_allowed or "openalex" in agent_allowed:
-            handler = SOURCE_HANDLERS.get("openalex")
-            if handler:
-                try:
-                    from core.rate_limiter import get_limiter
-                    limiter = get_limiter(run_id)
-                    limiter.wait("openalex")
-                    raw = handler().search(bridge_query, [], limit=5, run_id=run_id)
-                    # Filter to gap period
-                    results = [r for r in raw
-                               if r.get("year") and y1 < r["year"] < y2][:3]
-                except Exception as e:
-                    logger.warning(f"[Social] Bridge search failed: {e}")
+            try:
+                raw = search_source(
+                    "openalex", bridge_query, [], 5,
+                    run_id, config, "social",
+                )
+                # Filter to gap period
+                results = [r for r in raw
+                           if r.get("year") and y1 < r["year"] < y2][:3]
+            except Exception as e:
+                logger.warning(f"[Social] Bridge search failed: {e}")
 
         for r in results:
             # Save to DB as current source
@@ -1697,6 +1731,7 @@ def run(context: str, run_id: str, **kwargs):
             r["type"] = "current"
             r["relevance_rating"] = "Medium"
             r["relevance_reason"] = f"Bridge paper ({y1}-{y2})"
+            r["url_origin"] = "provider_api"
             db.upsert_source(r)
 
             # Add bridge node to tree
