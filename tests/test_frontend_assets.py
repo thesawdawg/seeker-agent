@@ -15,7 +15,69 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 STATIC = Path(__file__).parent.parent / "web" / "static"
 HTML = STATIC / "index.html"
 CSS  = STATIC / "style.css"
-JS   = STATIC / "app.js"
+
+
+def frontend_module_files():
+    """Return every application module reachable from the HTML entry point."""
+    html = HTML.read_text()
+    entries = re.findall(
+        r'<script type="module" src="/static/([^"?]+\.js)(?:\?[^"]*)?"></script>',
+        html,
+    )
+    pending = [STATIC / entry for entry in entries]
+    found = []
+    seen = set()
+    import_pattern = re.compile(
+        r"(?:from\s+|import\s*)['\"]([^'\"]+\.js)(?:\?[^'\"]*)?['\"]"
+    )
+    while pending:
+        module = pending.pop()
+        module = module.resolve()
+        if module in seen:
+            continue
+        seen.add(module)
+        found.append(module)
+        source = module.read_text()
+        for specifier in import_pattern.findall(source):
+            if specifier.startswith("."):
+                pending.append(module.parent / specifier)
+    return found
+
+
+def frontend_javascript():
+    return "\n".join(module.read_text() for module in frontend_module_files())
+
+
+def test_frontend_uses_one_native_module_entry_point():
+    html = HTML.read_text()
+    entries = re.findall(
+        r'<script type="module" src="/static/([^"?]+\.js)(?:\?[^"]*)?"></script>',
+        html,
+    )
+    assert entries == ["js/main.js"]
+    assert len(frontend_module_files()) >= 15
+
+
+def test_core_and_components_do_not_import_features():
+    for module in frontend_module_files():
+        relative = module.relative_to(STATIC).as_posix()
+        if relative.startswith(("js/core/", "js/components/")):
+            assert "/features/" not in module.read_text(), (
+                f"{relative} reverses the dependency direction"
+            )
+
+
+def test_feature_state_changes_use_the_store():
+    assignment = re.compile(r"\bstate\.[A-Za-z_$][A-Za-z0-9_$]*\s*=(?!=)")
+    offenders = {}
+    for module in frontend_module_files():
+        relative = module.relative_to(STATIC).as_posix()
+        if not relative.startswith("js/features/"):
+            continue
+        matches = assignment.findall(module.read_text())
+        if matches:
+            offenders[relative] = matches
+    assert not offenders, f"direct feature state assignments: {offenders}"
 
 
 def test_hidden_attribute_is_enforced():
@@ -82,7 +144,7 @@ def test_no_external_resources():
 
 def test_every_js_element_id_exists():
     """A typo in a selector is silent at runtime — $() just returns null."""
-    js = JS.read_text()
+    js = frontend_javascript()
     html = HTML.read_text()
 
     looked_up = set(re.findall(r"\$\('#([a-zA-Z0-9_-]+)'", js))
@@ -99,12 +161,12 @@ def test_every_js_element_id_exists():
         name for name in looked_up - defined - created
         if not any(p.match(name) for p in patterns)
     }
-    assert not missing, f"app.js looks up ids nothing defines: {sorted(missing)}"
+    assert not missing, f"frontend scripts look up ids nothing defines: {sorted(missing)}"
 
 
 def test_every_api_path_has_a_route():
     """The frontend and the API must not drift apart."""
-    js = JS.read_text()
+    js = frontend_javascript()
     app_py = (Path(__file__).parent.parent / "web" / "app.py").read_text()
 
     called = set()
@@ -128,12 +190,12 @@ def test_every_api_path_has_a_route():
             )
 
     missing = sorted(called - routes)
-    assert not missing, f"app.js calls paths with no route: {missing}"
+    assert not missing, f"frontend scripts call paths with no route: {missing}"
 
 
 def test_modal_can_be_dismissed():
     """The modal needs a cancel path wired, not just a confirm one."""
-    js = JS.read_text()
+    js = frontend_javascript()
     assert "modal-cancel" in js, "no cancel handler for the modal"
     assert re.search(r"key\s*===\s*'Escape'", js), "Escape does not close the modal"
 
@@ -174,7 +236,7 @@ def test_tabs_carry_tablist_semantics():
 
 
 def test_tab_selection_updates_aria_not_only_the_class():
-    js = JS.read_text()
+    js = frontend_javascript()
     assert "markSelectedTab" in js
     assert "aria-selected" in js, (
         "switching tabs must update aria-selected; a screen reader reads that, "
@@ -185,7 +247,7 @@ def test_tab_selection_updates_aria_not_only_the_class():
 def test_tablists_support_arrow_key_navigation():
     """Expected of anything using the tab role, and the reason for the
     roving tabindex."""
-    js = JS.read_text()
+    js = frontend_javascript()
     assert "wireTablistKeys" in js
     for key in ("ArrowLeft", "ArrowRight", "Home", "End"):
         assert key in js
@@ -198,7 +260,7 @@ def test_status_changes_are_announced():
     is the single thing a blind user most needs during a long run.
     """
     html = HTML.read_text()
-    js = JS.read_text()
+    js = frontend_javascript()
     assert re.search(r'id="toasts"[^>]*aria-live', html), \
         "the toast stack must be a live region"
     assert re.search(r"id: 'live-card'[^)]*aria-live", js), \
@@ -223,7 +285,7 @@ def test_reduced_motion_is_respected():
 def test_a_div_with_a_button_role_responds_to_the_keyboard():
     """A real button fires on Enter and Space; one faked with a role must too."""
     html = HTML.read_text()
-    js = JS.read_text()
+    js = frontend_javascript()
     if 'role="button"' not in html:
         pytest.skip("no faked buttons in the markup")
     assert "'Enter'" in js and "' '" in js

@@ -4,8 +4,8 @@ Directive round-trip: browser widgets → backend parsers.
 The web UI's widgets generate directive strings, and the backend parses them.
 These are two separate pieces of code that must agree on one grammar, so this
 feeds the exact strings the frontend emits (see the vocabulary in
-web/static/app.js buildDirectives) into the real parsers and asserts they are
-understood.
+web/static/js/features/break-directives.js) into the real parsers and asserts
+they are understood.
 
 If someone changes the wording on either side, this fails.
 """
@@ -19,7 +19,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core import breaks  # noqa: E402
 
-APP_JS = Path(__file__).parent.parent / "web" / "static" / "app.js"
+BREAKS_JS = (
+    Path(__file__).parent.parent
+    / "web" / "static" / "js" / "features" / "break-directives.js"
+)
 
 
 @pytest.fixture()
@@ -43,10 +46,10 @@ def env(tmp_path, monkeypatch):
 
 def test_frontend_emits_only_known_directives():
     """
-    Every directive template in app.js must be one the backend documents.
+    Every directive template in break-directives.js must be documented.
     Catches a widget inventing a command the pipeline will silently ignore.
     """
-    js = APP_JS.read_text()
+    js = BREAKS_JS.read_text()
     block = js[js.index("function buildDirectives"):]
     block = block[:block.index("\n}")]
 
@@ -54,8 +57,10 @@ def test_frontend_emits_only_known_directives():
     known = {"REMOVE THEME", "ADD THEME", "REMOVE GAP", "CORRECT GAP",
              "ADD GAP", "OVERRIDE SEMINAL", "OVERRIDE VERDICT",
              "SCRIBE OUTPUT"}
-    assert emitted <= known, f"app.js emits unknown directives: {emitted - known}"
-    assert "CONFIRMED" in block, "app.js must fall back to CONFIRMED"
+    assert emitted <= known, (
+        f"break-directives.js emits unknown directives: {emitted - known}"
+    )
+    assert "CONFIRMED" in block, "break-directives.js must fall back to CONFIRMED"
 
 
 # ---------------------------------------------------------------------------

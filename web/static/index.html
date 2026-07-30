@@ -992,9 +992,8 @@ SCRIBE OUTPUT: blog_post | audience: a general academic audience</pre>
 
 <div class="toast-stack" id="toasts" role="status" aria-live="polite"></div>
 
-<!-- Bump ?v= on BOTH assets whenever app.js or style.css changes. index.html is
-     always refetched; these are cached against the query string, so a stale
-     number strands returning users on old code. -->
-<script src="/static/app.js?v=20"></script>
+<!-- Bump the entry point and its import specifiers together. Native modules
+     make dependencies explicit while preserving the no-build deployment. -->
+<script type="module" src="/static/js/main.js?v=22"></script>
 </body>
 </html>

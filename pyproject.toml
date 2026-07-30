@@ -43,7 +43,13 @@ packages = ["core", "agents", "web"]
 py-modules = ["main", "worker"]      # main:main backs the `seeker` entry point
 
 [tool.setuptools.package-data]
-web = ["static/*"]
+web = [
+    "static/*",
+    "static/js/*.js",
+    "static/js/core/*.js",
+    "static/js/components/*.js",
+    "static/js/features/*.js",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
