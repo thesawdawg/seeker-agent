@@ -49,7 +49,7 @@ Concept Mapper → Break 0 (you confirm themes)
 ```bash
 git clone https://github.com/anvix9/basis_research_agents.git
 cd basis_research_agents
-pip install -r requirements.txt
+uv sync --locked
 ```
 
 ### 2. Set up the ConceptNet database
@@ -182,15 +182,15 @@ docker compose down                # stop; volumes and data persist
 ### Without Docker
 
 ```bash
-pip install -r requirements.txt
-export SEEKER_SECRET_KEY=$(python3 -c \
+uv sync --locked --extra web
+export SEEKER_SECRET_KEY=$(uv run python -c \
   "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
 
 # Terminal 1 — HTTP API (never runs pipeline work itself)
-uvicorn web.app:app --host 0.0.0.0 --port 8000
+uv run uvicorn web.app:app --host 0.0.0.0 --port 8000
 
 # Terminal 2 — worker (claims jobs and advances runs)
-python3 worker.py
+uv run python worker.py
 ```
 
 Defaults to SQLite and in-process sessions, which is fine for one web process.
@@ -336,7 +336,7 @@ export MYSQL_HOST=localhost MYSQL_USER=seeker \
        MYSQL_PASSWORD=secret MYSQL_DATABASE=seeker
 ```
 
-MySQL needs the driver: `pip install 'PyMySQL>=1.1.0'`.
+MySQL needs the optional driver set: `uv sync --locked --extra mysql`.
 
 `db/conceptnet.db` stays SQLite on both — it is a read-only reference corpus,
 not pipeline state.
@@ -530,7 +530,8 @@ basis_research_agents/
 ├── .env.example         # API key template
 ├── CONTRIBUTING.md      # Contribution guide
 ├── LICENSE              # MIT
-└── requirements.txt     # Python dependencies
+├── pyproject.toml        # Project metadata and dependency declarations
+└── uv.lock               # Reproducible Python dependency lock
 ```
 
 ## The Argument Tree

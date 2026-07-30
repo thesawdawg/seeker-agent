@@ -12,15 +12,14 @@ Thank you for your interest in contributing. SEEKER is an open research tool and
    nothing about the real cause. Install everything:
 
    ```bash
-   pip install -e '.[dev,web,mysql]'
-   pip install -r requirements.txt
+   uv sync --locked --extra dev --extra web --extra mysql --extra consensus
    ```
 
 3. **Set up the rest of the environment** (see README.md)
 4. **Run the tests** to make sure everything works:
 
    ```bash
-   python3 -m pytest -q
+   uv run --locked pytest -q
    ```
 
    You should see all tests pass, with the MySQL suite skipped unless a

@@ -1,0 +1,9 @@
+[project]
+name = "seeker-primo-bridge"
+version = "1.0.0"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "fastmcp>=2.0",
+    "httpx",
+    "mcpo",
+]
