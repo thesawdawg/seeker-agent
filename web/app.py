@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from core.keys import _load_env
 _load_env()
 
-from core import breaks, crypto, database as db, jobs, llm, pipeline, users
+from core import breaks, crypto, database as db, jobs, llm, pipeline, progress, users
 from core.utils import load_config
 from web import auth
 
@@ -542,10 +542,15 @@ def get_run(run_id: str, user: dict = Depends(auth.resolve_user)):
 
 
 @app.get("/api/runs/{run_id}/status")
-def run_status(run_id: str, user: dict = Depends(auth.resolve_user)):
+def run_status(run_id: str, since_seq: int = 0,
+               user: dict = Depends(auth.resolve_user)):
     """
     The polling endpoint. Deliberately small — the frontend hits this every
     couple of seconds, so it returns step state and nothing heavy.
+
+    since_seq — only events after this sequence number are included, so a
+    long-running step doesn't re-send its whole verbose history every poll.
+    Pass 0 (default) to get the most recent slice.
     """
     auth.require_run_access(user, run_id)
 
@@ -580,7 +585,27 @@ def run_status(run_id: str, user: dict = Depends(auth.resolve_user)):
              "activity": s.get("activity"), "activity_at": s.get("activity_at")}
             for s in state["steps"]
         ],
+        "events": _serialize_events(
+            progress.get_events(run_id, since_seq=since_seq),
+            {s["step_name"]: s["label"] for s in state["steps"]},
+        ),
     }
+
+
+def _serialize_events(rows: list[dict], step_labels: dict) -> list[dict]:
+    """Trim step_events rows to what the frontend needs, verbosely."""
+    return [
+        {
+            "seq":       r["seq"],
+            "step":      step_labels.get(r.get("step_name"), r.get("step_name")),
+            "service":   progress.label_for(r["service"]),
+            "action":    r.get("action") or "",
+            "detail":    r.get("detail") or "",
+            "preview":   r.get("preview") or "",
+            "at":        r.get("created_at"),
+        }
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -594,7 +619,7 @@ import asyncio
 from typing import AsyncGenerator
 
 
-def _run_status_snapshot(run_id: str) -> Optional[dict]:
+def _run_status_snapshot(run_id: str, since_seq: int = 0) -> Optional[dict]:
     """Build the same status dict as the GET /status endpoint, or None
     if the run no longer exists."""
     state = pipeline.get_state(run_id)
@@ -620,6 +645,10 @@ def _run_status_snapshot(run_id: str) -> Optional[dict]:
              "activity": s.get("activity"), "activity_at": s.get("activity_at")}
             for s in state["steps"]
         ],
+        "events": _serialize_events(
+            progress.get_events(run_id, since_seq=since_seq),
+            {s["step_name"]: s["label"] for s in state["steps"]},
+        ),
     }
 
 
@@ -676,16 +705,18 @@ async def run_events(run_id: str, request: Request,
         start = time.monotonic()
         last_sig = None
         last_activity_keys: set[str] = set()
+        last_seq = 0
 
         # Send an initial event immediately so the client doesn't wait 1s
         # for its first status.
-        snap = await asyncio.to_thread(_run_status_snapshot, run_id)
+        snap = await asyncio.to_thread(_run_status_snapshot, run_id, last_seq)
         if snap is None:
             yield _sse_event("error", {"message": "Run not found"})
             return
         yield _sse_event("status", snap)
         last_sig = _status_signature(snap)
         last_activity_keys = _activity_keys(snap)
+        last_seq = max([last_seq] + [e["seq"] for e in snap["events"]])
 
         # If the run is already complete, emit done and close
         if snap["complete"] and not snap["running"]:
@@ -710,8 +741,10 @@ async def run_events(run_id: str, request: Request,
             # Offload to a thread: the snapshot is synchronous DB work, and
             # this is an `async def` generator, so doing it inline blocks the
             # event loop — every other request and every other SSE stream —
-            # once per second per viewer (review O1).
-            snap = await asyncio.to_thread(_run_status_snapshot, run_id)
+            # once per second per viewer (review O1). Only events newer than
+            # last_seq are fetched, so a verbose step doesn't re-send its
+            # whole history every second.
+            snap = await asyncio.to_thread(_run_status_snapshot, run_id, last_seq)
             if snap is None:
                 yield _sse_event("error", {"message": "Run not found"})
                 return
@@ -719,11 +752,13 @@ async def run_events(run_id: str, request: Request,
             sig = _status_signature(snap)
             activity_keys = _activity_keys(snap)
 
-            # Emit a status event if step state or activity changed
-            if sig != last_sig or activity_keys != last_activity_keys:
+            # Emit a status event if step state, activity, or granular events changed
+            if sig != last_sig or activity_keys != last_activity_keys or snap["events"]:
                 yield _sse_event("status", snap)
                 last_sig = sig
                 last_activity_keys = activity_keys
+                if snap["events"]:
+                    last_seq = max(e["seq"] for e in snap["events"])
 
             # Emit a done event and close when the run is complete
             if snap["complete"] and not snap["running"]:
@@ -1436,6 +1471,7 @@ _STEP_LABELS = {
     "break0_review":          "Break 0 — Review",
     "break1_review":          "Break 1 — Review",
     "break2_review":          "Break 2 — Review",
+    "verbose_log":            "Verbose log",
 }
 
 

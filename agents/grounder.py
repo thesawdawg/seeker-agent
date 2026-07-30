@@ -425,6 +425,10 @@ def run(context: str, run_id: str, **kwargs):
                     status="ok" if results else "degraded",
                     results_returned=len(results), calls_made=1,
                 )
+                progress.note(
+                    source_id, f"found {len(results)} result(s)",
+                    preview="\n".join(r.get("title", "")[:120] for r in results[:5]),
+                )
             except SourceUnavailable:
                 results = []
                 db.record_source_health(
@@ -470,6 +474,10 @@ def run(context: str, run_id: str, **kwargs):
                         run_id, "web_search", "grounder",
                         status="ok" if results else "degraded",
                         results_returned=len(results), calls_made=1,
+                    )
+                    progress.note(
+                        "web_search", f"found {len(results)} result(s)",
+                        preview="\n".join(r.get("title", "")[:120] for r in results[:5]),
                     )
                 except Exception as e:
                     logger.warning(f"[Grounder/WebSearch] {e}")

@@ -22,12 +22,74 @@ GET /api/runs/{id}/status.
 import contextvars
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 _current: contextvars.ContextVar = contextvars.ContextVar(
     "seeker_progress", default=None)
+
+ARTIFACTS_DIR = Path(__file__).parent.parent / "artifacts"
+ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Append-only history of every note(), independent of run_steps.activity
+# (which holds only the latest line per step and is overwritten on each
+# call). This is what lets the UI show a scrolling feed with data previews
+# instead of a single "current activity" string, and what the verbose log
+# artifact is built from.
+EVENTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS step_events (
+    event_id    {ID} PRIMARY KEY,
+    run_id      {ID} NOT NULL,
+    seq         {INT} NOT NULL,       -- monotonic per run_id; event_id itself is a random uuid, not orderable
+    step_name   {KEY},
+    service     {KEY} NOT NULL,
+    action      {TEXT},
+    detail      {TEXT},
+    preview     {LONGTEXT},          -- truncated request/response payload
+    created_at  {TEXT} NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_step_events_run ON step_events(run_id, seq);
+"""
+
+_events_schema_ready = False
+_seq_lock = __import__("threading").Lock()
+_seq_counters: dict = {}
+
+
+def _ensure_events_table() -> None:
+    global _events_schema_ready
+    if _events_schema_ready:
+        return
+    from core import db_backend
+    db_backend.get_backend().init_schema(EVENTS_SCHEMA)
+    _events_schema_ready = True
+
+
+def _next_seq(run_id: str) -> int:
+    """A per-run sequence number, monotonic within this process.
+
+    All note() calls for a given run happen inside the one worker process
+    driving that run at any moment, so a process-local counter is enough —
+    no DB round trip or cross-process coordination needed for the common
+    case. Seeded from the existing max on first use so a resumed run (new
+    worker process, same run_id) keeps counting up rather than colliding
+    with seq numbers already written by a previous process.
+    """
+    with _seq_lock:
+        if run_id not in _seq_counters:
+            from core import database as db
+            rows = db.query(
+                "SELECT MAX(seq) AS m FROM step_events WHERE run_id = ?", (run_id,))
+            _seq_counters[run_id] = (rows[0]["m"] or 0) if rows else 0
+        n = _seq_counters[run_id] + 1
+        _seq_counters[run_id] = n
+        return n
+
+
+def verbose_log_path(run_id: str) -> Path:
+    return ARTIFACTS_DIR / f"{run_id}_verbose_log.md"
 
 # Services a step may report. Names match config.json agent_sources, so the UI
 # can line live activity up against the sources a step is configured to use.
@@ -82,11 +144,17 @@ def context() -> Optional[dict]:
     return _current.get()
 
 
-def note(service: str, action: str = "", detail: str = "") -> None:
+def note(service: str, action: str = "", detail: str = "", preview: str = "") -> None:
     """
     Record what the current step is doing, and honour a pending stop.
 
     Safe to call from anywhere, including outside a run.
+
+    preview — an optional glimpse of the data actually sent or received
+    (a query, a handful of result titles, a response snippet). It is kept
+    separate from `detail` because detail lands in the single-line activity
+    shown at the top of the step, while preview is only surfaced in the full
+    event feed and the verbose log artifact, where more room is available.
 
     This doubles as a cancellation checkpoint, and raises RunCancelled if the
     run has been asked to stop. That is deliberate: note() marks the moment
@@ -115,15 +183,85 @@ def note(service: str, action: str = "", detail: str = "") -> None:
         return
 
     logger.info(f"[{ctx['step']}] {text}")
+    now = datetime.now(timezone.utc).isoformat()
+    preview = preview.strip().replace("\r", "") if preview else ""
     try:
         from core import database as db
         db.update(
             "run_steps",
-            {"activity": text[:500], "activity_at": datetime.now(timezone.utc).isoformat()},
+            {"activity": text[:500], "activity_at": now},
             {"run_id": ctx["run_id"], "step_name": ctx["step"]},
         )
     except Exception as e:
         logger.debug(f"[progress] could not record activity: {e}")
+
+    _record_event(ctx["run_id"], ctx["step"], service, action, detail, preview, now)
+
+
+def _record_event(run_id: str, step_name: Optional[str], service: str, action: str,
+                   detail: str, preview: str, at: str) -> None:
+    """Append a row to the durable event feed and the verbose log artifact.
+
+    Never raises — this is diagnostic plumbing, not the pipeline itself.
+    """
+    try:
+        _ensure_events_table()
+        from core import database as db
+        from core.utils import generate_id
+        db.insert("step_events", {
+            "event_id":   generate_id("evt"),
+            "run_id":     run_id,
+            "seq":        _next_seq(run_id),
+            "step_name":  step_name,
+            "service":    service,
+            "action":     action,
+            "detail":     detail[:2000] if detail else None,
+            "preview":    preview[:4000] if preview else None,
+            "created_at": at,
+        })
+    except Exception as e:
+        logger.debug(f"[progress] could not record step event: {e}")
+
+    try:
+        _append_verbose_log(run_id, step_name, service, action, detail, preview, at)
+    except Exception as e:
+        logger.debug(f"[progress] could not append verbose log: {e}")
+
+
+def _append_verbose_log(run_id: str, step_name: Optional[str], service: str, action: str,
+                         detail: str, preview: str, at: str) -> None:
+    line = [f"- `{at}` **{step_name or '-'}** — {label_for(service)}"]
+    if action:
+        line.append(f" · {action}")
+    if detail:
+        line.append(f": {detail}")
+    text = "".join(line) + "\n"
+    if preview:
+        indented = "\n".join(f"  > {p}" for p in preview.splitlines() if p.strip())
+        text += indented + "\n"
+
+    path = verbose_log_path(run_id)
+    is_new = not path.exists()
+    with path.open("a", encoding="utf-8") as f:
+        if is_new:
+            f.write(f"# Verbose log — {run_id}\n\n")
+        f.write(text)
+
+
+def get_events(run_id: str, since_seq: int = 0, limit: int = 300) -> list[dict]:
+    """Events for a run with seq > since_seq, oldest first, capped at limit.
+
+    Used by the status/SSE endpoints to send only what the client hasn't
+    seen yet, so a long run doesn't re-transmit its whole history every tick.
+    """
+    _ensure_events_table()
+    from core import database as db
+    rows = db.query(
+        "SELECT * FROM step_events WHERE run_id = ? AND seq > ? "
+        "ORDER BY seq ASC LIMIT ?",
+        (run_id, since_seq, limit),
+    )
+    return rows
 
 
 def clear() -> None:

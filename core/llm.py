@@ -192,14 +192,26 @@ def reset_model_warnings() -> None:
     _warned_missing_model.clear()
 
 
-def _note_progress(provider: ProviderConfig, model: str) -> None:
+def _note_progress(provider: ProviderConfig, model: str, prompt: str = "") -> None:
     """
-    Surface which model is being called. Imported lazily and never allowed to
-    raise — progress reporting must not be able to break a completion.
+    Surface which model is being called, with a preview of the prompt sent.
+    Imported lazily and never allowed to raise — progress reporting must not
+    be able to break a completion.
     """
     try:
         from core import progress
-        progress.note("llm", f"{provider.name} · {model}")
+        progress.note("llm", f"{provider.name} · {model}",
+                      preview=prompt.strip()[:600] if prompt else "")
+    except Exception:
+        pass
+
+
+def _note_result(provider: ProviderConfig, model: str, text: str) -> None:
+    """Surface a preview of what the model actually returned."""
+    try:
+        from core import progress
+        progress.note("llm", f"{provider.name} · {model} — {len(text)} chars returned",
+                      preview=text.strip()[:600] if text else "")
     except Exception:
         pass
 
@@ -592,9 +604,10 @@ class LLMClient:
             from core import cancellation
             cancellation.check()
 
-            _note_progress(prov, model)
+            _note_progress(prov, model, prompt)
             result = self._attempt(prov, model, prompt, system, profile, agent_name)
             if result:
+                _note_result(prov, model, result)
                 return result
             logger.info(f"[{agent_name}] Falling back past {prov.name}")
 

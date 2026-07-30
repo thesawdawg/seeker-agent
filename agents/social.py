@@ -1296,6 +1296,7 @@ def _collect_for_theme(
                 run_id, source_id, "social",
                 status="failed", last_error=err[:200],
             )
+            progress.note(source_id, f"failed ({theme_id})", preview=err[:400])
         else:
             results = search_results.get(source_id, [])
             limiter.print_source_done(source_id, len(results))
@@ -1304,6 +1305,10 @@ def _collect_for_theme(
                 status="ok" if results else "degraded",
                 results_returned=len(results),
                 calls_made=1,
+            )
+            progress.note(
+                source_id, f"found {len(results)} result(s) ({theme_id})",
+                preview="\n".join(r.get("title", "")[:120] for r in results[:5]),
             )
 
         # Relevance is rated in batches, not one call per paper (review V3).
@@ -1320,8 +1325,13 @@ def _collect_for_theme(
         link_statuses: list[str] = []
         if titled:
             ctx_problem = problem or theme_label
-            progress.note("llm", f"rating {len(titled)} result(s) ({theme_id})")
+            progress.note("llm", f"rating {len(titled)} result(s) ({theme_id})",
+                          preview="\n".join(t.get("title", "")[:100] for t in titled[:5]))
             ratings = rate_relevance_batch(titled, ctx_problem, theme_label)
+            progress.note(
+                "llm", f"rated {len(ratings)} result(s) ({theme_id})",
+                preview="\n".join(f"{r[0] or '-'}: {r[1][:80]}" for r in ratings[:5]),
+            )
 
             if verify_links:
                 def _link(r):

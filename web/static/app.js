@@ -30,8 +30,8 @@ const state = {
   breakDraft: null,   // in-progress break edits
   pollTimer: null,
   eventSource: null,  // SSE connection (F3)
-  activityLog: [],    // accumulated service notes for this run
-  activitySeen: null, // dedupe key set, reset per run
+  activityLog: [],    // accumulated service notes for this run, with previews
+  lastEventSeq: 0,    // cursor into step_events — only fetch what's new
   elapsedTimer: null,
 };
 
@@ -1233,7 +1233,7 @@ async function openRun(runId) {
   state.tab = 'overview';
   state.breakDraft = null;
   state.activityLog = [];
-  state.activitySeen = new Set();
+  state.lastEventSeq = 0;
   state._lastDetailSig = null;  // force a fresh detail fetch for the new run
   showView('run');
 
@@ -1273,7 +1273,6 @@ function startSSE() {
       const status = JSON.parse(ev.data);
       const previous = state.status;
       state.status = status;
-      if (!state.activitySeen) state.activitySeen = new Set();
       recordActivity(status);
       renderRail(status);
       renderTabs(status);
@@ -1330,10 +1329,9 @@ function stopPolling() {
 
 async function refreshStatus() {
   const previous = state.status;
-  const status = await api(`/api/runs/${state.runId}/status`);
+  const status = await api(`/api/runs/${state.runId}/status?since_seq=${state.lastEventSeq}`);
   state.status = status;
 
-  if (!state.activitySeen) state.activitySeen = new Set();
   recordActivity(status);
 
   renderRail(status);
@@ -1683,6 +1681,7 @@ function renderLiveCard(status) {
       ),
       el('p', { class: 'live-activity', id: 'live-activity',
                 text: running.activity || 'starting…' }),
+      latestPreviewLine(running.name),
       el('p', { class: 'live-meta', text:
         `Step ${position} of ${status.progress.total}` +
         (services.length ? ` · uses ${services.join(', ')}` : '') + etaText }),
@@ -1824,31 +1823,34 @@ async function resumeRun() {
 }
 
 /*
- * Accumulate distinct activity notes as polling observes them, so the page
- * shows a history of what was contacted rather than only the latest line.
+ * Accumulate the granular step_events the server streams (F3/verbose),
+ * each carrying a preview of the data actually sent or received, so the
+ * page shows a full history of what happened rather than only the latest
+ * one-line status per step. `state.lastEventSeq` is a cursor into that
+ * feed — every request only asks for events newer than what's already
+ * been rendered, so a long run doesn't re-transmit its whole history.
  */
 function recordActivity(status) {
-  let added = 0;
-  for (const step of status.steps) {
-    if (!step.activity) continue;
-    const key = `${step.name}|${step.activity}`;
-    if (state.activitySeen.has(key)) continue;
-    state.activitySeen.add(key);
+  const events = status.events || [];
+  for (const e of events) {
     state.activityLog.push({
-      at: step.activity_at || new Date().toISOString(),
-      step: step.label,
-      text: step.activity,
+      seq: e.seq,
+      at: e.at || new Date().toISOString(),
+      step: e.step,
+      service: e.service,
+      action: e.action,
+      detail: e.detail,
+      preview: e.preview,
     });
-    added++;
+    if (e.seq > state.lastEventSeq) state.lastEventSeq = e.seq;
   }
-  if (added) {
-    state.activityLog.sort((a, b) => (a.at || '').localeCompare(b.at || ''));
+  if (events.length) {
     // Keep memory bounded on very long runs
-    if (state.activityLog.length > 400) {
-      state.activityLog = state.activityLog.slice(-400);
+    if (state.activityLog.length > 1000) {
+      state.activityLog = state.activityLog.slice(-1000);
     }
   }
-  return added;
+  return events.length;
 }
 
 function renderActivityLog() {
@@ -1870,14 +1872,24 @@ function renderActivityLog() {
 
   const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
   for (const entry of state.activityLog) {
-    const [service, ...rest] = entry.text.split(' — ');
-    log.append(el('div', { class: 'activity-row' },
+    const detailText = entry.action
+      ? `${entry.action}${entry.detail ? `: ${entry.detail}` : ''}`
+      : (entry.detail || '');
+    const row = el('div', { class: 'activity-row' },
       el('span', { class: 'activity-time',
                    text: (entry.at || '').slice(11, 19) }),
-      el('span', { class: 'activity-step', text: entry.step }),
-      el('span', { class: 'activity-service', text: service }),
-      el('span', { class: 'activity-detail', text: rest.join(' — ') }),
-    ));
+      el('span', { class: 'activity-step', text: entry.step || '' }),
+      el('span', { class: 'activity-service', text: entry.service }),
+      el('span', { class: 'activity-detail', text: detailText }),
+    );
+    if (entry.preview) {
+      row.classList.add('has-preview');
+      const pre = el('pre', { class: 'activity-preview', text: entry.preview });
+      row.addEventListener('click', () => row.classList.toggle('is-expanded'));
+      log.append(row, pre);
+    } else {
+      log.append(row);
+    }
   }
   // Follow the tail unless the reader has scrolled up to look at history
   if (atBottom) log.scrollTop = log.scrollHeight;
@@ -1899,6 +1911,27 @@ function startElapsedTicker() {
 function stopElapsedTicker() {
   if (state.elapsedTimer) clearInterval(state.elapsedTimer);
   state.elapsedTimer = null;
+}
+
+/*
+ * The single most recent data preview for a running step, condensed to one
+ * line, so the overview card shows a glimpse of what's actually moving
+ * (a query, a result title, a model response) rather than only the coarse
+ * "Consensus — searching" status line above it.
+ */
+function latestPreviewLine(stepName) {
+  const stepMeta = state.status && state.status.steps.find(s => s.name === stepName);
+  const label = stepMeta ? stepMeta.label : null;
+  for (let i = state.activityLog.length - 1; i >= 0; i--) {
+    const entry = state.activityLog[i];
+    if (label && entry.step !== label) continue;
+    if (entry.preview) {
+      const oneLine = entry.preview.split('\n')[0];
+      return el('p', { class: 'live-preview', text: oneLine.slice(0, 160) });
+    }
+    return null;
+  }
+  return null;
 }
 
 function renderOverview(status) {
