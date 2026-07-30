@@ -1163,7 +1163,7 @@ summary:focus-visible,
 .admin-template-head strong { flex: 1; }
 
 /* ── Guide / workflow documentation ──────────────────────────────────── */
-.guide-card { max-width: 820px; padding: 1.5rem 2rem; }
+.guide-card { padding: 1.5rem 2rem; }
 .guide-toc {
   display: flex; flex-wrap: wrap; gap: .8rem;
   padding: .8rem 1rem; margin-bottom: 1.5rem;
