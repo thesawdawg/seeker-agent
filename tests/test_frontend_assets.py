@@ -193,6 +193,32 @@ def test_every_api_path_has_a_route():
     assert not missing, f"frontend scripts call paths with no route: {missing}"
 
 
+def test_password_login_does_not_wait_for_model_provider():
+    """A down model provider must not delay username/password sign-in."""
+    auth_js = (STATIC / "js" / "features" / "auth.js").read_text()
+    branch = re.search(
+        r"if \(me\.auth_kind === 'password'\) \{(?P<password>.*?)"
+        r"\}\s*else\s*\{(?P<other>.*?)\}",
+        auth_js,
+        re.DOTALL,
+    )
+    assert branch, "afterSignIn must distinguish password-authenticated users"
+    assert "void loadModels()" in branch.group("password")
+    assert "await loadModels()" not in branch.group("password")
+    assert "await loadModels()" in branch.group("other")
+
+
+def test_provider_settings_show_live_health_indicators():
+    settings_js = (STATIC / "js" / "features" / "settings.js").read_text()
+    css = CSS.read_text()
+
+    assert "api('/api/providers/health')" in settings_js
+    assert "provider-health is-checking" in settings_js
+    assert "role: 'status'" in settings_js
+    for status_name in ("is-checking", "is-ok", "is-rejected", "is-unavailable"):
+        assert f".provider-health.{status_name}" in css
+
+
 def test_modal_can_be_dismissed():
     """The modal needs a cancel path wired, not just a confirm one."""
     js = frontend_javascript()

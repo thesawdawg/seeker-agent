@@ -1,11 +1,11 @@
-import { api } from '../core/api-client.js?v=22';
-import { $, $$, clear, el, shortTime } from '../core/dom.js?v=22';
-import { mdToElement } from '../core/markdown.js?v=22';
-import { state, updateState } from '../core/store.js?v=22';
-import { markSelectedTab } from '../components/tabs.js?v=22';
-import { toast } from '../components/toast.js?v=22';
-import { openBreak } from './breaks.js?v=22';
-import { renderOverview } from './run-detail.js?v=22';
+import { api } from '../core/api-client.js?v=24';
+import { $, $$, clear, el, shortTime } from '../core/dom.js?v=24';
+import { mdToElement } from '../core/markdown.js?v=24';
+import { state, updateState } from '../core/store.js?v=24';
+import { markSelectedTab } from '../components/tabs.js?v=24';
+import { toast } from '../components/toast.js?v=24';
+import { openBreak } from './breaks.js?v=24';
+import { renderOverview } from './run-detail.js?v=24';
 
 /* ── artifacts ───────────────────────────────────────────────────────── */
 

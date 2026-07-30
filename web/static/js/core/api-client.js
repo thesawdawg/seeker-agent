@@ -1,5 +1,5 @@
-import { emit } from './events.js?v=22';
-import { updateState } from './store.js?v=22';
+import { emit } from './events.js?v=24';
+import { updateState } from './store.js?v=24';
 
 /* ── API ─────────────────────────────────────────────────────────────── */
 

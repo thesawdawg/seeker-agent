@@ -1,25 +1,25 @@
-import { api } from './core/api-client.js?v=22';
-import { $, $$ } from './core/dom.js?v=22';
-import { on } from './core/events.js?v=22';
-import { showView } from './core/navigation.js?v=22';
-import { state, updateState } from './core/store.js?v=22';
-import { wireModal } from './components/modal.js?v=22';
-import { wireTablistKeys } from './components/tabs.js?v=22';
-import { toast } from './components/toast.js?v=22';
-import { showAdmin, switchAdminTab } from './features/admin.js?v=22';
+import { api } from './core/api-client.js?v=24';
+import { $, $$ } from './core/dom.js?v=24';
+import { on } from './core/events.js?v=24';
+import { showView } from './core/navigation.js?v=24';
+import { state, updateState } from './core/store.js?v=24';
+import { wireModal } from './components/modal.js?v=24';
+import { wireTablistKeys } from './components/tabs.js?v=24';
+import { toast } from './components/toast.js?v=24';
+import { showAdmin, switchAdminTab } from './features/admin.js?v=24';
 import {
   afterSignIn,
   discoverAuthMethods,
   wireLogin,
-} from './features/auth.js?v=22';
-import { wireNewRun } from './features/new-run.js?v=22';
-import { switchTab } from './features/results.js?v=22';
-import { startPolling, stopPolling } from './features/run-detail.js?v=22';
-import { showRuns } from './features/runs.js?v=22';
+} from './features/auth.js?v=24';
+import { wireNewRun } from './features/new-run.js?v=24';
+import { switchTab } from './features/results.js?v=24';
+import { startPolling, stopPolling } from './features/run-detail.js?v=24';
+import { showRuns } from './features/runs.js?v=24';
 import {
   showSettings,
   switchSettingsTab,
-} from './features/settings.js?v=22';
+} from './features/settings.js?v=24';
 
 function wireChrome() {
   const runTabs = $('#run-tabs');

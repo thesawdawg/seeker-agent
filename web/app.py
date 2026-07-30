@@ -14,6 +14,7 @@ Run:
   uvicorn web.app:app --host 0.0.0.0 --port 8000
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -235,6 +236,70 @@ def change_password(body: ChangePasswordRequest,
 @app.get("/api/credentials")
 def list_credentials(user: dict = Depends(auth.resolve_user)):
     return {"credentials": users.list_credentials(user["user_id"])}
+
+
+async def _check_provider_health(user_id: str, credential: dict,
+                                 limiter: asyncio.Semaphore) -> dict:
+    """Probe one stored provider without exposing its key or raw errors."""
+    provider = credential["provider"]
+    cfg = users.provider_config(user_id, provider)
+    if not cfg or not cfg.configured:
+        return {
+            "provider": provider,
+            "status": "unavailable",
+            "message": "Connection is incomplete",
+            "models_count": 0,
+        }
+
+    kind = "anthropic" if provider == "anthropic" else "openai"
+    try:
+        async with limiter:
+            models = await asyncio.to_thread(
+                auth.validate_provider_key, cfg.base_url, cfg.api_key, kind)
+        return {
+            "provider": provider,
+            "status": "ok",
+            "message": "Connected",
+            "models_count": len(models),
+        }
+    except HTTPException as exc:
+        if exc.status_code in (status.HTTP_401_UNAUTHORIZED,
+                               status.HTTP_403_FORBIDDEN):
+            health_status = "rejected"
+            message = "API key rejected"
+        elif exc.status_code == status.HTTP_400_BAD_REQUEST:
+            health_status = "unavailable"
+            message = "Invalid provider URL"
+        else:
+            health_status = "unavailable"
+            message = "Provider unavailable"
+        return {
+            "provider": provider,
+            "status": health_status,
+            "message": message,
+            "models_count": 0,
+        }
+    except Exception:
+        logger.exception("Unexpected health-check failure for provider %s",
+                         provider)
+        return {
+            "provider": provider,
+            "status": "unavailable",
+            "message": "Provider unavailable",
+            "models_count": 0,
+        }
+
+
+@app.get("/api/providers/health")
+async def provider_health(user: dict = Depends(auth.resolve_user)):
+    """Check every model-provider connection stored by the current user."""
+    credentials = users.list_credentials(user["user_id"])
+    limiter = asyncio.Semaphore(5)
+    checks = [
+        _check_provider_health(user["user_id"], credential, limiter)
+        for credential in credentials
+    ]
+    return {"providers": await asyncio.gather(*checks)}
 
 
 @app.put("/api/credentials")

@@ -388,6 +388,19 @@ summary:focus-visible,
   background: var(--bg);
 }
 .cred-provider { font-weight: 600; min-width: 8rem; }
+.provider-health {
+  display: inline-flex; align-items: center; gap: .35rem;
+  margin-left: auto; white-space: nowrap;
+  color: var(--text-dim); font-size: .82rem; font-weight: 600;
+}
+.provider-health-dot {
+  width: .55rem; height: .55rem; border-radius: 50%;
+  background: currentColor;
+}
+.provider-health.is-checking { color: var(--text-dim); }
+.provider-health.is-ok { color: var(--ok); }
+.provider-health.is-rejected,
+.provider-health.is-unavailable { color: var(--danger); }
 
 .admin-cred-form {
   display: grid; gap: .8rem; max-width: 30rem;

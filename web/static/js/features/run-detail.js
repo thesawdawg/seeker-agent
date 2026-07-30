@@ -1,17 +1,17 @@
-import { api } from '../core/api-client.js?v=22';
-import { $, $$, clear, el, shortTime } from '../core/dom.js?v=22';
-import { on } from '../core/events.js?v=22';
-import { showView } from '../core/navigation.js?v=22';
+import { api } from '../core/api-client.js?v=24';
+import { $, $$, clear, el, shortTime } from '../core/dom.js?v=24';
+import { on } from '../core/events.js?v=24';
+import { showView } from '../core/navigation.js?v=24';
 import {
   POLL_ACTIVE_MS,
   POLL_IDLE_MS,
   state,
   updateState,
-} from '../core/store.js?v=22';
-import { openModal } from '../components/modal.js?v=22';
-import { toast } from '../components/toast.js?v=22';
-import { openBreak } from './breaks.js?v=22';
-import { renderArtifacts, switchTab } from './results.js?v=22';
+} from '../core/store.js?v=24';
+import { openModal } from '../components/modal.js?v=24';
+import { toast } from '../components/toast.js?v=24';
+import { openBreak } from './breaks.js?v=24';
+import { renderArtifacts, switchTab } from './results.js?v=24';
 
 /* ── run detail ──────────────────────────────────────────────────────── */
 

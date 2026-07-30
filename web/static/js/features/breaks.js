@@ -1,15 +1,15 @@
-import { api } from '../core/api-client.js?v=22';
-import { $, clear, el } from '../core/dom.js?v=22';
-import { state, updateState } from '../core/store.js?v=22';
-import { toast } from '../components/toast.js?v=22';
+import { api } from '../core/api-client.js?v=24';
+import { $, clear, el } from '../core/dom.js?v=24';
+import { state, updateState } from '../core/store.js?v=24';
+import { toast } from '../components/toast.js?v=24';
 import {
   buildModelGrid,
   collectModelOverrides,
   collectSourceOverrides,
-} from './new-run.js?v=22';
-import { switchTab } from './results.js?v=22';
-import { refreshStatus, startPolling } from './run-detail.js?v=22';
-import { buildDirectives } from './break-directives.js?v=22';
+} from './new-run.js?v=24';
+import { switchTab } from './results.js?v=24';
+import { refreshStatus, startPolling } from './run-detail.js?v=24';
+import { buildDirectives } from './break-directives.js?v=24';
 
 /* ── break screens ───────────────────────────────────────────────────── */
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { getState, subscribe, updateState } from '../core/store.js?v=22';
+import { getState, subscribe, updateState } from '../core/store.js?v=24';
 
 test('updateState applies a named patch and notifies subscribers', () => {
   const changes = [];

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { emit, on } from '../core/events.js?v=22';
+import { emit, on } from '../core/events.js?v=24';
 
 test('event subscriptions receive details and can unsubscribe', () => {
   const received = [];

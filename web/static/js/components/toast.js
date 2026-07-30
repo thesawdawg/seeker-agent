@@ -1,4 +1,4 @@
-import { $, el } from '../core/dom.js?v=22';
+import { $, el } from '../core/dom.js?v=24';
 
 export function toast(message, kind = '') {
   const className = `toast ${kind ? `is-${kind}` : ''}`;

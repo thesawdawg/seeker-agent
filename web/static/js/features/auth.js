@@ -1,9 +1,9 @@
-import { api } from '../core/api-client.js?v=22';
-import { $ } from '../core/dom.js?v=22';
-import { showView } from '../core/navigation.js?v=22';
-import { state, updateState } from '../core/store.js?v=22';
-import { showRuns } from './runs.js?v=22';
-import { applyPreferences } from './settings.js?v=22';
+import { api } from '../core/api-client.js?v=24';
+import { $ } from '../core/dom.js?v=24';
+import { showView } from '../core/navigation.js?v=24';
+import { state, updateState } from '../core/store.js?v=24';
+import { showRuns } from './runs.js?v=24';
+import { applyPreferences } from './settings.js?v=24';
 
 /* ── sign in ─────────────────────────────────────────────────────────── */
 
@@ -271,7 +271,14 @@ export async function afterSignIn() {
     applyPreferences(prefs.settings);
   } catch { /* defaults are fine */ }
 
-  await loadModels();
+  // Password authentication proves identity without involving a model
+  // provider. Do not make a slow or unavailable provider delay completion of
+  // that login; model discovery can update the picker when it finishes.
+  if (me.auth_kind === 'password') {
+    void loadModels();
+  } else {
+    await loadModels();
+  }
   await showRuns();
 }
 

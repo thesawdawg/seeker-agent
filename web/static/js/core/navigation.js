@@ -1,5 +1,5 @@
-import { $, $$ } from './dom.js?v=22';
-import { emit } from './events.js?v=22';
+import { $, $$ } from './dom.js?v=24';
+import { emit } from './events.js?v=24';
 
 /* ── view switching ──────────────────────────────────────────────────── */
 

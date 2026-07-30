@@ -1,11 +1,11 @@
-import { api } from '../core/api-client.js?v=22';
-import { $, $$, clear, el } from '../core/dom.js?v=22';
-import { showView } from '../core/navigation.js?v=22';
-import { state, updateState } from '../core/store.js?v=22';
-import { markSelectedTab } from '../components/tabs.js?v=22';
-import { toast } from '../components/toast.js?v=22';
-import { BASE_URL_DEFAULTS } from './auth.js?v=22';
-import { runFilters, runsPageSize } from './runs.js?v=22';
+import { api } from '../core/api-client.js?v=24';
+import { $, $$, clear, el } from '../core/dom.js?v=24';
+import { showView } from '../core/navigation.js?v=24';
+import { state, updateState } from '../core/store.js?v=24';
+import { markSelectedTab } from '../components/tabs.js?v=24';
+import { toast } from '../components/toast.js?v=24';
+import { BASE_URL_DEFAULTS } from './auth.js?v=24';
+import { runFilters, runsPageSize } from './runs.js?v=24';
 
 // ── User settings ──────────────────────────────────────────────────────
 
@@ -292,12 +292,25 @@ async function renderSettingsProviders(panel) {
   // Existing credentials
   if (creds.length) {
     const list = el('div', { class: 'cred-list' });
+    const healthIndicators = new Map();
     for (const c of creds) {
+      const health = el('span', {
+        class: 'provider-health is-checking',
+        role: 'status',
+        'aria-label': `${c.provider} health: checking`,
+      },
+      el('span', {
+        class: 'provider-health-dot',
+        'aria-hidden': 'true',
+      }),
+      el('span', { text: 'Checking…' }));
+      healthIndicators.set(c.provider, health);
       list.append(el('div', { class: 'cred-item' },
         el('span', { class: 'cred-provider', text: c.provider }),
         el('span', { class: 'muted small', text: c.key_hint || '••••' }),
         el('span', { class: 'muted small',
           text: c.base_url ? c.base_url.slice(0, 40) : '' }),
+        health,
         el('button', {
           class: 'btn btn-ghost btn-small',
           type: 'button',
@@ -306,6 +319,7 @@ async function renderSettingsProviders(panel) {
       ));
     }
     panel.append(list);
+    void checkProviderHealth(healthIndicators);
   } else {
     panel.append(el('p', { class: 'muted',
       text: 'No provider connections configured. Add one below.' }));
@@ -375,6 +389,47 @@ async function renderSettingsProviders(panel) {
         apiKeyInput),
       addBtn,
     ),
+  );
+}
+
+async function checkProviderHealth(indicators) {
+  let providers;
+  try {
+    const result = await api('/api/providers/health');
+    providers = result.providers || [];
+  } catch (err) {
+    for (const [provider, indicator] of indicators) {
+      updateProviderHealthIndicator(
+        indicator, provider, 'unavailable', 'Health check failed');
+    }
+    return;
+  }
+
+  const results = new Map(providers.map(item => [item.provider, item]));
+  for (const [provider, indicator] of indicators) {
+    const result = results.get(provider) || {
+      status: 'unavailable',
+      message: 'No health result returned',
+      models_count: 0,
+    };
+    const modelNote = result.status === 'ok'
+      ? ` · ${result.models_count} model${result.models_count === 1 ? '' : 's'}`
+      : '';
+    updateProviderHealthIndicator(
+      indicator, provider, result.status, `${result.message}${modelNote}`);
+  }
+}
+
+function updateProviderHealthIndicator(indicator, provider, status, message) {
+  indicator.className = `provider-health is-${status}`;
+  indicator.setAttribute('aria-label', `${provider} health: ${message}`);
+  clear(indicator);
+  indicator.append(
+    el('span', {
+      class: 'provider-health-dot',
+      'aria-hidden': 'true',
+    }),
+    el('span', { text: message }),
   );
 }
 

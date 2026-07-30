@@ -654,6 +654,35 @@ def test_put_credentials_validates_before_storing(client, provider):
                for c in client.get("/api/credentials").json()["credentials"])
 
 
+def test_provider_health_checks_every_stored_connection(client, provider):
+    from core import users
+
+    sign_in(client, provider)
+    me = client.get("/api/auth/me").json()
+    users.set_credentials(
+        me["user_id"], "ollama", provider.base_url, provider.valid_key)
+    users.set_credentials(
+        me["user_id"], "vllm", provider.base_url, "sk-wrong")
+    users.set_credentials(
+        me["user_id"], "lm-studio", "http://127.0.0.1:1/api", "sk-any")
+
+    resp = client.get("/api/providers/health")
+    assert resp.status_code == 200
+    health = {item["provider"]: item for item in resp.json()["providers"]}
+
+    assert set(health) == {"open-webui", "ollama", "vllm", "lm-studio"}
+    assert health["open-webui"] == {
+        "provider": "open-webui",
+        "status": "ok",
+        "message": "Connected",
+        "models_count": 2,
+    }
+    assert health["ollama"]["status"] == "ok"
+    assert health["vllm"]["status"] == "rejected"
+    assert health["lm-studio"]["status"] == "unavailable"
+    assert provider.valid_key not in resp.text
+
+
 # ---------------------------------------------------------------------------
 # Runs
 # ---------------------------------------------------------------------------

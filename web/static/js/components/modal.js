@@ -1,5 +1,5 @@
-import { $, clear } from '../core/dom.js?v=22';
-import { toast } from './toast.js?v=22';
+import { $, clear } from '../core/dom.js?v=24';
+import { toast } from './toast.js?v=24';
 
 let confirmHandler = null;
 

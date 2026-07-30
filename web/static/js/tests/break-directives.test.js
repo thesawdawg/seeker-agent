@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildDirectives } from '../features/break-directives.js?v=22';
+import { buildDirectives } from '../features/break-directives.js?v=24';
 
 function draft(overrides = {}) {
   return {

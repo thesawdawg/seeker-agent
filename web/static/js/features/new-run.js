@@ -1,10 +1,10 @@
-import { api } from '../core/api-client.js?v=22';
-import { $, $$, clear, el } from '../core/dom.js?v=22';
-import { showView } from '../core/navigation.js?v=22';
-import { state } from '../core/store.js?v=22';
-import { toast } from '../components/toast.js?v=22';
-import { loadModels } from './auth.js?v=22';
-import { openRun } from './run-detail.js?v=22';
+import { api } from '../core/api-client.js?v=24';
+import { $, $$, clear, el } from '../core/dom.js?v=24';
+import { showView } from '../core/navigation.js?v=24';
+import { state } from '../core/store.js?v=24';
+import { toast } from '../components/toast.js?v=24';
+import { loadModels } from './auth.js?v=24';
+import { openRun } from './run-detail.js?v=24';
 
 /* ── new run ─────────────────────────────────────────────────────────── */
 
